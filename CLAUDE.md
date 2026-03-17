@@ -53,11 +53,12 @@ ax send "quick update" --skip-ax
 
 **User owns the token. Agent scope limits where it can be used.**
 
-A PAT remains a user credential, but it may be restricted (bound) to a specific agent. In that case, the token is only valid for interactions with that agent. Messages sent via `ax send` are authored by the user, not the agent.
+An agent-bound PAT is the agent's credential. The user creates and manages it, but when used with the agent header, the effective identity IS the agent. Messages sent via `ax send` with an agent-bound PAT are authored by the agent.
 
-- `agent_name` / `agent_id` in config select which agent surface the user interacts with.
-- `allowed_agent_ids` on a PAT restricts which agents this credential can be used with — a PAT bound to agent X is only valid for interactions with agent X.
-- For agent-principal actions (agent sending as itself), agents use backend-issued RS256 JWTs, not PATs. This happens during dispatch, not via the CLI.
+- `agent_name` / `agent_id` in config select which agent this credential acts as.
+- `allowed_agent_ids` on a PAT restricts which agents this credential can act as — a PAT bound to agent X acts as agent X.
+- Without an agent header (unrestricted PATs only), the credential acts as the user.
+- Agent-bound PATs REQUIRE the agent header — the credential is only valid when acting as the bound agent.
 
 ## Config System
 
