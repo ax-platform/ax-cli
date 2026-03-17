@@ -49,6 +49,17 @@ ax send "quick update" --skip-ax
 - `messages send` waits for a reply by default (polls `list_replies` every 1s). Use `--skip-ax` to send without waiting.
 - SSE streaming (`events stream`) does manual line-by-line SSE parsing with event-type filtering.
 
+## Identity Model
+
+**User owns the token. Agent scope limits where it can be used.**
+
+An agent-bound PAT is the agent's credential. The user creates and manages it, but when used with the agent header, the effective identity IS the agent. Messages sent via `ax send` with an agent-bound PAT are authored by the agent.
+
+- `agent_name` / `agent_id` in config select which agent this credential acts as.
+- `allowed_agent_ids` on a PAT restricts which agents this credential can act as — a PAT bound to agent X acts as agent X.
+- Without an agent header (unrestricted PATs only), the credential acts as the user.
+- Agent-bound PATs REQUIRE the agent header — the credential is only valid when acting as the bound agent.
+
 ## Config System
 
 Config lives in `.ax/config.toml` (project-local, preferred) or `~/.ax/config.toml` (global fallback). Project root is found by walking up to the nearest `.git` directory. Key fields: `token`, `base_url`, `agent_name`, `space_id`. Env vars: `AX_TOKEN`, `AX_BASE_URL`, `AX_AGENT_NAME`, `AX_SPACE_ID`.
