@@ -3,7 +3,7 @@ import typer
 import httpx
 
 from ..config import (
-    get_client, save_token, resolve_token, resolve_agent_name,
+    get_client, save_agent_binding, save_token, resolve_token, resolve_agent_name,
     _global_config_dir, _local_config_dir, _save_config, _load_local_config,
 )
 from ..output import JSON_OPTION, print_json, print_kv, handle_error, console
@@ -25,6 +25,13 @@ def whoami(as_json: bool = JSON_OPTION):
     bound = data.get("bound_agent")
     if bound:
         data["resolved_space_id"] = bound.get("default_space_id", "none")
+        saved_binding = save_agent_binding(
+            agent_id=bound.get("agent_id"),
+            agent_name=bound.get("agent_name"),
+            space_id=bound.get("default_space_id"),
+        )
+        if saved_binding:
+            data["saved_agent_binding"] = True
     else:
         from ..config import resolve_space_id
         try:

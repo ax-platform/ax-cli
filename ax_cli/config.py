@@ -180,6 +180,33 @@ def save_space_id(space_id: str, *, local: bool = False) -> None:
     _save_config(cfg, local=local)
 
 
+def save_agent_binding(
+    *,
+    agent_id: str | None = None,
+    agent_name: str | None = None,
+    space_id: str | None = None,
+    local_preferred: bool = True,
+) -> bool:
+    """Persist bound-agent context after first successful registration/bind."""
+    local = bool(local_preferred and _local_config_dir())
+    cfg = _load_local_config() if local else _load_global_config()
+
+    changed = False
+    if agent_id and cfg.get("agent_id") != agent_id:
+        cfg["agent_id"] = agent_id
+        changed = True
+    if agent_name and cfg.get("agent_name") != agent_name:
+        cfg["agent_name"] = agent_name
+        changed = True
+    if space_id and cfg.get("space_id") != space_id:
+        cfg["space_id"] = space_id
+        changed = True
+
+    if changed:
+        _save_config(cfg, local=local)
+    return changed
+
+
 def resolve_agent_id() -> str | None:
     """Resolve agent_id: env > config > auto-detect from scoped PAT."""
     env = os.environ.get("AX_AGENT_ID")

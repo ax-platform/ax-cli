@@ -20,6 +20,7 @@ def create(
     name: str = typer.Option(..., "--name", help="Key name"),
     agent_id: Optional[list[str]] = typer.Option(None, "--agent-id", help="Bind to agent UUID (repeatable)"),
     agent: Optional[str] = typer.Option(None, "--agent", help="Bind to agent by name (resolves to UUID)"),
+    unbound: bool = typer.Option(False, "--unbound", help="Create an unbound PAT that binds on first X-Agent-Name use"),
     as_json: bool = JSON_OPTION,
 ):
     """Create a new API key (PAT).
@@ -36,6 +37,9 @@ def create(
 
     # Resolve --agent name to UUID if provided
     bound_ids = list(agent_id) if agent_id else []
+    if unbound and (bound_ids or agent):
+        typer.echo("Error: --unbound cannot be combined with --agent or --agent-id.", err=True)
+        raise typer.Exit(1)
     if agent:
         try:
             agents_data = client.list_agents()
@@ -48,8 +52,14 @@ def create(
         except httpx.HTTPStatusError as e:
             handle_error(e)
 
+    agent_scope = "unbound" if unbound else ("agents" if bound_ids else "all")
+
     try:
-        data = client.create_key(name, allowed_agent_ids=bound_ids or None)
+        data = client.create_key(
+            name,
+            allowed_agent_ids=bound_ids or None,
+            agent_scope=agent_scope,
+        )
     except httpx.HTTPStatusError as e:
         handle_error(e)
     if as_json:
@@ -58,7 +68,9 @@ def create(
         token = data.get("token") or data.get("key") or data.get("raw_token")
         cred_id = data.get("credential_id", data.get("id", ""))
         typer.echo(f"Key created: {cred_id}")
-        if bound_ids:
+        if unbound:
+            typer.echo("Scope: unbound (will bind on first use with X-Agent-Name)")
+        elif bound_ids:
             typer.echo(f"Bound to: {', '.join(bound_ids)}")
         if token:
             typer.echo(f"Token: {token}")

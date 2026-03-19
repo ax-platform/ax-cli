@@ -9,7 +9,7 @@
 
 ## Context
 
-When an unbound PAT is used to register a new agent, the agent gets created in the wrong space. The credential's `space_id` (baked at PAT creation time from the user's active space) is used to determine where the agent lives — but this is fundamentally wrong. The agent's home should be an intrinsic property of the agent, not a side-effect of which space the user happened to be in when they made a token.
+When an unbound credential is used to register a new agent, the agent must not be created in the wrong space. This surfaced first in the PAT/CLI path, but the same rule applies to MCP bootstrap and any future external runtime path. The credential's `space_id` (baked at creation time from the user's active space) must not determine where the agent lives. The agent's home should be an intrinsic property of the agent, not a side-effect of which space the user happened to be in when they made a token.
 
 This spec defines the agent registration lifecycle, space assignment model, and the concierge's role in managing agent placement.
 
@@ -17,7 +17,7 @@ This spec defines the agent registration lifecycle, space assignment model, and 
 
 ## 0. Uncut-Key Binding Model
 
-An unbound PAT is an **uncut key**.
+An unbound credential is an **uncut key**.
 
 It is not yet a durable agent identity. On first valid use it becomes locked to:
 
@@ -31,7 +31,7 @@ The first bind is authoritative:
 - if the canonical name does not exist, the backend auto-registers the agent and then binds the key
 - after bind, `agent_id` is canonical and `X-Agent-Name` becomes a bootstrap and display convenience only
 
-This prevents one loose PAT from silently behaving like a roaming multi-agent credential.
+This prevents one loose credential from silently behaving like a roaming multi-agent credential.
 
 ---
 
@@ -136,9 +136,9 @@ This avoids case-folding drift and cross-space same-name confusion becoming the 
 
 ## 4. Registration Flow (Detailed)
 
-### 4a. Unbound PAT Flow (primary path for external agents)
+### 4a. Unbound Credential Flow (PAT/CLI first; same contract for MCP bootstrap)
 
-**Pre-requisite:** User creates an unbound PAT in the UI or via API.
+**Pre-requisite:** User creates an unbound credential in the UI or via API.
 
 ```
 Step 1: User creates unbound PAT
@@ -174,7 +174,7 @@ Step 4: Agent makes first API call (e.g., ax auth whoami)
        user_id=user.id,
        space_id=user.space_id,        // HOME SPACE, not credential space
        home_space_id=user.space_id,
-       origin="external",             // not "mcp" — this came from a PAT
+       origin="mcp",                  // current schema-valid generic external runtime origin
      )
   f) grant_space_access(agent, user.space_id, is_default=True)
   g) _bind_unbound_credential(credential, agent)
@@ -227,6 +227,8 @@ Response: 400 Bad Request
 ```
 
 This forces the agent to identify itself on first use. No silent pass-through.
+
+The same first-bind and home-space rules apply when MCP bootstrap creates or binds an agent. MCP may differ in transport and auth mechanism, but it must not invent a different placement or binding model.
 
 ---
 
@@ -334,7 +336,7 @@ home_space_id   # User's home space at creation time (stable reference)
 
 # Already exists, behavior change:
 space_id        # Still the primary RLS boundary, but NOW always starts as user.space_id
-origin          # Add "external" for PAT-registered agents (distinguish from "mcp", "cloud")
+origin          # Current schema-valid generic external runtime origin (`mcp`) until a dedicated first-bind origin exists
 ```
 
 ### Binding / Registry Context (Phase 1.5+)
@@ -360,8 +362,7 @@ The existing schema handles everything. The behavioral change is:
 | Origin | Meaning | Created By |
 |--------|---------|-----------|
 | `cloud` | Cloud agent (Bedrock-backed) | UI / API explicit creation |
-| `mcp` | MCP-connected agent | MCP OAuth auto-registration |
-| `external` | External agent via PAT | Unbound PAT auto-registration |
+| `mcp` | Generic external runtime agent | MCP OAuth auto-registration and current unbound credential bootstrap |
 | `external_gateway` | Webhook agent (Moltbot etc.) | UI registration |
 | `space_agent` | Space concierge | System |
 | `agentcore` | Bedrock AgentCore | System |
@@ -380,7 +381,7 @@ The existing schema handles everything. The behavioral change is:
 **`_auto_register_agent()`** — use home space:
 - `space_id=user_home_space_id` (not credential space)
 - Set `home_space_id=user_home_space_id`
-- Set `origin="external"` (not "mcp")
+- Set `origin="mcp"` until a dedicated first-bind origin is added to the schema
 
 **Line 146** — reject unbound with no header:
 - Return 400 instead of silently passing through
@@ -391,11 +392,12 @@ Both PAT paths need to pass `user_home_space_id=principal.user.space_id` to `res
 
 ### 8c. `agent_resolver.py` — Align MCP Path
 
-The MCP auto-register path should also:
+The MCP auto-register path must use the same bootstrap contract:
 - Use `user.space_id` (home) for agent creation
 - Set `home_space_id`
 - Call `grant_space_access()`
 - Call `validate_agent_name()`
+- Persist and prefer `agent_id` after first successful bind where the MCP client can store it
 
 ### 8d. No Migration Needed
 
@@ -462,7 +464,7 @@ This enables:
 ### Phase 1: Fix Registration Space (Backend) — IMMEDIATE
 - Modify `agent_context.py`: use `user.space_id` for agent creation
 - Modify callers (`rls.py`, `jwt_verify.py`): pass user home space
-- Set `home_space_id` and `origin="external"` on auto-registered agents
+- Set `home_space_id` and `origin="mcp"` on auto-registered agents until a dedicated first-bind origin exists
 - Reject unbound tokens without `X-Agent-Name`
 - Add space_id filter to post-binding name resolution
 - Return canonical `agent_id` in first-bind responses and have CLI persist it

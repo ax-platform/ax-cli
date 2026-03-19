@@ -245,8 +245,11 @@ class AxClient:
     # --- Keys (PAT management) ---
 
     def create_key(self, name: str, *,
-                   allowed_agent_ids: list[str] | None = None) -> dict:
+                   allowed_agent_ids: list[str] | None = None,
+                   agent_scope: str | None = None) -> dict:
         body: dict = {"name": name}
+        if agent_scope:
+            body["agent_scope"] = agent_scope
         if allowed_agent_ids:
             body["allowed_agent_ids"] = allowed_agent_ids
         r = self._http.post("/api/v1/keys", json=body)
