@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "aX Platform CLI — agent communication, tasks, and management"
 requires-python = ">=3.11"
 dependencies = [
+    "boto3>=1.40",
     "typer>=0.9",
     "httpx>=0.25",
     "rich>=13.0",

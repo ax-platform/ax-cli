@@ -1,5 +1,6 @@
-"""ax events — SSE event streaming."""
+"""ax events — SSE event streaming and runtime probes."""
 import json
+import os
 import sys
 import threading
 import time
@@ -313,3 +314,223 @@ def probe(
         )
     else:
         console.print("  tools:            none")
+
+
+def _extract_return_control_tools(return_controls: list[dict]) -> list[dict[str, str]]:
+    tools: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for rc in return_controls:
+        for invocation in rc.get("invocationInputs", []) or []:
+            func_input = invocation.get("functionInvocationInput", {}) or {}
+            action_group = str(func_input.get("actionGroup") or "")
+            function_name = str(func_input.get("function") or "")
+            if not function_name:
+                continue
+            key = (action_group, function_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            tools.append({
+                "action_group": action_group,
+                "function": function_name,
+            })
+    return tools
+
+
+@app.command("probe-runtime")
+def probe_runtime(
+    prompt: str = typer.Argument(
+        "Give me a three paragraph explanation of why streaming UX matters for agents. Do not call any tools.",
+        help="Prompt sent directly to the Bedrock runtime",
+    ),
+    mode: str = typer.Option(
+        "bedrock-agent",
+        "--mode",
+        help="Runtime mode: bedrock-agent or agentcore-runtime",
+    ),
+    region: str = typer.Option(
+        os.getenv("BEDROCK_AGENT_REGION", os.getenv("AWS_REGION", "us-west-2")),
+        "--region",
+        help="AWS region for the runtime client",
+    ),
+    agent_id: str = typer.Option(
+        os.getenv("BEDROCK_AGENT_ID", ""),
+        "--agent-id",
+        help="Bedrock agent ID for --mode bedrock-agent",
+    ),
+    agent_alias_id: str = typer.Option(
+        os.getenv("BEDROCK_AGENT_ALIAS_ID", ""),
+        "--agent-alias-id",
+        help="Bedrock agent alias ID for --mode bedrock-agent",
+    ),
+    agent_runtime_arn: str = typer.Option(
+        os.getenv("AGENTCORE_RUNTIME_ARN", ""),
+        "--agent-runtime-arn",
+        help="AgentCore runtime ARN for --mode agentcore-runtime",
+    ),
+    session_id: Optional[str] = typer.Option(
+        None,
+        "--session-id",
+        help="Reuse a specific runtime session ID instead of generating one",
+    ),
+    enable_trace: bool = typer.Option(
+        False,
+        "--enable-trace",
+        help="Enable Bedrock trace events where supported",
+    ),
+    as_json: bool = JSON_OPTION,
+):
+    """Probe the AWS runtime directly and measure native chunk timing."""
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+    except ModuleNotFoundError:
+        typer.echo(
+            "Error: runtime probe requires boto3 in the ax-cli environment. "
+            "Install boto3 or run the probe from an environment that already has it.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    probe_session_id = session_id or f"cli-runtime-probe-{int(time.time() * 1000)}"
+    boto_config = BotoConfig(
+        region_name=region,
+        connect_timeout=5.0,
+        read_timeout=120.0,
+        retries={"max_attempts": 3, "mode": "adaptive"},
+    )
+
+    if mode == "bedrock-agent":
+        if not agent_id or not agent_alias_id:
+            typer.echo(
+                "Error: --agent-id and --agent-alias-id are required for --mode bedrock-agent",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        client = boto3.client("bedrock-agent-runtime", config=boto_config)
+        start = time.monotonic()
+        response = client.invoke_agent(
+            agentId=agent_id,
+            agentAliasId=agent_alias_id,
+            sessionId=probe_session_id,
+            inputText=prompt,
+            enableTrace=enable_trace,
+        )
+
+        chunk_times: list[tuple[float, int, str]] = []
+        chunk_chars = 0
+        trace_count = 0
+        return_controls: list[dict] = []
+        for event in response.get("completion", []):
+            event_ts = time.monotonic() - start
+            if "chunk" in event:
+                text = event["chunk"].get("bytes", b"").decode("utf-8")
+                if text:
+                    chunk_times.append((event_ts, len(text), text[:120]))
+                    chunk_chars += len(text)
+            elif "trace" in event:
+                trace_count += 1
+            elif "returnControl" in event:
+                return_controls.append(event["returnControl"])
+
+        report = {
+            "mode": mode,
+            "region": region,
+            "session_id": probe_session_id,
+            "agent_id": agent_id,
+            "agent_alias_id": agent_alias_id,
+            "metrics": {
+                "chunk_count": len(chunk_times),
+                "first_chunk_ms": round(chunk_times[0][0] * 1000, 1) if chunk_times else None,
+                "second_chunk_ms": round(chunk_times[1][0] * 1000, 1) if len(chunk_times) > 1 else None,
+                "last_chunk_ms": round(chunk_times[-1][0] * 1000, 1) if chunk_times else None,
+                "chunk_chars": chunk_chars,
+                "trace_count": trace_count,
+                "return_control_count": len(return_controls),
+            },
+            "return_control_tools": _extract_return_control_tools(return_controls),
+            "chunk_previews": [item[2] for item in chunk_times[:3]],
+        }
+    elif mode == "agentcore-runtime":
+        if not agent_runtime_arn:
+            typer.echo(
+                "Error: --agent-runtime-arn is required for --mode agentcore-runtime",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        client = boto3.client("bedrock-agentcore", config=boto_config)
+        start = time.monotonic()
+        response = client.invoke_agent_runtime(
+            agentRuntimeArn=agent_runtime_arn,
+            runtimeSessionId=probe_session_id,
+            payload=prompt.encode("utf-8"),
+        )
+
+        body = response.get("response")
+        line_times: list[tuple[float, int, str]] = []
+        text_chars = 0
+        if hasattr(body, "iter_lines"):
+            for raw_line in body.iter_lines(chunk_size=64):
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8")
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if not data:
+                    continue
+                event_ts = time.monotonic() - start
+                line_times.append((event_ts, len(data), data[:120]))
+                text_chars += len(data)
+        else:
+            raw = body.read() if hasattr(body, "read") else body
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            if raw:
+                line_times.append((time.monotonic() - start, len(raw), raw[:120]))
+                text_chars += len(raw)
+
+        report = {
+            "mode": mode,
+            "region": region,
+            "session_id": probe_session_id,
+            "agent_runtime_arn": agent_runtime_arn,
+            "content_type": response.get("contentType"),
+            "metrics": {
+                "chunk_count": len(line_times),
+                "first_chunk_ms": round(line_times[0][0] * 1000, 1) if line_times else None,
+                "second_chunk_ms": round(line_times[1][0] * 1000, 1) if len(line_times) > 1 else None,
+                "last_chunk_ms": round(line_times[-1][0] * 1000, 1) if line_times else None,
+                "chunk_chars": text_chars,
+            },
+            "chunk_previews": [item[2] for item in line_times[:3]],
+        }
+    else:
+        typer.echo("Error: --mode must be 'bedrock-agent' or 'agentcore-runtime'", err=True)
+        raise typer.Exit(1)
+
+    if as_json:
+        print_json(report)
+        return
+
+    console.print(f"[green]Runtime probe complete[/green] mode={report['mode']}")
+    console.print(f"  session:          {report['session_id']}")
+    console.print(f"  first chunk:      {report['metrics']['first_chunk_ms']} ms")
+    console.print(f"  second chunk:     {report['metrics'].get('second_chunk_ms')} ms")
+    console.print(f"  last chunk:       {report['metrics']['last_chunk_ms']} ms")
+    console.print(
+        f"  chunks:           {report['metrics']['chunk_count']} "
+        f"({report['metrics']['chunk_chars']} chars)"
+    )
+    if report.get("return_control_tools"):
+        console.print(
+            "  return control:   "
+            + ", ".join(
+                f"{item['action_group']}::{item['function']}"
+                for item in report["return_control_tools"]
+            )
+        )
+    elif mode == "bedrock-agent":
+        console.print("  return control:   none")
