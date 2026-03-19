@@ -113,7 +113,7 @@ def send(
     # Resolve agent: explicit flag > env > auto-detect from scope > local config
     resolved_agent = resolve_agent_name(explicit=agent_name, client=client)
     if resolved_agent:
-        client._headers["X-Agent-Name"] = resolved_agent
+        client.set_default_agent(agent_name=resolved_agent)
 
     try:
         data = client.send_message(

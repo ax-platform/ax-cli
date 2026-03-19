@@ -20,18 +20,43 @@ class AxClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
-        if agent_name:
-            self._headers["X-Agent-Name"] = agent_name
-        if agent_id:
-            self._headers["X-Agent-Id"] = agent_id
+        self._headers.update(self._agent_headers(agent_name=agent_name, agent_id=agent_id))
         self._http = httpx.Client(
             base_url=self.base_url, headers=self._headers, timeout=30.0,
         )
 
-    def _with_agent(self, agent_id: str | None) -> dict:
-        """Add X-Agent-Id header if targeting an agent."""
+    @staticmethod
+    def _agent_headers(*, agent_name: str | None = None, agent_id: str | None = None) -> dict[str, str]:
+        """Return exactly one agent identity header.
+
+        Name wins over ID for bootstrap and local-config flows. Commands that
+        explicitly target an ID can still override per request.
+        """
+        if agent_name:
+            return {"X-Agent-Name": agent_name}
         if agent_id:
-            return {**self._headers, "X-Agent-Id": agent_id}
+            return {"X-Agent-Id": agent_id}
+        return {}
+
+    def set_default_agent(self, *, agent_name: str | None = None, agent_id: str | None = None) -> None:
+        """Update default agent identity headers for subsequent requests."""
+        self._headers.pop("X-Agent-Name", None)
+        self._headers.pop("X-Agent-Id", None)
+        self._headers.update(self._agent_headers(agent_name=agent_name, agent_id=agent_id))
+        self._http.headers.clear()
+        self._http.headers.update(self._headers)
+
+    def _with_agent(self, agent_id: str | None = None, *, agent_name: str | None = None) -> dict:
+        """Return request headers with an optional explicit agent override."""
+        if agent_name or agent_id:
+            return {
+                **{
+                    k: v
+                    for k, v in self._headers.items()
+                    if k not in {"X-Agent-Name", "X-Agent-Id"}
+                },
+                **self._agent_headers(agent_name=agent_name, agent_id=agent_id),
+            }
         return self._headers
 
     # --- Identity ---

@@ -7,7 +7,7 @@ CLI for the aX Platform. Wraps the REST API for messaging, tasks, agents, and ke
 ```bash
 git clone https://github.com/ax-platform/ax-cli.git
 cd ax-cli
-git checkout staging
+git checkout dev/local
 
 # Option A: uv (recommended)
 uv venv .venv && source .venv/bin/activate && uv pip install -e .
@@ -27,6 +27,18 @@ chmod 600 ~/.ax/config.toml
 # Verify
 ax auth whoami
 ```
+
+## Host Install
+
+Install or refresh a host-wide `ax` command for this machine:
+
+```bash
+./scripts/install-host-ax.sh
+```
+
+This installs the package into the repo venv and symlinks `~/.local/bin/ax`.
+Re-run the script after pulling updates to refresh the host install.
+It prefers the repo venv when available, and otherwise falls back to a `uv`-managed host install.
 
 ## Usage
 
@@ -62,17 +74,27 @@ ax events stream                     # Live SSE event stream
 
 Config resolution: CLI flag > env var > `.ax/config.toml` (project-local) > `~/.ax/config.toml` (global)
 
+Project-local config lookup:
+- nearest existing `.ax/` walking upward
+- otherwise nearest git root
+- otherwise current working directory for `ax auth init`
+
 | Config Key | Env Var | Description |
 |-----------|---------|-------------|
 | `token` | `AX_TOKEN` | PAT token (`axp_u_...`) |
 | `base_url` | `AX_BASE_URL` | API URL (default: `https://dev.paxai.app`) |
 | `agent_name` | `AX_AGENT_NAME` | Agent to act as |
-| `agent_id` | `AX_AGENT_ID` | Agent UUID (required for agent-bound PATs) |
+| `agent_id` | `AX_AGENT_ID` | Agent UUID for explicit ID-targeted calls |
 | `space_id` | `AX_SPACE_ID` | Space UUID |
 
 ## Identity Model
 
 An agent-bound PAT is the agent's credential. The user creates and manages it, but when used with the agent header, the effective identity IS the agent.
+
+The CLI sends one agent header by default:
+- if `agent_name` is present, it sends `X-Agent-Name`
+- otherwise, if only `agent_id` is present, it sends `X-Agent-Id`
+- explicit `--agent-id` command flags still send `X-Agent-Id` for that request
 
 | Config | Messages From |
 |--------|---------------|
@@ -85,3 +107,5 @@ An agent-bound PAT is the agent's credential. The user creates and manages it, b
 # Set up per-repo config (add .ax/ to .gitignore)
 ax auth init --token axp_u_... --agent orion --agent-id <uuid> --space-id <uuid>
 ```
+
+`ax auth init` no longer requires a git repo. If no existing `.ax/` is found and you're outside git, it creates `.ax/config.toml` in the current directory.

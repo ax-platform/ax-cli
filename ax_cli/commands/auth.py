@@ -73,9 +73,9 @@ def init(
         ax auth init --token axp_u_... --agent orion --agent-id 70c1b445-...
         ax auth init --token axp_u_... --url https://dev.paxai.app --agent canvas
     """
-    local = _local_config_dir()
+    local = _local_config_dir(create=True)
     if not local:
-        typer.echo("Error: Not in a git repo. Run from a project directory.", err=True)
+        typer.echo("Error: Cannot determine a project directory for local config.", err=True)
         raise typer.Exit(1)
 
     cfg = _load_local_config()
@@ -103,14 +103,14 @@ def init(
             v = v[:6] + "..." + v[-4:] if len(v) > 10 else "***"
         console.print(f"  {k} = {v}")
 
-    # Check .gitignore
+    # Check .gitignore when available
     root = local.parent
     gitignore = root / ".gitignore"
     if gitignore.exists():
         content = gitignore.read_text()
         if ".ax/" not in content and ".ax" not in content:
             console.print(f"\n[yellow]Reminder:[/yellow] Add .ax/ to {gitignore}")
-    else:
+    elif (root / ".git").exists():
         console.print(f"\n[yellow]Reminder:[/yellow] Add .ax/ to .gitignore")
 
 

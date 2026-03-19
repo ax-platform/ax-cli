@@ -1,6 +1,6 @@
 """Token / URL / space resolution and client factory.
 
-Config resolution: project-local .ax/config.toml → ~/.ax/config.toml
+Config resolution: project-local .ax/config.toml → ~/.ax/config.toml.
 Agent identity lives with the workspace, not the machine.
 """
 import os
@@ -12,8 +12,18 @@ import typer
 from .client import AxClient
 
 
-def _find_project_root() -> Path | None:
-    """Walk up from CWD looking for a .git directory (repo root)."""
+def _find_existing_local_root() -> Path | None:
+    """Walk up from CWD looking for an existing project-local .ax directory."""
+    cur = Path.cwd()
+    for parent in [cur, *cur.parents]:
+        ax_dir = parent / ".ax"
+        if ax_dir.is_dir() or (ax_dir / "config.toml").exists():
+            return parent
+    return None
+
+
+def _find_git_root() -> Path | None:
+    """Walk up from CWD looking for a git root, if any."""
     cur = Path.cwd()
     for parent in [cur, *cur.parents]:
         if (parent / ".git").exists():
@@ -21,9 +31,31 @@ def _find_project_root() -> Path | None:
     return None
 
 
-def _local_config_dir() -> Path | None:
-    """Project-local .ax/ if it exists or can be created."""
-    root = _find_project_root()
+def _find_project_root(*, create: bool = False) -> Path | None:
+    """Find the best project root for local config.
+
+    Resolution order:
+    1. Nearest existing .ax directory walking upward
+    2. Nearest git root walking upward
+    3. Current working directory when create=True
+    """
+    ax_root = _find_existing_local_root()
+    if ax_root:
+        return ax_root
+
+    git_root = _find_git_root()
+    if git_root:
+        return git_root
+
+    if create:
+        return Path.cwd()
+
+    return None
+
+
+def _local_config_dir(*, create: bool = False) -> Path | None:
+    """Project-local .ax/ if it exists or should be created."""
+    root = _find_project_root(create=create)
     if root:
         return root / ".ax"
     return None
@@ -39,7 +71,7 @@ def _global_config_dir() -> Path:
 
 def _load_local_config() -> dict:
     """Load project-local .ax/config.toml if it exists."""
-    local = _local_config_dir()
+    local = _local_config_dir(create=False)
     if local and (local / "config.toml").exists():
         return tomllib.loads((local / "config.toml").read_text())
     return {}
@@ -63,9 +95,9 @@ def _load_config() -> dict:
 def _save_config(cfg: dict, *, local: bool = False) -> None:
     """Save config. local=True writes to project .ax/, else ~/.ax/."""
     if local:
-        d = _local_config_dir()
+        d = _local_config_dir(create=True)
         if not d:
-            typer.echo("Error: Not in a git repo. Cannot save local config.", err=True)
+            typer.echo("Error: Cannot determine local config directory.", err=True)
             raise typer.Exit(1)
     else:
         d = _global_config_dir()
@@ -93,13 +125,13 @@ def resolve_base_url() -> str:
 
 
 def resolve_agent_name(*, explicit: str | None = None, client: AxClient | None = None) -> str | None:
-    """Resolve agent name: explicit > env > auto-detect from single-agent scope > local config.
+    """Resolve agent name: explicit > env > local config > auto-detect from single-agent scope.
 
     Resolution order:
     1. --agent flag (explicit)
     2. AX_AGENT_NAME env var
-    3. Auto-detect: if PAT is scoped to exactly 1 agent, use that
-    4. Project-local .ax/config.toml agent_name
+    3. Project-local .ax/config.toml agent_name
+    4. Auto-detect: if PAT is scoped to exactly 1 agent, use that
     5. None (send as user)
     """
     if explicit:
@@ -207,12 +239,27 @@ def save_agent_binding(
     return changed
 
 
-def resolve_agent_id() -> str | None:
-    """Resolve agent_id: env > config > auto-detect from scoped PAT."""
-    env = os.environ.get("AX_AGENT_ID")
-    if env:
-        return env
+def resolve_agent_id(*, prefer_name: bool = True) -> str | None:
+    """Resolve agent_id: env > config, unless agent_name should own the request."""
+    env_name = os.environ.get("AX_AGENT_NAME")
+    env_id = os.environ.get("AX_AGENT_ID")
     cfg = _load_config()
+    cfg_name = cfg.get("agent_name")
+
+    if prefer_name and env_name:
+        if env_id:
+            typer.echo(
+                "Warning: AX_AGENT_NAME and AX_AGENT_ID are both set; using AX_AGENT_NAME and ignoring AX_AGENT_ID.",
+                err=True,
+            )
+        return None
+
+    if env_id:
+        return env_id
+
+    if prefer_name and cfg_name:
+        return None
+
     if cfg.get("agent_id"):
         return cfg["agent_id"]
     return None
@@ -227,5 +274,5 @@ def get_client() -> AxClient:
         )
         raise typer.Exit(1)
     agent_name = resolve_agent_name()
-    agent_id = resolve_agent_id()
+    agent_id = resolve_agent_id(prefer_name=bool(agent_name))
     return AxClient(base_url=resolve_base_url(), token=token, agent_name=agent_name, agent_id=agent_id)
