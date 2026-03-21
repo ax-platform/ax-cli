@@ -94,6 +94,19 @@ def _wait_for_reply(client, message_id: str, timeout: int = 60) -> dict | None:
     )
 
 
+def _configure_send_identity(client, *, agent_name: str | None, agent_id: str | None) -> None:
+    """`ax messages send` defaults to the user unless agent identity is explicit."""
+    if agent_name:
+        client.set_default_agent(agent_name=agent_name)
+        return
+
+    if agent_id:
+        client.set_default_agent(agent_name=None, agent_id=None)
+        return
+
+    client.set_default_agent(agent_name=None, agent_id=None)
+
+
 @app.command("send")
 def send(
     content: str = typer.Argument(..., help="Message content"),
@@ -110,10 +123,9 @@ def send(
     client = get_client()
     sid = resolve_space_id(client, explicit=space_id)
 
-    # Resolve agent: explicit flag > env > auto-detect from scope > local config
-    resolved_agent = resolve_agent_name(explicit=agent_name, client=client)
-    if resolved_agent:
-        client.set_default_agent(agent_name=resolved_agent)
+    # Sends default to the user. Agent identity is opt-in for this command.
+    resolved_agent = resolve_agent_name(explicit=agent_name, client=client) if agent_name else None
+    _configure_send_identity(client, agent_name=resolved_agent, agent_id=agent_id)
 
     try:
         data = client.send_message(
