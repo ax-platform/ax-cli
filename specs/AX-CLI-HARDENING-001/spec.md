@@ -153,6 +153,18 @@ The runtime can start with stale or conflicting local state:
 
 Current behavior mostly warns or self-resolves later instead of failing fast.
 
+### 6.6 There Is No Single Strict Runtime Entry Point
+
+Current `ax-cli` behavior mixes interactive CLI defaults and autonomous runtime behavior:
+- `get_client()` still resolves identity through the generic config path
+- `ax auth whoami` persists binding, but runtime startup does not require validation through that path
+- `ax_listener.py`, `ax events stream`, and normal command sends each carry slightly different identity and SSE behavior
+
+Why this is fragile:
+- the same token and config can behave differently depending on which command path the operator starts
+- there is no single "agent runtime" contract that guarantees bind, validation, send, and listen all use the same identity rules
+- fixing one command path is not enough if the other runtime-facing entry points keep legacy behavior
+
 ---
 
 ## 7. Hardened Contract
@@ -250,9 +262,28 @@ Resolution rules:
 - `agent_name` is retained for display, bootstrap recovery, and operator clarity
 - if both env and config provide identity and they disagree, runtime must fail
 
+### 7.7 Minimal Runtime Contract
+
+For the live sentinel stack, the contract should reduce to:
+
+1. Operator provides `token`, `base_url`, and bootstrap `agent_name` for first bind, or `token`, `base_url`, `agent_id`, and `space_id` for steady state.
+2. Runtime performs a startup identity handshake with `/auth/me`.
+3. If the PAT is unbound, startup binds with `X-Agent-Name`, persists canonical `agent_id` and `default_space_id`, then switches to steady-state rules.
+4. If the PAT is already bound, startup verifies `bound_agent.agent_id == configured agent_id` and rejects drift.
+5. All steady-state runtime writes and SSE connections use `Authorization: Bearer` plus `X-Agent-Id`.
+6. If canonical identity is missing or inconsistent, runtime exits with a clear error instead of posting as the operator.
+
 ---
 
 ## 8. Recommended Implementation Slices
+
+### Slice 0: Resolve The Contract Decisions Now
+
+These choices should be treated as closed for the live sentinel stack:
+- use a dedicated strict runtime path rather than hiding strict behavior behind generic interactive command defaults
+- send only `X-Agent-Id` in steady state; do not send `X-Agent-Name` as a second identity hint
+- enforce fail-closed behavior in the strict runtime path first, then widen only if needed later
+- require a startup `/auth/me` handshake for PAT-based runtimes instead of trusting cached identity state
 
 ### Slice 1: CLI Identity Resolution Hardening
 
@@ -284,24 +315,76 @@ Change:
 - wire the hardened runtime to `POST /api/v1/agents/processing-status`
 - document the required event sequence for monitor behavior
 
+## 9. Priority Order
+
+### P0: Canonical Identity Must Win
+
+Fix first:
+- stop generic runtime client creation from preferring `agent_name` over `agent_id`
+- make post-bind runtime requests operate by `agent_id` only
+
+Reason:
+- this is the shortest path to "agent has key + config, runs command, identity works"
+- until this is fixed, a correctly bound runtime can still operate through the wrong transport hint
+
+### P1: Add A Mandatory Startup Handshake
+
+Fix next:
+- add one strict startup validation step that calls `/auth/me`
+- verify token, `agent_id`, `agent_name`, and `space_id` are coherent before the runtime begins listening or posting
+
+Reason:
+- this closes the stale-config and wrong-space class of failures early
+- it turns implicit recovery into an explicit contract
+
+### P2: Introduce A Strict Runtime Send/Listen Path
+
+Fix next:
+- centralize autonomous send, SSE connect, reconnect, and progress reporting in one runtime-oriented module or command path
+- make that path fail closed when canonical agent identity is absent
+
+Reason:
+- the current behavior is split across listener, events, and generic client code
+- without a single strict path, auth fixes remain easy to bypass accidentally
+
+### P3: Consolidate SSE Endpoint And Auth Mode
+
+Fix next:
+- standardize runtime SSE on `/api/sse/messages`
+- remove query-token dependence from new CLI runtime flows
+
+Reason:
+- this reduces monitor/reconnect ambiguity, but it is lower priority than authorship correctness
+- an agent posting as the wrong identity is worse than using a legacy SSE path
+
+### P4: Tighten Progress And Monitor Semantics
+
+Fix after the identity contract is stable:
+- require `agent_processing` lifecycle signaling
+- define reconnect, dedup, disconnect visibility, and error surfacing as runtime invariants
+
+Reason:
+- this matters for operator trust and observability
+- it should be built on top of a stable identity contract, not used as a substitute for one
+
 ---
 
-## 9. Verification Matrix
+## 10. Verification Matrix
 
-### 9.1 Auth And Binding
+### 10.1 Auth And Binding
 
 1. Unbound PAT + `X-Agent-Name` binds once and persists canonical `agent_id`.
 2. Bound PAT startup with matching `agent_id` succeeds.
 3. Bound PAT startup with mismatched `agent_id` fails clearly.
 4. Bound PAT without runtime `agent_id` fails in strict mode.
 
-### 9.2 Agent Authorship Integrity
+### 10.2 Agent Authorship Integrity
 
 1. Autonomous runtime send posts as the configured agent.
 2. Missing runtime identity cannot post as human in strict mode.
 3. Rename of `agent_name` does not break steady-state sends when `agent_id` is present.
 
-### 9.3 SSE And Monitor
+### 10.3 SSE And Monitor
 
 1. Runtime connects to `/api/sse/messages` and receives `connected`.
 2. Runtime survives reconnect and resumes without duplicate handling.
@@ -309,7 +392,7 @@ Change:
 4. Long-running task emits `agent_processing` started and completed.
 5. Monitor path handles `agent_error` and disconnects visibly.
 
-### 9.4 Space Integrity
+### 10.4 Space Integrity
 
 1. Runtime uses bound/default space consistently.
 2. Stale configured `space_id` is detected and rejected or explicitly overridden.
@@ -317,16 +400,26 @@ Change:
 
 ---
 
-## 10. Open Questions
+## 11. Review Outcome
 
-1. Should strict autonomous runtime mode be a separate command surface (`ax monitor`, `ax listen`, `ax runtime`) or a flag layered onto existing commands?
-2. Should steady-state requests send only `X-Agent-Id`, or also a non-authoritative agent-name hint for logs?
-3. Should API-v1 programmatic sends without agent identity be blocked globally, or only in the hardened runtime path first?
-4. When the runtime is PAT-based, should it always call `/auth/me` on startup, or can cached validated state be trusted for a bounded TTL?
+Top auth and identity gaps, in order:
+
+1. The default CLI client still prefers `agent_name` over `agent_id`, which directly contradicts the intended steady-state contract and is the most likely source of wrong-identity behavior.
+2. Startup validation is optional and fragmented, so a runtime can begin with stale or conflicting token, agent, and space state.
+3. There is no single strict runtime path, which lets interactive defaults leak into autonomous behavior.
+4. SSE path and auth mode are still split, which increases operational ambiguity but is secondary to identity correctness.
+
+Implementation priority:
+
+1. Make canonical `agent_id` authoritative after bind.
+2. Add one required startup `/auth/me` handshake for PAT runtimes.
+3. Introduce a strict autonomous runtime path for send plus listen.
+4. Standardize runtime SSE on `/api/sse/messages` with bearer-header auth.
+5. Finish monitor and progress semantics on top of the hardened identity path.
 
 ---
 
-## 11. Immediate Recommendation
+## 12. Immediate Recommendation
 
 Adopt this as the contract for the live sentinel stack:
 - bootstrap by `X-Agent-Name`
