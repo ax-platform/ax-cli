@@ -429,3 +429,150 @@ Adopt this as the contract for the live sentinel stack:
 - require explicit progress signaling for long-running autonomous work
 
 That keeps the current PAT model, but removes the hidden ambiguity that makes runtime identity harder to trust.
+
+---
+
+## 13. Implementation Sequence
+
+Build the hardening work as small reviewable slices in this order.
+
+### Slice A: Canonical Identity Headers
+
+Goal:
+- make steady-state runtime requests send only `X-Agent-Id`
+- keep `X-Agent-Name` limited to bootstrap and explicit interactive targeting
+
+Primary files:
+- `ax_cli/client.py`
+- `ax_cli/config.py`
+- `tests/test_client.py`
+- `tests/test_config.py`
+
+Expected code changes:
+- stop default client construction from preferring `agent_name` over `agent_id` for bound runtime state
+- keep explicit interactive `--agent` flows working without changing human-default commands
+- make header selection rules obvious in one place instead of split across comments and call sites
+
+Verification:
+- bound config with both `agent_id` and `agent_name` sends `X-Agent-Id`
+- `AX_AGENT_ID` plus `AX_AGENT_NAME` conflict is rejected or routed through strict runtime rules instead of silently preferring name
+- explicit `--agent` interactive sends still use `X-Agent-Name`
+
+Exit criterion:
+- an already-bound agent with key plus config can run one CLI command and produce the correct agent identity without relying on mutable name lookup
+
+### Slice B: Strict Startup Identity Handshake
+
+Goal:
+- add one required startup validation step for autonomous PAT runtimes
+
+Primary files:
+- `ax_cli/config.py`
+- `ax_cli/commands/auth.py`
+- new helper module if needed for clarity
+- `tests/test_config.py`
+
+Expected code changes:
+- add a helper that calls `/auth/me` and validates `token`, `bound_agent`, `agent_id`, `agent_name`, and `space_id`
+- persist canonical bind results after first successful bootstrap
+- fail closed when local config drifts from backend bound-agent state
+
+Verification:
+- unbound PAT plus `agent_name` binds and persists canonical `agent_id`
+- bound PAT with mismatched `agent_id` fails before send or listen
+- missing `space_id` resolves from canonical bound-agent default when safe, otherwise fails clearly
+
+Exit criterion:
+- runtime startup either resolves to one coherent agent identity and space or exits before doing work
+
+### Slice C: Strict Runtime Entry Path
+
+Goal:
+- create one runtime-oriented path that owns send, listen, and identity rules for autonomous agents
+
+Primary files:
+- `ax_listener.py`
+- `ax_cli/commands/events.py`
+- `ax_cli/commands/messages.py`
+- new shared runtime helper module if needed
+- new runtime-focused tests
+
+Expected code changes:
+- centralize startup validation, SSE connection setup, reconnect behavior, and reply authorship rules
+- make strict runtime behavior explicit instead of inheriting generic interactive client defaults
+- keep human interactive commands separate from autonomous runtime rules
+
+Verification:
+- runtime path refuses to post when canonical agent identity is absent
+- long-running runtime path can start once, validate once, and reuse validated identity rules
+- duplicate handling stays correct when the same message appears as both `message` and `mention`
+
+Exit criterion:
+- there is one obvious way to run an autonomous CLI agent without relying on incidental behavior from generic commands
+
+### Slice D: SSE Contract Consolidation
+
+Goal:
+- move runtime SSE onto one path and one auth style
+
+Primary files:
+- `ax_cli/client.py`
+- `ax_cli/commands/events.py`
+- `ax_listener.py`
+- new SSE-focused tests
+
+Expected code changes:
+- standardize runtime SSE on `/api/sse/messages`
+- use bearer-header auth for new runtime flows
+- retain legacy compatibility only where needed for older or interactive paths
+
+Verification:
+- runtime connects successfully to `/api/sse/messages`
+- runtime does not require `?token=` query auth
+- reconnect and first `connected` handling are covered by tests
+
+Exit criterion:
+- autonomous runtime SSE behavior is canonical and no longer split across two endpoint conventions
+
+### Slice E: Progress And Monitor Semantics
+
+Goal:
+- make long-running agent state visible and deterministic
+
+Primary files:
+- `ax_cli/commands/events.py`
+- `ax_listener.py`
+- runtime helper module from Slice C
+- new monitor/progress tests
+
+Expected code changes:
+- standardize `agent_processing` started and completed handling in autonomous flows
+- make disconnects, `agent_error`, and reconnect visibility consistent
+- document the runtime event contract as tested behavior, not just prose
+
+Verification:
+- long-running runtime emits processing lifecycle updates
+- monitor path surfaces `agent_error` and disconnects clearly
+- event dedup still holds across reconnect and bootstrap overlap
+
+Exit criterion:
+- operators can trust runtime state from the monitor path without inferring it from side effects
+
+## 14. First Implementation Stack
+
+The first shippable implementation stack should be:
+
+1. Slice A only: canonical `agent_id` precedence after bind.
+2. Slice B on top: strict startup `/auth/me` validation.
+3. Slice C only after A and B are merged or proven together on the same branch.
+
+Reason:
+- Slice A solves the core identity correctness bug.
+- Slice B turns that correctness into a fail-closed contract.
+- Slice C is easier and safer once the runtime identity rules are already canonical.
+
+If work needs to split across commits, prefer:
+
+1. commit 1: client/config identity precedence plus unit tests
+2. commit 2: startup validation helper plus mismatch tests
+3. commit 3: strict runtime path wiring
