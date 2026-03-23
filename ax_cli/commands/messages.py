@@ -1,4 +1,5 @@
 """ax messages — send, list, get, edit, delete, search."""
+from datetime import datetime, timezone
 import time
 from typing import Optional
 
@@ -6,9 +7,94 @@ import typer
 import httpx
 
 from ..config import get_client, resolve_space_id, resolve_agent_name
-from ..output import JSON_OPTION, print_json, print_table, print_kv, handle_error, console
+from ..output import (
+    JSON_OPTION,
+    print_json,
+    print_table,
+    print_kv,
+    handle_error,
+    console,
+)
 
 app = typer.Typer(name="messages", help="Message operations", no_args_is_help=True)
+
+
+def _truncate(value: str, limit: int = 96) -> str:
+    value = " ".join(str(value).split())
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
+
+
+def _sender_label(message: dict) -> str:
+    return (
+        message.get("display_name")
+        or message.get("sender_handle")
+        or message.get("agent_name")
+        or message.get("sender_type")
+        or "unknown"
+    )
+
+
+def _mentioned_agents(message: dict) -> str:
+    metadata = message.get("metadata") or {}
+
+    mentions = metadata.get("original_mentions")
+    if isinstance(mentions, list) and mentions:
+        return ", ".join(f"@{m}" for m in mentions if m)
+
+    mention_entries = metadata.get("mentions")
+    if isinstance(mention_entries, list) and mention_entries:
+        names: list[str] = []
+        for entry in mention_entries:
+            if isinstance(entry, str) and entry:
+                names.append(f"@{entry}")
+                continue
+            if not isinstance(entry, dict):
+                continue
+            agent_name = entry.get("agent_name")
+            if agent_name:
+                names.append(f"@{agent_name}")
+                continue
+            agent_id = entry.get("agent_id")
+            if agent_id:
+                names.append(str(agent_id))
+        if names:
+            return ", ".join(names)
+
+    return "-"
+
+
+def _summary_text(message: dict) -> str:
+    ai_summary = (message.get("ai_summary") or "").strip()
+    if ai_summary:
+        return _truncate(ai_summary)
+    return _truncate(message.get("content", ""))
+
+
+def _format_received_at(message: dict) -> str:
+    raw = message.get("created_at")
+    if not raw:
+        return "-"
+
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return str(raw)
+
+
+def _message_list_row(message: dict) -> dict:
+    return {
+        "id": message.get("id", ""),
+        "from": _sender_label(message),
+        "mentions": _mentioned_agents(message),
+        "summary": _summary_text(message),
+        "received": _format_received_at(message),
+    }
 
 
 def _print_wait_status(remaining: int, last_remaining: int | None) -> int:
@@ -111,6 +197,24 @@ def _configure_send_identity(client, *, agent_name: str | None, agent_id: str | 
     # No explicit override — keep default client identity.
 
 
+def _send_once(
+    *,
+    client,
+    content: str,
+    space_id: str | None,
+    agent_id: str | None,
+    agent_name: str | None,
+    channel: str,
+    parent: str | None,
+):
+    sid = resolve_space_id(client, explicit=space_id)
+    resolved_agent = resolve_agent_name(explicit=agent_name, client=client) if agent_name else None
+    _configure_send_identity(client, agent_name=resolved_agent, agent_id=agent_id)
+    return client.send_message(
+        sid, content, agent_id=agent_id, channel=channel, parent_id=parent,
+    )
+
+
 @app.command("send")
 def send(
     content: str = typer.Argument(..., help="Message content"),
@@ -118,22 +222,28 @@ def send(
     timeout: int = typer.Option(60, "--timeout", "-t", help="Max seconds to wait for reply"),
     agent_id: Optional[str] = typer.Option(None, "--agent-id", help="Target agent"),
     agent_name: Optional[str] = typer.Option(None, "--agent", help="Send as agent (X-Agent-Name)"),
+    as_user: bool = typer.Option(
+        False,
+        "--as-user",
+        help="Send as the underlying user/admin identity instead of the bound agent",
+    ),
     channel: str = typer.Option("main", "--channel", help="Channel name"),
     parent: Optional[str] = typer.Option(None, "--parent", "--reply-to", "-r", help="Parent message ID (thread reply)"),
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
     """Send a message and wait for aX's response by default. Use --skip-ax to send only."""
-    client = get_client()
-    sid = resolve_space_id(client, explicit=space_id)
-
-    # Sends default to the user. Agent identity is opt-in for this command.
-    resolved_agent = resolve_agent_name(explicit=agent_name, client=client) if agent_name else None
-    _configure_send_identity(client, agent_name=resolved_agent, agent_id=agent_id)
+    client = get_client(as_user=as_user)
 
     try:
-        data = client.send_message(
-            sid, content, agent_id=agent_id, channel=channel, parent_id=parent,
+        data = _send_once(
+            client=client,
+            content=content,
+            space_id=space_id,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            channel=channel,
+            parent=parent,
         )
     except httpx.HTTPStatusError as e:
         handle_error(e)
@@ -170,7 +280,7 @@ def list_messages(
     agent_id: Optional[str] = typer.Option(None, "--agent-id", help="Target agent"),
     as_json: bool = JSON_OPTION,
 ):
-    """List recent messages."""
+    """List recent messages in a summary-first layout."""
     client = get_client()
     try:
         data = client.list_messages(limit=limit, channel=channel, agent_id=agent_id)
@@ -180,13 +290,14 @@ def list_messages(
     if as_json:
         print_json(messages)
     else:
-        for m in messages:
-            c = str(m.get("content", ""))
-            m["content_short"] = c[:60] + "..." if len(c) > 60 else c
+        rows = [_message_list_row(message) for message in messages]
         print_table(
-            ["ID", "Sender", "Content", "Created At"],
-            messages,
-            keys=["id", "sender_handle", "content_short", "created_at"],
+            ["Message ID", "From", "Mentions", "Summary", "Received"],
+            rows,
+            keys=["id", "from", "mentions", "summary", "received"],
+        )
+        console.print(
+            "\n[dim]Summary view only. Use 'ax messages get <message-id>' for the full message and metadata.[/dim]"
         )
 
 

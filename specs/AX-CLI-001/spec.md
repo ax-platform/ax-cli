@@ -28,6 +28,22 @@ Agents need a toolkit where:
 6. **Composable primitives.** Each command works standalone and in scripts.
 7. **Mirror MCP parity.** Every MCP tool action has a CLI equivalent.
 
+## 2.1 Credential Model
+
+The CLI is PAT-first today, but agent-first in day-to-day operation once a binding exists.
+
+- **User PAT**: user-owned credential. Without an agent header, requests act as the user.
+- **Delegated agent token (PAT-backed)**: user-owned PAT restricted to one agent. In CLI usage this is the default autonomous-agent shape. The request executes as the agent, but audit must retain the owning user.
+- **Multi-agent PAT**: user-owned PAT restricted to a set of agents via `allowed_agent_ids`. Useful for operator workflows, but less precise than a single-agent delegated token.
+- **Headless MCP agent key**: `client_id` / `client_secret` from backend `agent_keys`. This is for MCP `client_credentials` flows, not for the PAT-based CLI path.
+
+Implementation rule:
+- `ax auth bind --agent <name>` or `ax auth bind --agent-id <uuid>` is the normal steady-state workflow after bootstrap.
+- `--as-user` is an explicit escape hatch for admin/bootstrap operations like key creation; it is not the default message-sending mode.
+- `ax keys create --agent-id <uuid>` or `ax keys create --agent <name>` MUST send both `allowed_agent_ids=[uuid]` and `agent_id=<uuid>` so backend records the stronger single-agent binding.
+- repeated `--agent-id` values MUST stay multi-agent scoped and MUST NOT set a single `agent_id` binding.
+- `--unbound` remains the bootstrap path for first-bind registration by `X-Agent-Name`.
+
 ---
 
 ## 3. Command Surface

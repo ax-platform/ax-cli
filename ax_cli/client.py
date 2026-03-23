@@ -267,16 +267,19 @@ class AxClient:
         r.raise_for_status()
         return r.json()
 
-    # --- Keys (PAT management) ---
+    # --- Keys (PAT / delegated agent token management) ---
 
     def create_key(self, name: str, *,
                    allowed_agent_ids: list[str] | None = None,
-                   agent_scope: str | None = None) -> dict:
+                   agent_scope: str | None = None,
+                   agent_id: str | None = None) -> dict:
         body: dict = {"name": name}
         if agent_scope:
             body["agent_scope"] = agent_scope
         if allowed_agent_ids:
             body["allowed_agent_ids"] = allowed_agent_ids
+        if agent_id:
+            body["agent_id"] = agent_id
         r = self._http.post("/api/v1/keys", json=body)
         r.raise_for_status()
         return r.json()

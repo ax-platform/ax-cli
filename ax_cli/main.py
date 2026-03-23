@@ -23,6 +23,11 @@ def send_shortcut(
     timeout: int = typer.Option(60, "--timeout", "-t", help="Max seconds to wait"),
     reply_to: Optional[str] = typer.Option(None, "--reply-to", "-r", help="Reply to message ID (thread)"),
     agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Send as agent (X-Agent-Name)"),
+    as_user: bool = typer.Option(
+        False,
+        "--as-user",
+        help="Send as the underlying user/admin identity instead of the bound agent",
+    ),
     space_id: Optional[str] = typer.Option(None, "--space-id", "-s", help="Override default space"),
     as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
@@ -33,6 +38,7 @@ def send_shortcut(
         timeout=timeout,
         agent_id=None,
         agent_name=agent,
+        as_user=as_user,
         channel="main",
         parent=reply_to,
         space_id=space_id,

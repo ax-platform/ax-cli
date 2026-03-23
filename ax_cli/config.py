@@ -113,6 +113,22 @@ def _save_config(cfg: dict, *, local: bool = False) -> None:
     cf.chmod(0o600)
 
 
+def clear_agent_binding(*, local: bool = False) -> bool:
+    """Remove persisted agent_name/agent_id from config.
+
+    Returns True when a binding was removed.
+    """
+    cfg = _load_local_config() if local else _load_global_config()
+    changed = False
+    for key in ("agent_id", "agent_name"):
+        if key in cfg:
+            cfg.pop(key, None)
+            changed = True
+    if changed:
+        _save_config(cfg, local=local)
+    return changed
+
+
 def resolve_token() -> str | None:
     return os.environ.get("AX_TOKEN") or _load_config().get("token")
 
@@ -251,7 +267,7 @@ def resolve_agent_id() -> str | None:
     return _load_config().get("agent_id")
 
 
-def get_client() -> AxClient:
+def get_client(*, as_user: bool = False) -> AxClient:
     token = resolve_token()
     if not token:
         typer.echo(
@@ -259,6 +275,9 @@ def get_client() -> AxClient:
             err=True,
         )
         raise typer.Exit(1)
+    if as_user:
+        return AxClient(base_url=resolve_base_url(), token=token, agent_name=None, agent_id=None)
+
     agent_id = resolve_agent_id()
 
     # Explicit env-level name targeting overrides config-level ID.

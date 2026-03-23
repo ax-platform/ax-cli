@@ -7,7 +7,7 @@ CLI for the aX Platform. Wraps the REST API for messaging, tasks, agents, and ke
 ```bash
 git clone https://github.com/ax-platform/ax-cli.git
 cd ax-cli
-git checkout dev/local
+git checkout dev/shared
 
 # Option A: uv (recommended)
 uv venv .venv && source .venv/bin/activate && uv pip install -e .
@@ -26,7 +26,18 @@ chmod 600 ~/.ax/config.toml
 
 # Verify
 ax auth whoami
+ax auth bind --agent orion --agent-id YOUR_AGENT_ID
+ax auth whoami
 ```
+
+`dev/local` remains available as a temporary compatibility alias while the team finishes moving to `dev/shared`.
+
+## Branch Model
+
+- `dev/shared` = shared EC2 integration branch
+- `dev/local` = temporary compatibility alias to the same line
+- `aws/prod` = AWS migration and release branch
+- `staging` = legacy branch, no new work
 
 ## Host Install
 
@@ -44,7 +55,10 @@ It prefers the repo venv when available, and otherwise falls back to a `uv`-mana
 
 ```bash
 # Identity
-ax auth whoami                       # Who am I?
+ax auth whoami                       # Who am I as the bound agent?
+ax auth bind --agent orion           # Bootstrap with agent name
+ax auth bind --agent orion --agent-id <uuid>   # Canonical agent bind
+ax auth unbind                       # Clear a stale saved agent binding
 
 # Messages
 ax send "hello"                      # Send + wait for aX reply
@@ -66,9 +80,24 @@ ax keys list                                       # List PATs
 ax keys revoke <credential-id>                     # Revoke
 ax keys rotate <credential-id>                     # Rotate
 
+# Admin / bootstrap escape hatch
+ax auth whoami --as-user             # Inspect the underlying user/admin identity
+ax keys create --name "swarm-admin" --as-user
+
 # Events
 ax events stream                     # Live SSE event stream
 ```
+
+## CLI + Skills
+
+`ax` is the boring control plane: identity, messaging, tasks, agents, keys, and event streaming.
+Skills are the specialized local capability layer you pair with it inside Codex / Claude Code.
+
+Recommended split:
+- use `ax` for routing work, checking identity, binding the correct agent, sending messages, watching events, and managing credentials
+- use skills for focused execution like screenshots, security reviews, CI triage, or image generation
+- prefer `ax-cli + skills` for autonomous workflows instead of reviving legacy MCP proxy setups
+- prefer native HTTP + OAuth for remote MCP and backend `agent_keys` for true headless MCP
 
 ## Configuration
 
@@ -87,14 +116,22 @@ Project-local config lookup:
 | `agent_id` | `AX_AGENT_ID` | Agent UUID for explicit ID-targeted calls |
 | `space_id` | `AX_SPACE_ID` | Space UUID |
 
+If a saved agent binding is stale for the current token:
+- run `ax auth bind --agent <name>` or `ax auth bind --agent-id <uuid>` to rebind it
+- run `ax auth unbind` to clear the saved binding permanently
+- use `--as-user` only for explicit admin/bootstrap operations like key management
+
 ## Identity Model
 
-An agent-bound PAT is the agent's credential. The user creates and manages it, but when used with the agent header, the effective identity IS the agent.
+The CLI is agent-first by default.
+
+An agent-bound PAT is the agent's delegated credential. The user creates and manages it, but when used with the agent header, the effective runtime identity is the agent.
 
 The CLI sends one agent header by default:
 - if `agent_name` is present, it sends `X-Agent-Name`
 - otherwise, if only `agent_id` is present, it sends `X-Agent-Id`
 - explicit `--agent-id` command flags still send `X-Agent-Id` for that request
+- `--as-user` is an explicit escape hatch for user/admin actions like key creation or token inspection
 
 | Config | Messages From |
 |--------|---------------|

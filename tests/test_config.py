@@ -45,6 +45,27 @@ def test_get_client_uses_agent_id_when_both_in_config(tmp_path, monkeypatch):
     assert "X-Agent-Name" not in client._headers
 
 
+def test_get_client_as_user_ignores_saved_agent_binding(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    ax_dir = project / ".ax"
+    ax_dir.mkdir(parents=True)
+    (ax_dir / "config.toml").write_text(
+        'token = "axp_u_test"\n'
+        'base_url = "https://dev.paxai.app"\n'
+        'agent_name = "orion"\n'
+        'agent_id = "70c1b445-c733-44d8-8e75-9620452374a8"\n'
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("AX_TOKEN", raising=False)
+    monkeypatch.delenv("AX_AGENT_NAME", raising=False)
+    monkeypatch.delenv("AX_AGENT_ID", raising=False)
+
+    client = config.get_client(as_user=True)
+
+    assert "X-Agent-Id" not in client._headers
+    assert "X-Agent-Name" not in client._headers
+
+
 def test_get_client_uses_name_when_no_id_in_config(tmp_path, monkeypatch):
     """Bootstrap: config has name but no id yet → use name header."""
     project = tmp_path / "project"
@@ -136,3 +157,27 @@ def test_both_env_vars_set_id_wins(tmp_path, monkeypatch):
 
     assert client._headers["X-Agent-Id"] == "env-id"
     assert "X-Agent-Name" not in client._headers
+
+
+def test_clear_agent_binding_preserves_other_config(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    ax_dir = project / ".ax"
+    ax_dir.mkdir(parents=True)
+    config_path = ax_dir / "config.toml"
+    config_path.write_text(
+        'token = "axp_u_test"\n'
+        'base_url = "https://dev.paxai.app"\n'
+        'agent_name = "orion"\n'
+        'agent_id = "70c1b445-c733-44d8-8e75-9620452374a8"\n'
+        'space_id = "space-123"\n'
+    )
+    monkeypatch.chdir(project)
+
+    changed = config.clear_agent_binding(local=True)
+
+    assert changed is True
+    saved = config_path.read_text()
+    assert 'agent_name = "orion"' not in saved
+    assert 'agent_id = "70c1b445-c733-44d8-8e75-9620452374a8"' not in saved
+    assert 'token = "axp_u_test"' in saved
+    assert 'space_id = "space-123"' in saved

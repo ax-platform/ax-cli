@@ -3,7 +3,7 @@ import typer
 import httpx
 
 from ..config import (
-    get_client, save_agent_binding, save_token, resolve_token, resolve_agent_name,
+    clear_agent_binding, get_client, save_agent_binding, save_token, resolve_token, resolve_agent_name,
     _global_config_dir, _local_config_dir, _save_config, _load_local_config,
 )
 from ..output import JSON_OPTION, print_json, print_kv, handle_error, console
@@ -14,9 +14,20 @@ app.add_typer(token_app, name="token")
 
 
 @app.command()
-def whoami(as_json: bool = JSON_OPTION):
-    """Show current identity — principal, bound agent, resolved spaces."""
-    client = get_client()
+def whoami(
+    as_json: bool = JSON_OPTION,
+    as_user: bool = typer.Option(
+        False,
+        "--as-user",
+        help="Ignore the saved agent binding and inspect the underlying user/admin identity",
+    ),
+):
+    """Show current identity.
+
+    Default mode is agent-first: the saved binding is part of the identity.
+    Use --as-user only for explicit admin/bootstrap workflows.
+    """
+    client = get_client(as_user=as_user)
     try:
         data = client.whoami()
     except httpx.HTTPStatusError as e:
@@ -56,12 +67,54 @@ def whoami(as_json: bool = JSON_OPTION):
         print_kv(data)
 
 
+@app.command()
+def bind(
+    agent: str = typer.Option(None, "--agent", help="Default agent name for bootstrap/display"),
+    agent_id: str = typer.Option(None, "--agent-id", help="Default agent UUID (canonical when known)"),
+    space_id: str = typer.Option(None, "--space-id", help="Persist the default space alongside the agent binding"),
+    local: bool = typer.Option(False, "--local", help="Save the binding to project-local .ax/config.toml"),
+):
+    """Persist the default agent identity for agent-first CLI use."""
+    if not agent and not agent_id:
+        typer.echo("Error: provide --agent, --agent-id, or both.", err=True)
+        raise typer.Exit(1)
+
+    save_agent_binding(
+        agent_id=agent_id,
+        agent_name=agent,
+        space_id=space_id,
+        local_preferred=local,
+    )
+
+    target = "project-local .ax/config.toml" if local else str(_global_config_dir() / "config.toml")
+    console.print(f"[green]Saved agent binding to {target}[/green]")
+    if agent_id:
+        console.print(f"  agent_id = {agent_id}")
+    if agent:
+        console.print(f"  agent_name = {agent}")
+    if space_id:
+        console.print(f"  space_id = {space_id}")
+
+
+@app.command()
+def unbind(
+    local: bool = typer.Option(False, "--local", help="Clear the project-local binding instead of ~/.ax/config.toml"),
+):
+    """Clear the saved default agent binding."""
+    changed = clear_agent_binding(local=local)
+    if changed:
+        target = "project-local .ax/config.toml" if local else str(_global_config_dir() / "config.toml")
+        console.print(f"[green]Cleared saved agent binding from {target}[/green]")
+    else:
+        console.print("[yellow]No saved agent binding found.[/yellow]")
+
+
 @app.command("init")
 def init(
     token: str = typer.Option(None, "--token", "-t", help="PAT token"),
     base_url: str = typer.Option("http://localhost:8001", "--url", "-u", help="API base URL"),
     agent_name: str = typer.Option(None, "--agent", "-a", help="Default agent name"),
-    agent_id: str = typer.Option(None, "--agent-id", help="Default agent ID (for agent-bound PATs)"),
+    agent_id: str = typer.Option(None, "--agent-id", help="Default agent ID (canonical for agent-bound PATs)"),
     space_id: str = typer.Option(None, "--space-id", "-s", help="Default space ID"),
 ):
     """Set up a project-local .ax/config.toml in the current repo.

@@ -33,10 +33,28 @@ def print_kv(data: dict):
         console.print(f"[bold]{k}[/bold]: {v}")
 
 
+def is_stale_agent_binding_error(e: httpx.HTTPStatusError) -> bool:
+    """Return True when the API rejected a saved agent binding for this token."""
+    try:
+        detail = str(e.response.json().get("detail", ""))
+    except Exception:
+        detail = e.response.text or ""
+    lowered = detail.lower()
+    return e.response.status_code == 403 and "allowed_agent_ids" in lowered and "not permitted" in lowered
+
+
 def handle_error(e: httpx.HTTPStatusError):
     try:
         detail = e.response.json().get("detail", e.response.text)
     except Exception:
         detail = e.response.text
+    if is_stale_agent_binding_error(e):
+        detail = (
+            f"{detail}\n"
+            "Hint: the saved agent binding is not valid for this credential. "
+            "Rebind with 'ax auth bind --agent <name>' or 'ax auth bind --agent-id <uuid>', "
+            "or clear it with 'ax auth unbind'. Use '--as-user' only for user-scoped admin "
+            "operations like key management."
+        )
     typer.echo(f"Error {e.response.status_code}: {detail}", err=True)
     raise typer.Exit(1)
