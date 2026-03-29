@@ -5,7 +5,7 @@ from typing import Optional
 import httpx
 import typer
 
-from .commands import auth, keys, agents, messages, tasks, events, listen
+from .commands import auth, keys, agents, messages, tasks, events, listen, context
 
 app = typer.Typer(name="ax", help="aX Platform CLI", no_args_is_help=True)
 app.add_typer(auth.app, name="auth")
@@ -15,6 +15,7 @@ app.add_typer(messages.app, name="messages")
 app.add_typer(tasks.app, name="tasks")
 app.add_typer(events.app, name="events")
 app.add_typer(listen.app, name="listen")
+app.add_typer(context.app, name="context")
 
 
 @app.command("send")
@@ -25,6 +26,7 @@ def send_shortcut(
     reply_to: Optional[str] = typer.Option(None, "--reply-to", "-r", help="Reply to message ID (thread)"),
     to: Optional[str] = typer.Option(None, "--to", help="@mention another agent by name"),
     act_as: Optional[str] = typer.Option(None, "--act-as", help="Impersonate: send as a different agent. Requires scoped token."),
+    files: Optional[list[str]] = typer.Option(None, "--file", "-f", help="Attach a local file (repeatable)"),
     space_id: Optional[str] = typer.Option(None, "--space-id", "-s", help="Override default space"),
     as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
@@ -35,6 +37,7 @@ def send_shortcut(
         timeout=timeout,
         to=to,
         act_as=act_as,
+        files=files,
         channel="main",
         parent=reply_to,
         space_id=space_id,
