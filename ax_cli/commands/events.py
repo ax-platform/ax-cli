@@ -17,7 +17,6 @@ ROUTING_EVENT_TYPES = {"routing_status", "dispatch_progress", "agent_processing"
 @app.command("stream")
 def stream(
     max_events: int = typer.Option(0, "--max-events", help="Stop after N events (0=unlimited)"),
-    agent_id: Optional[str] = typer.Option(None, "--agent-id", help="Target agent"),
     filter: Optional[str] = typer.Option(None, "--filter", help="Filter: 'routing', 'messages', or event type"),
     as_json: bool = JSON_OPTION,
 ):
@@ -26,8 +25,6 @@ def stream(
     url = f"{client.base_url}/api/v1/sse/messages"
     params = {"token": client.token}
     headers = {}
-    if agent_id:
-        headers["X-Agent-Id"] = agent_id
 
     filter_types: set[str] | None = None
     if filter == "routing":

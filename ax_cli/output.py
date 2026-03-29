@@ -10,7 +10,6 @@ console = Console()
 
 JSON_OPTION = typer.Option(False, "--json", help="Output as JSON")
 SPACE_OPTION = typer.Option(None, "--space-id", help="Override default space")
-AGENT_OPTION = typer.Option(None, "--agent-id", help="Target agent")
 
 
 def print_json(data):

@@ -99,8 +99,8 @@ def send(
     content: str = typer.Argument(..., help="Message content"),
     wait: bool = typer.Option(True, "--wait/--skip-ax", "-w", help="Wait for aX response (default: yes)"),
     timeout: int = typer.Option(60, "--timeout", "-t", help="Max seconds to wait for reply"),
-    agent_id: Optional[str] = typer.Option(None, "--agent-id", help="Target agent"),
-    agent_name: Optional[str] = typer.Option(None, "--agent", help="Send as agent (X-Agent-Name)"),
+    to: Optional[str] = typer.Option(None, "--to", help="@mention another agent by name (prepends @name to your message)"),
+    act_as: Optional[str] = typer.Option(None, "--act-as", help="Impersonate: send as a different agent identity. Requires a token scoped to that agent."),
     channel: str = typer.Option("main", "--channel", help="Channel name"),
     parent: Optional[str] = typer.Option(None, "--parent", "--reply-to", "-r", help="Parent message ID (thread reply)"),
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
@@ -110,14 +110,61 @@ def send(
     client = get_client()
     sid = resolve_space_id(client, explicit=space_id)
 
-    # Resolve agent: explicit flag > env > auto-detect from scope > local config
-    resolved_agent = resolve_agent_name(explicit=agent_name, client=client)
-    if resolved_agent:
-        client._headers["X-Agent-Name"] = resolved_agent
+    # --act-as: override sender identity (requires scoped token)
+    if act_as:
+        # Validate scope before sending — fail fast with a clear message
+        try:
+            me = client.whoami()
+            scope = me.get("credential_scope", {})
+            agent_scope = scope.get("agent_scope", "all")
+            allowed_ids = scope.get("allowed_agent_ids", [])
+
+            if agent_scope == "user":
+                typer.echo(
+                    f"Error: --act-as rejected. Your token has agent_scope='user' — "
+                    f"it cannot send as any agent.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+
+            if agent_scope == "agents" and allowed_ids:
+                # Resolve the agent name to an ID to check scope
+                try:
+                    agents_data = client.list_agents()
+                    agents = agents_data if isinstance(agents_data, list) else agents_data.get("agents", [])
+                    match = next((a for a in agents if a.get("name") == act_as), None)
+                    if match and str(match.get("id")) not in allowed_ids:
+                        allowed_names = []
+                        for a in agents:
+                            if str(a.get("id")) in allowed_ids:
+                                allowed_names.append(a.get("name", str(a.get("id"))))
+                        typer.echo(
+                            f"Error: --act-as '{act_as}' rejected. "
+                            f"Your token is only scoped to: {', '.join(allowed_names)}",
+                            err=True,
+                        )
+                        raise typer.Exit(1)
+                except httpx.HTTPStatusError:
+                    pass  # Let the server enforce if we can't check client-side
+        except httpx.HTTPStatusError:
+            pass  # Let the server enforce
+
+        client._headers["X-Agent-Name"] = act_as
+    else:
+        # Default: resolve agent from env/config (normal identity)
+        resolved_agent = resolve_agent_name(client=client)
+        if resolved_agent:
+            client._headers["X-Agent-Name"] = resolved_agent
+
+    # --to: prepend @mention to content for targeting another agent
+    final_content = content
+    if to:
+        mention = to if to.startswith("@") else f"@{to}"
+        final_content = f"{mention} {content}"
 
     try:
         data = client.send_message(
-            sid, content, agent_id=agent_id, channel=channel, parent_id=parent,
+            sid, final_content, channel=channel, parent_id=parent,
         )
     except httpx.HTTPStatusError as e:
         handle_error(e)
@@ -151,13 +198,12 @@ def send(
 def list_messages(
     limit: int = typer.Option(20, "--limit", help="Max messages to return"),
     channel: str = typer.Option("main", "--channel", help="Channel name"),
-    agent_id: Optional[str] = typer.Option(None, "--agent-id", help="Target agent"),
     as_json: bool = JSON_OPTION,
 ):
     """List recent messages."""
     client = get_client()
     try:
-        data = client.list_messages(limit=limit, channel=channel, agent_id=agent_id)
+        data = client.list_messages(limit=limit, channel=channel)
     except httpx.HTTPStatusError as e:
         handle_error(e)
     messages = data if isinstance(data, list) else data.get("messages", [])
@@ -230,13 +276,12 @@ def delete(
 def search(
     query: str = typer.Argument(..., help="Search query"),
     limit: int = typer.Option(20, "--limit", help="Max results"),
-    agent_id: Optional[str] = typer.Option(None, "--agent-id", help="Target agent"),
     as_json: bool = JSON_OPTION,
 ):
     """Search messages."""
     client = get_client()
     try:
-        data = client.search_messages(query, limit=limit, agent_id=agent_id)
+        data = client.search_messages(query, limit=limit)
     except httpx.HTTPStatusError as e:
         handle_error(e)
     results = data if isinstance(data, list) else data.get("results", data.get("messages", []))

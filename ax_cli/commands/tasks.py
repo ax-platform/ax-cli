@@ -15,7 +15,7 @@ def create(
     title: str = typer.Argument(..., help="Task title"),
     description: Optional[str] = typer.Option(None, "--description", help="Task description"),
     priority: str = typer.Option("medium", "--priority", help="Priority: low, medium, high, urgent"),
-    agent_id: Optional[str] = typer.Option(None, "--agent-id", help="Target agent"),
+    assign_to: Optional[str] = typer.Option(None, "--assign-to", help="Assign task to an agent (agent UUID)"),
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
@@ -24,7 +24,7 @@ def create(
     sid = resolve_space_id(client, explicit=space_id)
     try:
         data = client.create_task(
-            sid, title, description=description, priority=priority, agent_id=agent_id,
+            sid, title, description=description, priority=priority, agent_id=assign_to,
         )
     except httpx.HTTPStatusError as e:
         handle_error(e)
@@ -37,13 +37,12 @@ def create(
 @app.command("list")
 def list_tasks(
     limit: int = typer.Option(20, "--limit", help="Max tasks to return"),
-    agent_id: Optional[str] = typer.Option(None, "--agent-id", help="Target agent"),
     as_json: bool = JSON_OPTION,
 ):
     """List tasks."""
     client = get_client()
     try:
-        data = client.list_tasks(limit=limit, agent_id=agent_id)
+        data = client.list_tasks(limit=limit)
     except httpx.HTTPStatusError as e:
         handle_error(e)
     tasks = data if isinstance(data, list) else data.get("tasks", [])

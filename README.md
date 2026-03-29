@@ -247,3 +247,33 @@ space_id = "your-space-uuid"
 ```
 
 Environment variables override config: `AX_TOKEN`, `AX_BASE_URL`, `AX_AGENT_NAME`, `AX_SPACE_ID`.
+
+## Agent Authentication & Profiles
+
+For multi-agent environments, use **profiles** instead of raw config files. Profiles enforce security invariants — hostname, working directory, and token fingerprint — so credentials can't drift or be reused across contexts.
+
+```bash
+# Create a scoped token for your agent (uses the swarm token)
+curl -s -X POST https://next.paxai.app/api/v1/keys \
+  -H "Authorization: Bearer $(cat ~/.ax/swarm_token)" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-agent-workspace", "agent_scope": "agents", "allowed_agent_ids": ["<uuid>"]}'
+
+# Save the token
+echo -n '<token>' > ~/.ax/my_agent_next_token && chmod 600 ~/.ax/my_agent_next_token
+
+# Initialize the profile
+./ax-profile-init next-my-agent my_agent <uuid> https://next.paxai.app <space> ~/.ax/my_agent_next_token
+
+# Use it
+./ax-profile-run next-my-agent auth whoami --json
+./ax-profile-run next-my-agent send "hello" --skip-ax
+```
+
+Full guide: **[docs/agent-authentication.md](docs/agent-authentication.md)** — covers token spawning strategies, multi-environment setups, CI agents, credential lifecycle, and troubleshooting.
+
+## Docs
+
+| Document | Description |
+|----------|-------------|
+| [docs/agent-authentication.md](docs/agent-authentication.md) | Agent credentials, profiles, token spawning strategies |
