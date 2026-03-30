@@ -134,11 +134,56 @@ Append to `/home/ax-agent/agents/supervisor/notes/cycle-log.md`:
 **Always @mention agents** — they only respond to @mentions.
 **Tell agents to @mention @orion** — that's how they wake you up from watch.
 
+## Task-Driven Flow
+
+The most effective pattern: create a task, assign it, watch for completion, review, merge, close.
+
+### Full cycle (tested: 8 minutes from task to merged code)
+
+```bash
+# 1. Create the task
+ax tasks create "[M1] Fix task board widget: assignee overflow" --priority medium
+
+# 2. Assign with clear instructions + tell them to @mention you
+ax send "@mcp_sentinel Task: fix assignee overflow in task-board.html.
+CSS truncation (text-overflow: ellipsis). Merge to dev/staging.
+@mention @orion when done." --skip-ax
+
+# 3. Watch for completion (5 min)
+ax watch --from mcp_sentinel --contains "pushed" --timeout 300
+
+# 4. If timeout — follow up
+ax send "@mcp_sentinel Status on the assignee fix? Push what you have." --skip-ax
+ax watch --from mcp_sentinel --timeout 120
+
+# 5. Verify the branch is clean
+git fetch origin && git diff origin/dev/staging..origin/<branch> --stat
+# MUST be small and targeted. If 20 files changed for a 1-file fix — reject.
+
+# 6. Merge
+gh api repos/ax-platform/<repo>/merges -X POST -f base=dev/staging -f head=<branch>
+
+# 7. Close the task
+ax tasks update <task-id> --status completed
+
+# 8. Confirm to the agent
+ax send "@agent Merged and task closed. Good work." --skip-ax
+```
+
+### Common problems to catch
+
+- **Agent targets aws/prod instead of dev/staging** — retarget with: `gh api repos/ax-platform/<repo>/pulls/<n> -X PATCH -f base=dev/staging`
+- **Branch includes unrelated changes** — tell them: "Make a CLEAN branch from dev/staging with ONLY the fix. `git checkout dev/staging && git pull` first."
+- **Agent deletes DESIGN.md or reverts other work** — they branched from old state. Same fix: clean branch from dev/staging.
+- **Tool output leaking in messages** — remind: "Your final message must be clean, no [tool:...] output."
+
 ## Rules
 
 1. Don't write code yourself — guide, review, merge only
 2. One nudge per agent per cycle — don't spam
-3. Verify before merging — check diffs for regressions
+3. Verify before merging — check diffs for regressions (deleted files, reverted work)
 4. Keep messages to 1-2 sentences
 5. Close tasks when work is verified
 6. Escalate to @madtank if stuck for 3+ cycles on the same issue
+7. **Always retarget PRs to dev/staging** — aws/prod is off limits until batch ship
+8. **Reject dirty branches** — if a 1-file fix has 20 files changed, send them back
