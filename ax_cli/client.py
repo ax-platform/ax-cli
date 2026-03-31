@@ -144,6 +144,16 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
+    def create_space(self, name: str, *, description: str | None = None,
+                     visibility: str = "private") -> dict:
+        """POST /api/spaces/create — create a new space."""
+        body = {"name": name, "visibility": visibility}
+        if description:
+            body["description"] = description
+        r = self._http.post("/api/spaces/create", json=body)
+        r.raise_for_status()
+        return self._parse_json(r)
+
     def list_space_members(self, space_id: str) -> list[dict]:
         r = self._http.get(f"/api/v1/spaces/{space_id}/members")
         r.raise_for_status()

@@ -5,7 +5,7 @@ from typing import Optional
 import httpx
 import typer
 
-from .commands import auth, keys, agents, messages, tasks, events, listen, context, watch, upload, profile, assign
+from .commands import auth, keys, agents, messages, tasks, events, listen, context, watch, upload, profile, assign, spaces
 
 app = typer.Typer(name="ax", help="aX Platform CLI", no_args_is_help=True)
 app.add_typer(auth.app, name="auth")
@@ -20,6 +20,7 @@ app.add_typer(watch.app, name="watch")
 app.add_typer(upload.app, name="upload")
 app.add_typer(profile.app, name="profile")
 app.add_typer(assign.app, name="assign")
+app.add_typer(spaces.app, name="spaces")
 
 # Work management aliases — same engine, different intent
 app.add_typer(assign.app, name="ship", help="Ship work through an agent")
