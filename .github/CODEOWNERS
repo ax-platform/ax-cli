@@ -1,0 +1,9 @@
+# CODEOWNERS — ax-cli
+# These owners are automatically requested for review on PRs.
+
+# Default owner — all files
+* @madtank
+
+# CI/CD and publishing
+.github/ @madtank
+pyproject.toml @madtank
