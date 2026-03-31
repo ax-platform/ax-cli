@@ -66,6 +66,16 @@ def upload_file(
         console.print(f"[green]Uploaded:[/green] {original_name} ({content_type}, {size} bytes)")
 
     # Step 2: Store reference in context
+    # For text-based files under 50KB, inline the content so agents can read it
+    TEXT_TYPES = ("text/", "application/json", "application/xml", "application/yaml")
+    MAX_INLINE_SIZE = 50_000
+    inline_content = None
+    if size <= MAX_INLINE_SIZE and any(content_type.startswith(t) for t in TEXT_TYPES):
+        try:
+            inline_content = Path(file_path).expanduser().resolve().read_text(errors="replace")
+        except Exception:
+            pass
+
     context_value = {
         "type": "file_upload",
         "attachment_id": attachment_id,
@@ -74,6 +84,8 @@ def upload_file(
         "size": size,
         "url": url,
     }
+    if inline_content is not None:
+        context_value["content"] = inline_content
 
     try:
         if vault:
