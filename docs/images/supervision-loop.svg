@@ -1,0 +1,91 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Supervisor loop</title>
+  <desc id="desc">A dark themed loop diagram showing a supervisor assigning a task with ax send, watching with ax watch, deciding on match by verifying branch, reviewing diff, merging or rejecting, and closing the task, with a timeout path for checking messages, fetching git updates, and nudging or escalating before repeating.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10V0Z" fill="#60A5FA"/>
+    </marker>
+    <style>
+      .title { font: 700 34px Inter, Arial, sans-serif; fill: #F8FAFC; }
+      .subtitle { font: 500 16px Inter, Arial, sans-serif; fill: #94A3B8; }
+      .label { font: 700 22px Inter, Arial, sans-serif; fill: #E2E8F0; }
+      .body { font: 500 16px Inter, Arial, sans-serif; fill: #CBD5E1; }
+      .small { font: 600 14px Inter, Arial, sans-serif; fill: #93C5FD; letter-spacing: 0.08em; text-transform: uppercase; }
+      .pill { font: 700 14px Inter, Arial, sans-serif; fill: #DBEAFE; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" rx="28" fill="url(#bg)"/>
+  <rect x="28" y="28" width="1144" height="704" rx="24" stroke="#1E293B"/>
+
+  <text x="70" y="92" class="title">Supervisor Loop</text>
+  <text x="70" y="122" class="subtitle">Assign work, watch the thread, decide on delivery, and recover cleanly when progress stalls.</text>
+
+  <path d="M600 176C763 176 894 307 894 380C894 453 763 584 600 584C437 584 306 453 306 380C306 307 437 176 600 176Z" stroke="#1D4ED8" stroke-width="2.5" stroke-dasharray="10 10" opacity="0.85"/>
+  <circle cx="600" cy="380" r="16" fill="#2563EB" opacity="0.18"/>
+  <circle cx="600" cy="380" r="8" fill="#60A5FA"/>
+
+  <g filter="url(#shadow)">
+    <rect x="470" y="146" width="260" height="92" rx="22" fill="#0F172A" stroke="#3B82F6" stroke-width="2"/>
+    <text x="500" y="180" class="small">Start</text>
+    <text x="500" y="212" class="label">Assign task</text>
+    <text x="500" y="234" class="body">Use <tspan fill="#93C5FD">ax send</tspan> to hand work to an agent.</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="840" y="310" width="250" height="104" rx="22" fill="#0F172A" stroke="#334155"/>
+    <text x="870" y="344" class="small">Observe</text>
+    <text x="870" y="376" class="label">Watch progress</text>
+    <text x="870" y="398" class="body">Track the live thread with</text>
+    <text x="870" y="420" class="body"><tspan fill="#93C5FD">ax watch</tspan> until work completes.</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="460" y="530" width="280" height="108" rx="22" fill="#0F172A" stroke="#334155"/>
+    <text x="490" y="564" class="small">Timeout path</text>
+    <text x="490" y="596" class="label">Check and nudge</text>
+    <text x="490" y="618" class="body">Review <tspan fill="#93C5FD">messages list</tspan>, run <tspan fill="#93C5FD">git fetch</tspan>,</text>
+    <text x="490" y="640" class="body">then nudge the agent or escalate.</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="110" y="308" width="270" height="144" rx="22" fill="#0F172A" stroke="#334155"/>
+    <text x="140" y="342" class="small">Decision path</text>
+    <text x="140" y="374" class="label">On match</text>
+    <text x="140" y="398" class="body">1. Verify git branch</text>
+    <text x="140" y="422" class="body">2. Review diff</text>
+    <text x="140" y="446" class="body">3. Merge or reject</text>
+    <text x="140" y="470" class="body">4. Close task</text>
+  </g>
+
+  <path d="M730 192C806 224 862 279 892 330" stroke="#60A5FA" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <path d="M904 414C886 468 832 523 740 566" stroke="#60A5FA" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <path d="M462 584C385 548 333 500 285 450" stroke="#60A5FA" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <path d="M278 310C321 258 383 216 470 190" stroke="#60A5FA" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+
+  <g>
+    <rect x="946" y="248" width="88" height="34" rx="17" fill="#1E3A8A" stroke="#3B82F6"/>
+    <text x="972" y="270" class="pill">watch</text>
+  </g>
+  <g>
+    <rect x="760" y="620" width="104" height="34" rx="17" fill="#3F1D1D" stroke="#7F1D1D"/>
+    <text x="786" y="642" class="pill">timeout?</text>
+  </g>
+  <g>
+    <rect x="228" y="260" width="92" height="34" rx="17" fill="#1E3A8A" stroke="#3B82F6"/>
+    <text x="257" y="282" class="pill">match</text>
+  </g>
+  <g>
+    <rect x="318" y="192" width="118" height="34" rx="17" fill="#0F172A" stroke="#334155"/>
+    <text x="343" y="214" class="pill">repeat loop</text>
+  </g>
+
+  <text x="70" y="700" class="subtitle">Supervisor keeps cycling: assign → observe → decide, with a timeout branch for follow-up and escalation.</text>
+</svg>

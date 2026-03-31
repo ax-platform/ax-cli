@@ -1,0 +1,92 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">aX CLI profile fingerprint flow</title>
+  <desc id="desc">A dark themed flow diagram showing pipx install axctl, ax profile add storing URL, agent, token SHA-256, and hostname, ax profile use verifying token existence, SHA match, and host match, then either refusing or activating before eval ax profile env and ax auth whoami.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1200" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10V0Z" fill="#60A5FA"/>
+    </marker>
+    <style>
+      .title{fill:#F9FAFB;font:700 34px 'Inter', 'Segoe UI', sans-serif}
+      .subtitle{fill:#94A3B8;font:500 18px 'Inter', 'Segoe UI', sans-serif}
+      .boxTitle{fill:#EFF6FF;font:700 22px 'Inter', 'Segoe UI', sans-serif}
+      .boxText{fill:#CBD5E1;font:500 18px 'Inter', 'Segoe UI', sans-serif}
+      .small{fill:#93C5FD;font:600 15px 'Inter', 'Segoe UI', sans-serif;letter-spacing:0.08em;text-transform:uppercase}
+      .decision{fill:#F8FAFC;font:700 20px 'Inter', 'Segoe UI', sans-serif}
+      .label{fill:#BFDBFE;font:700 16px 'Inter', 'Segoe UI', sans-serif}
+      .muted{fill:#94A3B8;font:500 16px 'Inter', 'Segoe UI', sans-serif}
+      .mono{fill:#DBEAFE;font:600 17px 'JetBrains Mono', 'SFMono-Regular', monospace}
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" rx="28" fill="url(#panel)"/>
+  <text x="72" y="90" class="title">Profile Fingerprint Flow</text>
+  <text x="72" y="124" class="subtitle">Secure profile activation checks token fingerprint and machine identity before axctl uses credentials.</text>
+
+  <rect x="68" y="168" width="250" height="132" rx="24" fill="#0F172A" stroke="#2563EB" stroke-width="2" filter="url(#shadow)"/>
+  <text x="96" y="210" class="small">Step 1</text>
+  <text x="96" y="246" class="boxTitle">Install axctl</text>
+  <text x="96" y="282" class="mono">pipx install axctl</text>
+
+  <rect x="382" y="168" width="350" height="220" rx="24" fill="#111827" stroke="#1D4ED8" stroke-width="2" filter="url(#shadow)"/>
+  <text x="412" y="210" class="small">Step 2</text>
+  <text x="412" y="246" class="boxTitle">Add profile</text>
+  <text x="412" y="282" class="mono">ax profile add</text>
+  <text x="412" y="320" class="boxText">Stores:</text>
+  <text x="432" y="352" class="boxText">• base URL</text>
+  <text x="432" y="380" class="boxText">• agent name</text>
+  <text x="432" y="408" class="boxText">• token SHA-256</text>
+  <text x="432" y="436" class="boxText">• hostname</text>
+
+  <rect x="798" y="168" width="320" height="220" rx="24" fill="#111827" stroke="#1D4ED8" stroke-width="2" filter="url(#shadow)"/>
+  <text x="828" y="210" class="small">Step 3</text>
+  <text x="828" y="246" class="boxTitle">Use profile</text>
+  <text x="828" y="282" class="mono">ax profile use</text>
+  <text x="828" y="326" class="boxText">Loads saved fingerprint</text>
+  <text x="828" y="356" class="boxText">before making it active.</text>
+
+  <path d="M318 234H362" stroke="#60A5FA" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <path d="M732 234H778" stroke="#60A5FA" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+
+  <g filter="url(#shadow)">
+    <path d="M958 442L1096 542L958 642L820 542L958 442Z" fill="#0F172A" stroke="#2563EB" stroke-width="2.5"/>
+  </g>
+  <text x="915" y="520" class="decision">Verify</text>
+  <text x="888" y="548" class="decision">fingerprint</text>
+  <text x="891" y="576" class="decision">checks</text>
+
+  <path d="M958 388V426" stroke="#60A5FA" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+
+  <rect x="96" y="474" width="278" height="166" rx="22" fill="#111827" stroke="#334155" stroke-width="2"/>
+  <text x="124" y="516" class="boxTitle">Checks performed</text>
+  <text x="124" y="554" class="boxText">1. Token file exists?</text>
+  <text x="124" y="586" class="boxText">2. SHA matches saved hash?</text>
+  <text x="124" y="618" class="boxText">3. Host matches saved host?</text>
+
+  <path d="M818 542H402" stroke="#60A5FA" stroke-width="3.5" stroke-dasharray="8 10"/>
+
+  <rect x="804" y="54" width="244" height="76" rx="18" fill="#172554" stroke="#3B82F6" stroke-width="1.5"/>
+  <text x="834" y="100" class="muted">Refuse on any mismatch</text>
+
+  <rect x="760" y="644" width="396" height="74" rx="22" fill="#0B1220" stroke="#2563EB" stroke-width="2"/>
+  <text x="792" y="690" class="mono">eval $(ax profile env)  →  ax auth whoami</text>
+
+  <rect x="72" y="648" width="262" height="72" rx="22" fill="#3F1D1D" stroke="#EF4444" stroke-width="2"/>
+  <text x="108" y="692" class="boxTitle">Fail → refuse activation</text>
+
+  <rect x="780" y="474" width="274" height="96" rx="22" fill="#0B1220" stroke="#22C55E" stroke-width="2"/>
+  <text x="822" y="514" class="label">PASS</text>
+  <text x="822" y="546" class="boxTitle">Activate profile</text>
+
+  <path d="M1096 542H1160V684H1152" stroke="#22C55E" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+  <path d="M820 542H456V684H354" stroke="#F87171" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+
+  <text x="1092" y="528" class="label">pass</text>
+  <text x="732" y="528" class="label">fail</text>
+</svg>
