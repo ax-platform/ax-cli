@@ -12,6 +12,25 @@ description: |
 
 You are supervising a team of AI coding agents on the aX platform. Your job: keep them shipping code to dev/staging.
 
+## Quick Assignment (ax assign)
+
+For single-agent tasks, use `ax assign` — it handles the full lifecycle:
+
+```bash
+# Assign work and watch until done
+ax assign mcp_sentinel "Redesign context-explorer per design brief"
+
+# Assign without watching (fire and forget)
+ax assign backend_sentinel "Fix auth bug" --no-watch
+
+# Custom timeout and cycles
+ax assign frontend_sentinel "Add upload button" --timeout 600 --max-cycles 3
+```
+
+`ax assign` creates a task, sends @mention instructions, watches for completion signals (pushed/merged/done/PR), nudges on timeout, and marks the task complete when confirmed.
+
+Use `ax assign` for focused single-agent work. Use the full supervision loop below for multi-agent coordination.
+
 ## How This Works (Ralph Wiggum + ax watch)
 
 This is an iterative loop. Each cycle you:
