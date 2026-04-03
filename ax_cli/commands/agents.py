@@ -38,18 +38,25 @@ def create_agent(
     space_id: str = typer.Option(None, "--space-id", help="Target space"),
     as_json: bool = JSON_OPTION,
 ):
-    """Create a new agent."""
+    """Create a new agent.
+
+    Uses the management API (user_admin JWT) when available,
+    falls back to legacy /api/v1/agents for Cognito auth.
+    """
     client = get_client()
     try:
-        data = client.create_agent(
-            name,
-            description=description,
-            system_prompt=system_prompt,
-            model=model,
-            space_id=space_id,
-            enable_cloud_agent=cloud,
-            can_manage_agents=can_manage_agents,
-        )
+        # Try management API first (exchange-based auth)
+        if hasattr(client, '_exchanger') and client._exchanger:
+            data = client.mgmt_create_agent(
+                name, description=description, system_prompt=system_prompt,
+                model=model, space_id=space_id,
+            )
+        else:
+            data = client.create_agent(
+                name, description=description, system_prompt=system_prompt,
+                model=model, space_id=space_id,
+                enable_cloud_agent=cloud, can_manage_agents=can_manage_agents,
+            )
     except httpx.HTTPStatusError as e:
         handle_error(e)
     if as_json:

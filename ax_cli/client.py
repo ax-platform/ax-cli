@@ -532,6 +532,78 @@ class AxClient:
 
     # --- SSE ---
 
+    # --- Management API (user_admin JWT) ---
+
+    def _admin_headers(self, scope: str) -> dict:
+        """Get headers with a user_admin JWT for management operations."""
+        if not self._exchanger:
+            return self._base_headers
+        jwt = self._exchanger.get_token("user_admin", scope=scope)
+        return {**self._base_headers, "Authorization": f"Bearer {jwt}"}
+
+    def mgmt_create_agent(self, name: str, **kwargs) -> dict:
+        """POST /agents/manage/create — requires user_admin + agents.create."""
+        body: dict = {"name": name}
+        for k in ("description", "system_prompt", "model", "space_id"):
+            if k in kwargs and kwargs[k] is not None:
+                body[k] = kwargs[k]
+        r = self._http.post("/agents/manage/create", json=body,
+                            headers=self._admin_headers("agents.create"))
+        r.raise_for_status()
+        return self._parse_json(r)
+
+    def mgmt_list_agents(self) -> list[dict]:
+        """GET /agents/manage/list — requires user_admin + agents.create."""
+        r = self._http.get("/agents/manage/list",
+                           headers=self._admin_headers("agents.create"))
+        r.raise_for_status()
+        return self._parse_json(r)
+
+    def mgmt_update_agent(self, agent_id: str, **fields) -> dict:
+        """PATCH /agents/manage/{id} — requires user_admin + agents.create."""
+        r = self._http.patch(f"/agents/manage/{agent_id}", json=fields,
+                             headers=self._admin_headers("agents.create"))
+        r.raise_for_status()
+        return self._parse_json(r)
+
+    def mgmt_issue_agent_pat(self, agent_id: str, *, name: str | None = None,
+                             expires_in_days: int = 90) -> dict:
+        """POST /credentials/agent-pat — requires user_admin + credentials.issue.agent."""
+        body = {"agent_id": agent_id, "expires_in_days": expires_in_days}
+        if name:
+            body["name"] = name
+        r = self._http.post("/credentials/agent-pat", json=body,
+                            headers=self._admin_headers("agents.create credentials.issue.agent"))
+        r.raise_for_status()
+        return self._parse_json(r)
+
+    def mgmt_issue_enrollment(self, *, name: str | None = None,
+                               expires_in_hours: int = 1) -> dict:
+        """POST /credentials/enrollment — requires user_admin + credentials.issue.agent."""
+        body = {"expires_in_hours": expires_in_hours}
+        if name:
+            body["name"] = name
+        r = self._http.post("/credentials/enrollment", json=body,
+                            headers=self._admin_headers("agents.create credentials.issue.agent"))
+        r.raise_for_status()
+        return self._parse_json(r)
+
+    def mgmt_revoke_credential(self, credential_id: str) -> dict:
+        """DELETE /credentials/{id} — requires user_admin + credentials.revoke."""
+        r = self._http.delete(f"/credentials/{credential_id}",
+                              headers=self._admin_headers("credentials.revoke"))
+        r.raise_for_status()
+        return self._parse_json(r)
+
+    def mgmt_list_credentials(self) -> list[dict]:
+        """GET /credentials — requires user_admin + credentials.issue.agent."""
+        r = self._http.get("/credentials",
+                           headers=self._admin_headers("agents.create credentials.issue.agent"))
+        r.raise_for_status()
+        return self._parse_json(r)
+
+    # --- SSE ---
+
     def connect_sse(self) -> httpx.Response:
         """GET /api/v1/sse/messages — returns streaming response.
 
