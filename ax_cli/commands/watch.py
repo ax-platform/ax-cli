@@ -118,6 +118,86 @@ def _matches(
     return True
 
 
+def _watch_poll(
+    client,
+    *,
+    from_agent: str | None = None,
+    contains: str | None = None,
+    timeout: int = 300,
+    interval: int = 5,
+    output_json: bool = False,
+    quiet: bool = False,
+):
+    """Poll messages list, show 'Working...' progress, return final response.
+
+    This catches the tool-progress updates that SSE doesn't emit.
+    Watches the newest message from `from_agent` (or any non-self sender).
+    Exits when the message is no longer 'Working...' status.
+    """
+    agent_name = resolve_agent_name()
+    start_time = time.time()
+    last_status = ""
+
+    if not quiet:
+        conditions = []
+        if from_agent:
+            conditions.append(f"@{from_agent}")
+        else:
+            conditions.append("any agent")
+        console.print(f"[dim]Polling for response from {', '.join(conditions)} (timeout: {timeout}s, interval: {interval}s)[/dim]")
+
+    while True:
+        elapsed = time.time() - start_time
+        if timeout > 0 and elapsed > timeout:
+            if not quiet:
+                console.print(f"\n[yellow]Timeout — no final response in {timeout}s[/yellow]")
+            raise typer.Exit(1)
+
+        try:
+            data = client.list_messages(limit=10)
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadError):
+            time.sleep(interval)
+            continue
+
+        messages = data if isinstance(data, list) else data.get("messages", [])
+
+        # Find the most recent message from the target agent (or any non-self)
+        for msg in messages:
+            sender = msg.get("display_name") or msg.get("sender_handle") or ""
+            if agent_name and sender.lower() == agent_name.lower():
+                continue
+            if from_agent and sender.lower() != from_agent.lower():
+                continue
+
+            content = msg.get("content", "")
+
+            if content.startswith("Working"):
+                # Show progress update
+                status_line = content.split("\n")[0][:120]
+                if status_line != last_status:
+                    last_status = status_line
+                    if not quiet:
+                        console.print(f"  [dim]{status_line}[/dim]", end="\r")
+                        # Also show tool lines
+                        lines = content.strip().split("\n")
+                        for tl in lines[1:4]:
+                            console.print(f"  [dim]{tl.strip()[:100]}[/dim]")
+                break
+            else:
+                # Final response — not "Working..." anymore
+                if not quiet and not output_json:
+                    console.print(f"\n[bold cyan]{sender}:[/bold cyan] {content[:3000]}")
+                    if len(content) > 3000:
+                        console.print(f"[dim]  ... ({len(content)} chars total)[/dim]")
+                if output_json:
+                    print(json.dumps(msg, indent=2, default=str))
+                if not quiet:
+                    console.print(f"\n[dim]Completed in {int(elapsed)}s[/dim]")
+                raise typer.Exit(0)
+
+        time.sleep(interval)
+
+
 @app.callback(invoke_without_command=True)
 def watch(
     mention: bool = typer.Option(False, "--mention", "-m", help="Wait for @mention of your agent"),
@@ -128,16 +208,30 @@ def watch(
     count: int = typer.Option(1, "--count", "-n", help="Number of matching messages to collect"),
     output_json: bool = typer.Option(False, "--json", help="Output matching messages as JSON"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="No progress output, just the result"),
+    poll: bool = typer.Option(False, "--poll", "-p", help="Use polling instead of SSE (shows Working... progress)"),
+    interval: int = typer.Option(5, "--interval", "-i", help="Poll interval in seconds (with --poll)"),
 ):
-    """Wait for messages matching a condition on the SSE stream.
+    """Wait for messages matching a condition.
 
-    Connects to the aX SSE stream and blocks until a matching message arrives
-    or the timeout expires. Returns the matching message(s).
+    By default uses SSE. With --poll, polls messages list instead
+    (shows Working... tool progress that SSE doesn't emit).
 
     Exit codes: 0 = condition met, 1 = timeout, 2 = error
     """
     client = get_client()
     agent_name = resolve_agent_name()
+
+    if poll:
+        _watch_poll(
+            client,
+            from_agent=from_agent,
+            contains=contains,
+            timeout=timeout,
+            interval=interval,
+            output_json=output_json,
+            quiet=quiet,
+        )
+        return
     space_id = resolve_space_id(client)
 
     token = client.token
