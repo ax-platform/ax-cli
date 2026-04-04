@@ -14,9 +14,29 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+
+// --- PID file to prevent stale process accumulation ---
+const PID_FILE = join(homedir(), ".claude", "channels", "ax-channel", "server.pid");
+try {
+  // Kill any previous instance
+  if (existsSync(PID_FILE)) {
+    const oldPid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+    if (oldPid && oldPid !== process.pid) {
+      try { process.kill(oldPid, "SIGTERM"); } catch {}
+    }
+  }
+  // Write our PID
+  const pidDir = join(homedir(), ".claude", "channels", "ax-channel");
+  if (!existsSync(pidDir)) {
+    const { mkdirSync } = await import("fs");
+    mkdirSync(pidDir, { recursive: true });
+  }
+  writeFileSync(PID_FILE, String(process.pid));
+  process.on("exit", () => { try { unlinkSync(PID_FILE); } catch {} });
+} catch {}
 
 // --- Load .env from ~/.claude/channels/ax-channel/.env as fallback ---
 function loadDotEnv(): Record<string, string> {
