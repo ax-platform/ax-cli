@@ -551,26 +551,7 @@ startSSE(ensureJwt, AGENT_NAME, resolvedAgentId, async (mention) => {
   mentionQueue.push({ ...mention, delivered: false });
   if (mentionQueue.length > QUEUE_MAX) mentionQueue.shift();
 
-  // Ack immediately — create one message that gets updated in place
-  try {
-    const ackJwt = await ensureJwt();
-    const ack = await sendMessage(
-      ackJwt,
-      resolvedAgentId,
-      SPACE_ID,
-      `Received — working on it...`,
-      mention.id
-    );
-    ackMessageId = ack.id ?? null;
-    if (ackMessageId) sentMessageIds.add(ackMessageId);
-    log(`ack sent ${ackMessageId?.slice(0, 12)} for ${mention.id.slice(0, 12)}`);
-  } catch (err) {
-    log(`ack failed: ${err}`);
-    ackMessageId = null;
-  }
-
-  // Start heartbeat — updates the ack message in place
-  startHeartbeat(mention.id);
+  // No ack message — reduces noise. The reply itself is the confirmation.
 
   // Deliver to Claude Code session
   void mcp.notification({
