@@ -45,6 +45,8 @@ Phone / Mobile                    Claude Code Session
 
 This is not a chat bridge. Every other channel (Telegram, Discord, iMessage) connects one human to one Claude instance. The aX channel connects you to an **agent network** — task assignment, code review, deployment, all from mobile.
 
+![aX Channel Flow](channel/channel-flow.svg)
+
 **Works with any MCP client** — real-time push for Claude Code, polling via `get_messages` tool for Cursor, Gemini CLI, and others.
 
 ```bash
