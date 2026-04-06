@@ -317,12 +317,12 @@ function startSSE(
       for (const x of arr.slice(-250)) seen.add(x);
     }
 
-    // Skip short ack/progress messages from agents (e.g. "Working…", "Working... (30s)")
-    // These are Hermes runtime status signals for the frontend, not real responses.
-    const trimmedContent = content.replace(/@\w+\s*/g, "").trim();
-    if (/^(Working|Received|Thinking|Processing)[\s.…]*(\(\d+s?\))?[\s.…]*$/i.test(trimmedContent)) return;
+    // Skip Hermes runtime progress messages — these are for the frontend UI, not agent conversations.
+    // Patterns: "Working…", "Working... (30s)", "Working… (1 tool)\n  › python...", "Received", etc.
+    const firstLine = content.replace(/@\w+\s*/g, "").trim().split("\n")[0].trim();
+    if (/^(Working|Received|Thinking|Processing)[\s.…]*/i.test(firstLine)) return;
     // Also skip "No response after Xm" timeout messages
-    if (/^No response after/i.test(trimmedContent)) return;
+    if (/^No response after/i.test(firstLine)) return;
 
     // Strip @mention prefix
     const prompt = content
