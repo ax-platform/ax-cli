@@ -312,6 +312,17 @@ function startSSE(
       for (const x of arr.slice(-250)) seen.add(x);
     }
 
+    // Track inbound message ID so replies to THIS message also reach us.
+    // This extends the reply chain: A(ours) → B(theirs,delivered) → C(reply to B, also delivered).
+    if (isReplyToUs) {
+      sentMessageIds.add(id);
+      if (sentMessageIds.size > SENT_MAX) {
+        const arr = [...sentMessageIds];
+        sentMessageIds.clear();
+        for (const x of arr.slice(-SENT_MAX / 2)) sentMessageIds.add(x);
+      }
+    }
+
     // Strip @mention prefix
     const prompt = content
       .replace(new RegExp(`@${agentName}\\b\\s*[-—]?\\s*`, "i"), "")
