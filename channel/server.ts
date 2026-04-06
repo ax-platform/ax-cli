@@ -312,6 +312,11 @@ function startSSE(
       for (const x of arr.slice(-250)) seen.add(x);
     }
 
+    // Skip short ack/progress messages from agents (e.g. "Working…", "Received")
+    // These are Hermes runtime status signals for the frontend, not real responses.
+    const trimmedContent = content.replace(/@\w+\s*/g, "").trim();
+    if (/^(Working|Received|Thinking|Processing)[\s.…]*$/i.test(trimmedContent)) return;
+
     // Strip @mention prefix
     const prompt = content
       .replace(new RegExp(`@${agentName}\\b\\s*[-—]?\\s*`, "i"), "")
