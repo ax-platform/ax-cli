@@ -48,15 +48,27 @@ def create_agent(
     """
     client = get_client()
     try:
-        # Try management API first (exchange-based auth)
+        # Try management API first (exchange-based auth),
+        # fall back to legacy /api/v1/agents if it returns HTML.
         if hasattr(client, "_exchanger") and client._exchanger:
-            data = client.mgmt_create_agent(
-                name,
-                description=description,
-                system_prompt=system_prompt,
-                model=model,
-                space_id=space_id,
-            )
+            try:
+                data = client.mgmt_create_agent(
+                    name,
+                    description=description,
+                    system_prompt=system_prompt,
+                    model=model,
+                    space_id=space_id,
+                )
+            except httpx.HTTPStatusError:
+                data = client.create_agent(
+                    name,
+                    description=description,
+                    system_prompt=system_prompt,
+                    model=model,
+                    space_id=space_id,
+                    enable_cloud_agent=cloud,
+                    can_manage_agents=can_manage_agents,
+                )
         else:
             data = client.create_agent(
                 name,
