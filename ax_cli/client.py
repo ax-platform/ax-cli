@@ -201,11 +201,13 @@ class AxClient:
     def _get_jwt(self, *, force_refresh: bool = False) -> str:
         """Get a JWT from the exchanger with appropriate token class.
 
-        Token class selection: use agent_access when agent_id is set,
-        regardless of PAT prefix. Server determines class from credential
-        binding, not prefix (axp_u_ can be agent-bound).
+        Token class selection:
+        - axp_a_ (agent-bound PAT) + agent_id → agent_access
+        - axp_u_ (user PAT) → user_access always, even if agent_id is set
+          (user PATs cannot exchange for agent_access — server returns 422)
         """
-        if self.agent_id:
+        is_agent_pat = self.token.startswith("axp_a_")
+        if self.agent_id and is_agent_pat:
             return self._exchanger.get_token(
                 "agent_access", agent_id=self.agent_id,
                 scope="messages tasks context agents spaces search",
@@ -222,10 +224,6 @@ class AxClient:
 
         AUTH-SPEC-001 §13: PAT never sent to business endpoints.
         The exchanger handles caching — this just sets the header.
-
-        Token class selection:
-        - axp_a_ (agent-bound PAT) → agent_access with bound agent
-        - axp_u_ (user PAT) → user_access always (even if agent_id in config)
         """
         if self._exchanger and "Authorization" not in request.headers:
             request.headers["Authorization"] = f"Bearer {self._get_jwt()}"
