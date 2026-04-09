@@ -58,7 +58,21 @@ def _iter_sse(response: httpx.Response):
 
 
 def _should_respond(data: dict, agent_name: str, agent_id: str | None) -> bool:
-    """Return True if this message is an @mention for our agent."""
+    """Return True if this message is an @mention for our agent.
+
+    Trusts the backend's authoritative `mentions` array in the event
+    payload. If the backend says this agent is NOT in the mentions list,
+    we do not respond — even if the content text contains "@<agent_name>".
+    That matters because the backend filters disabled / break'd agents
+    out of the mentions list at broadcast time (see AgentControlService
+    enforcement in ax-backend messages_notifications.broadcast_sse), so
+    trusting the list is how this client respects the universal kill
+    switch without duplicating the check. Enforcement belongs at the
+    API boundary; this function's job is to trust what the API publishes.
+
+    Falls back to a content regex only if `mentions` is completely
+    absent from the payload (legacy / non-standard event shapes).
+    """
     if not isinstance(data, dict):
         return False
     content = data.get("content", "")
@@ -79,11 +93,33 @@ def _should_respond(data: dict, agent_name: str, agent_id: str | None) -> bool:
         )
         sender_id = data.get("agent_id") or ""
 
+    # Self-filter: never respond to our own messages, regardless of content.
     if sender.lower() == agent_name.lower():
         return False
     if agent_id and sender_id == agent_id:
         return False
 
+    # Primary path: trust the backend's authoritative mentions list.
+    # An empty list is MEANINGFUL — it means "no active mentions for
+    # this message," which covers the kill-switch filter case where
+    # disabled agents have been removed server-side. Do NOT fall back
+    # to content regex if mentions is present but empty.
+    mentions = data.get("mentions")
+    if mentions is not None and isinstance(mentions, list):
+        agent_name_lower = agent_name.lower()
+        for m in mentions:
+            handle = ""
+            if isinstance(m, str):
+                handle = m
+            elif isinstance(m, dict):
+                handle = m.get("agent_name") or m.get("handle") or m.get("name") or ""
+            if handle.lower().lstrip("@").strip() == agent_name_lower:
+                return True
+        return False
+
+    # Fallback: `mentions` field absent entirely (legacy / non-standard
+    # event shape). Use content regex so we don't silently stop reacting
+    # to payloads that predate the current mentions contract.
     return f"@{agent_name}" in content
 
 
