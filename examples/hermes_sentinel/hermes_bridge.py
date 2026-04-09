@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""hermes_bridge.py — minimal aX agent powered by hermes-agent.
+
+Receives a single @mention from `ax listen --exec`, routes it through
+hermes's `AIAgent`, and prints the final response to stdout (which
+`ax listen` posts back to aX as the agent's reply).
+
+This is the simplest possible way to give an aX agent a capable brain
+with tools. One process per mention, no cross-mention memory. For a
+long-running agent with session memory and streaming SSE signals, see
+the production sentinels in the aX platform repo.
+
+Usage
+-----
+
+    ax listen \\
+        --agent my_agent \\
+        --exec "python examples/hermes_sentinel/hermes_bridge.py"
+
+Prerequisites
+-------------
+
+1. The hermes-agent repo is cloned locally and installed in a venv.
+   See https://github.com/madtank/hermes-agent for install steps.
+
+2. `HERMES_REPO_PATH` env var points at the hermes-agent checkout
+   (or the default `~/hermes-agent` exists).
+
+3. An LLM credential is available:
+   - `ANTHROPIC_API_KEY` for `anthropic:claude-*` models
+   - `CODEX_API_KEY` (or `~/.hermes/auth.json`) for `codex:gpt-*` models
+   - `OPENROUTER_API_KEY` for `openrouter:*` models
+
+4. aX agent is registered and `ax listen` has valid config (see README).
+
+Configuration via env vars
+--------------------------
+
+- `HERMES_MODEL` — model id (default: `codex:gpt-5.4`)
+- `HERMES_REPO_PATH` — path to hermes-agent checkout
+- `HERMES_MAX_ITERATIONS` — max tool-calling turns (default: 30)
+- `HERMES_SYSTEM_PROMPT` — system prompt for the agent
+- `HERMES_WORKDIR` — working directory for file tools (default: cwd)
+
+Design notes
+------------
+
+- `skip_memory=True` is deliberate. Hermes's built-in MemoryStore writes
+  to a single shared path (`~/.hermes/memories/MEMORY.md`). If you run
+  more than one hermes-backed agent on the same host, they would stomp
+  each other's memory file. For per-agent persistence, write markdown
+  notes to your agent's own directory using the normal file tools.
+
+- `skip_context_files=True` stops hermes from auto-loading `CLAUDE.md`
+  / `AGENTS.md`. Pass your system prompt explicitly via the
+  `HERMES_SYSTEM_PROMPT` env var so behavior is predictable.
+
+- No security wrapping. This example lets hermes's file/terminal tools
+  operate freely within the working directory. For a multi-agent or
+  multi-tenant setup, wrap the tools with path/command guards before
+  passing them to the agent — see the production sentinels for a
+  reference implementation.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# ─── Resolve hermes-agent location ─────────────────────────────────────────
+HERMES_REPO = Path(
+    os.environ.get("HERMES_REPO_PATH", str(Path.home() / "hermes-agent"))
+).expanduser()
+
+if not HERMES_REPO.exists():
+    print(
+        f"ERROR: hermes-agent repo not found at {HERMES_REPO}.\n"
+        f"Set HERMES_REPO_PATH or clone hermes-agent to ~/hermes-agent.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+sys.path.insert(0, str(HERMES_REPO))
+
+# Make hermes's venv packages importable when running under the system python
+_venv_lib = HERMES_REPO / ".venv" / "lib"
+if _venv_lib.exists():
+    for site_packages in _venv_lib.glob("python*/site-packages"):
+        if str(site_packages) not in sys.path:
+            sys.path.insert(0, str(site_packages))
+
+try:
+    from run_agent import AIAgent  # noqa: E402  (path set above)
+except ImportError as e:
+    print(
+        f"ERROR: failed to import hermes AIAgent from {HERMES_REPO}: {e}\n"
+        f"Did you run `pip install -e .` in the hermes-agent venv?",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+# ─── Provider resolution ───────────────────────────────────────────────────
+def _resolve_provider(model: str) -> dict:
+    """Resolve provider config from a model string.
+
+    Model format: "provider:model_name" or a bare model name.
+    Examples:
+        codex:gpt-5.4                 → Codex Responses API
+        anthropic:claude-sonnet-4.6   → Anthropic Messages API
+        openrouter:anthropic/claude-* → OpenRouter chat completions
+    """
+    if ":" in model:
+        hint, name = model.split(":", 1)
+    else:
+        hint, name = "", model
+
+    if hint == "anthropic" or (not hint and "claude" in name.lower()):
+        return {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+            "base_url": os.environ.get(
+                "ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"
+            ),
+            "api_key": os.environ.get("ANTHROPIC_API_KEY", ""),
+            "model": name,
+        }
+
+    if hint == "openrouter":
+        return {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": os.environ.get("OPENROUTER_API_KEY", ""),
+            "model": name,
+        }
+
+    # Default: Codex (GPT-5.x) via ChatGPT Codex backend.
+    codex_key = os.environ.get("CODEX_API_KEY", "").strip()
+    if not codex_key:
+        # Fall back to ~/.hermes/auth.json (the format hermes-cli maintains).
+        import json
+        auth_path = Path.home() / ".hermes" / "auth.json"
+        if auth_path.exists():
+            try:
+                data = json.loads(auth_path.read_text())
+                providers = data.get("providers") or {}
+                active = data.get("active_provider") or next(
+                    iter(providers.keys()), None
+                )
+                tokens = (providers.get(active) or {}).get("tokens") or {}
+                codex_key = tokens.get("access_token", "")
+            except (OSError, json.JSONDecodeError):
+                pass
+
+    return {
+        "provider": "openai-codex",
+        "api_mode": "codex_responses",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key": codex_key,
+        "model": name or "gpt-5.4",
+    }
+
+
+def main() -> int:
+    # ─── Read mention content ──────────────────────────────────────────────
+    # ax listen passes the mention as both $1 and $AX_MENTION_CONTENT.
+    content = ""
+    if len(sys.argv) > 1:
+        content = sys.argv[-1]
+    if not content:
+        content = os.environ.get("AX_MENTION_CONTENT", "")
+    if not content:
+        print("(no mention content received)", file=sys.stderr)
+        return 1
+
+    # ─── Resolve provider + auth ───────────────────────────────────────────
+    model = os.environ.get("HERMES_MODEL", "codex:gpt-5.4")
+    cfg = _resolve_provider(model)
+    if not cfg["api_key"]:
+        print(
+            f"ERROR: no API key resolved for provider={cfg['provider']}.\n"
+            f"Set the appropriate env var (ANTHROPIC_API_KEY, CODEX_API_KEY, "
+            f"or OPENROUTER_API_KEY) or populate ~/.hermes/auth.json.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # ─── Build the agent ───────────────────────────────────────────────────
+    workdir = os.environ.get("HERMES_WORKDIR", os.getcwd())
+    max_iterations = int(os.environ.get("HERMES_MAX_ITERATIONS", "30"))
+    system_prompt = os.environ.get(
+        "HERMES_SYSTEM_PROMPT",
+        "You are a helpful assistant. Be concise — your response is "
+        "posted to an aX chat channel, so keep it under 2000 characters "
+        "unless the task genuinely requires more detail.",
+    )
+
+    # Change to workdir so relative file tool paths behave predictably.
+    os.chdir(workdir)
+
+    agent = AIAgent(
+        base_url=cfg["base_url"],
+        api_key=cfg["api_key"],
+        provider=cfg["provider"],
+        api_mode=cfg["api_mode"],
+        model=cfg["model"],
+        max_iterations=max_iterations,
+        tool_delay=0.5,
+        quiet_mode=True,
+        skip_context_files=True,  # explicit prompt only — no auto CLAUDE.md
+        skip_memory=True,         # see Design notes in module docstring
+        disabled_toolsets=[
+            "web", "browser", "image_generation", "tts", "vision",
+            "cronjob", "rl_training", "homeassistant",
+        ],
+    )
+
+    # ─── Run a single conversation turn ────────────────────────────────────
+    result = agent.run_conversation(
+        user_message=content,
+        system_message=system_prompt,
+    )
+
+    final_text = result.get("final_response", "").strip()
+    if not final_text:
+        print("(agent produced no output)", file=sys.stderr)
+        return 1
+
+    # ax listen captures stdout → posts to aX as the agent's reply.
+    print(final_text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
