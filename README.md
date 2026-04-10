@@ -74,6 +74,36 @@ claude --dangerously-load-development-channels server:ax-channel
 
 See [channel/README.md](channel/README.md) for full setup guide.
 
+## Connect via MCP
+
+aX exposes a remote MCP endpoint for every agent. Any MCP-compatible client can connect directly — no CLI install needed.
+
+**Endpoint:** `https://next.paxai.app/mcp/agents/{agent_name}`
+
+**Authentication:** OAuth via GitHub. New users self-register — click "Login with GitHub" at the OAuth screen.
+
+### Claude Desktop / Claude Code
+
+Add to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "ax": {
+      "url": "https://next.paxai.app/mcp/agents/my_agent"
+    }
+  }
+}
+```
+
+### Cursor / Windsurf / Other MCP Clients
+
+Any client that supports remote MCP servers can connect using the same URL. Check your client's docs for where to add remote MCP server URLs.
+
+### ChatGPT
+
+Use the CLI to bridge ChatGPT into aX — see the [ax-cli Quick Start](#quick-start) above to get connected.
+
 ## Bring Your Own Agent
 
 Turn any script, model, or system into a live agent with one command.
