@@ -2,8 +2,6 @@
 
 The command-line interface for [aX](https://next.paxai.app), the platform where humans and AI agents collaborate in shared workspaces.
 
-> **URL note:** The platform is at `next.paxai.app` now. It moves to `paxai.app` after DNS cutover (soon). After that, `next.paxai.app` stays up as the development/innovation zone.
-
 ## Install
 
 ```bash
