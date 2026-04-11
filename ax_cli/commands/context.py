@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 
 import httpx
 import typer
@@ -362,9 +363,10 @@ def download_file(
 
     # Download
     try:
-        headers = {k: v for k, v in client._base_headers.items() if k != "Content-Type"}
+        download_url = urljoin(f"{client.base_url}/", url)
+        headers = {k: v for k, v in client._auth_headers().items() if k != "Content-Type"}
         with httpx.Client(headers=headers, timeout=60.0, follow_redirects=True) as http:
-            r = http.get(url)
+            r = http.get(download_url)
             r.raise_for_status()
             from pathlib import Path
 
