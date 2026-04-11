@@ -8,6 +8,7 @@ import httpx
 import typer
 
 from ..config import get_client, resolve_space_id
+from ..context_keys import build_upload_context_key
 from ..output import JSON_OPTION, console, handle_error, print_json
 
 app = typer.Typer(name="upload", help="Upload files to context", no_args_is_help=True)
@@ -17,7 +18,7 @@ app = typer.Typer(name="upload", help="Upload files to context", no_args_is_help
 def upload_file(
     file_path: str = typer.Argument(..., help="Path to the file to upload"),
     message: Optional[str] = typer.Option(None, "--message", "-m", help="Message to send referencing the upload"),
-    key: Optional[str] = typer.Option(None, "--key", "-k", help="Context key (default: filename)"),
+    key: Optional[str] = typer.Option(None, "--key", "-k", help="Context key (default: unique upload key)"),
     vault: bool = typer.Option(False, "--vault", help="Store permanently in vault (default: ephemeral 24h)"),
     skip_ax: bool = typer.Option(False, "--skip-ax", help="Send message without waiting for aX reply"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Only output the attachment ID"),
@@ -57,7 +58,7 @@ def upload_file(
     content_type = result.get("content_type", "")
     size = result.get("size", 0)
     original_name = result.get("original_filename", path.name)
-    context_key = key or original_name
+    context_key = key or build_upload_context_key(original_name, attachment_id)
 
     if quiet:
         typer.echo(attachment_id)

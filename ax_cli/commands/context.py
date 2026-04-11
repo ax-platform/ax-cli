@@ -1,6 +1,7 @@
 """ax context — shared context and file upload operations."""
 
 import tempfile
+import os
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
@@ -9,6 +10,7 @@ import httpx
 import typer
 
 from ..config import get_client, resolve_space_id
+from ..context_keys import build_upload_context_key
 from ..output import JSON_OPTION, handle_error, print_json, print_kv, print_table
 
 app = typer.Typer(name="context", help="Context & file operations", no_args_is_help=True)
@@ -20,6 +22,7 @@ def _normalize_upload(payload: dict) -> dict:
     if isinstance(attachment, dict):
         return attachment
     return {
+        "attachment_id": payload.get("attachment_id") or payload.get("id") or payload.get("file_id"),
         "filename": payload.get("original_filename") or payload.get("filename"),
         "content_type": payload.get("content_type"),
         "size": payload.get("size_bytes") or payload.get("size"),
@@ -27,10 +30,18 @@ def _normalize_upload(payload: dict) -> dict:
     }
 
 
+def _optional_space_id(client, explicit: str | None) -> str | None:
+    if explicit:
+        return resolve_space_id(client, explicit=explicit)
+    if os.environ.get("AX_SPACE_ID"):
+        return resolve_space_id(client)
+    return None
+
+
 @app.command("upload-file")
 def upload_file(
     file_path: str = typer.Argument(..., help="Local file to upload"),
-    key: Optional[str] = typer.Option(None, "--key", "-k", help="Context key (default: filename)"),
+    key: Optional[str] = typer.Option(None, "--key", "-k", help="Context key (default: unique upload key)"),
     vault: bool = typer.Option(
         False, "--vault", help="Store permanently in the intelligence vault (default: ephemeral)"
     ),
@@ -61,7 +72,10 @@ def upload_file(
         handle_error(exc)
 
     info = _normalize_upload(upload_data)
-    context_key = key or Path(file_path).name
+    context_key = key or build_upload_context_key(
+        info.get("filename") or Path(file_path).name,
+        info.get("attachment_id"),
+    )
 
     # Store reference in context — inline text content so agents can read it
     content_type = info.get("content_type", "")
@@ -257,12 +271,14 @@ def set_ctx(
 @app.command("get")
 def get_ctx(
     key: str = typer.Argument(..., help="Context key"),
+    space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
     """Get a context value by key."""
     client = get_client()
+    sid = _optional_space_id(client, space_id)
     try:
-        data = client.get_context(key)
+        data = client.get_context(key, space_id=sid)
     except httpx.HTTPStatusError as exc:
         handle_error(exc)
     if as_json:
@@ -274,12 +290,14 @@ def get_ctx(
 @app.command("list")
 def list_ctx(
     prefix: Optional[str] = typer.Option(None, "--prefix", help="Filter by key prefix"),
+    space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
     """List context entries."""
     client = get_client()
+    sid = _optional_space_id(client, space_id)
     try:
-        data = client.list_context(prefix=prefix)
+        data = client.list_context(prefix=prefix, space_id=sid)
     except httpx.HTTPStatusError as exc:
         handle_error(exc)
     # API returns dict of {key: {value, ttl, ...}} — normalize to list of rows
@@ -312,11 +330,13 @@ def list_ctx(
 @app.command("delete")
 def delete_ctx(
     key: str = typer.Argument(..., help="Context key to delete"),
+    space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
 ):
     """Delete a context entry."""
     client = get_client()
+    sid = _optional_space_id(client, space_id)
     try:
-        client.delete_context(key)
+        client.delete_context(key, space_id=sid)
     except httpx.HTTPStatusError as exc:
         handle_error(exc)
     typer.echo(f"Deleted: {key}")
@@ -332,10 +352,10 @@ def download_file(
     import json as _json
 
     client = get_client()
-    resolve_space_id(client, explicit=space_id)
+    sid = resolve_space_id(client, explicit=space_id)
 
     try:
-        data = client.get_context(key)
+        data = client.get_context(key, space_id=sid)
     except httpx.HTTPStatusError as e:
         handle_error(e)
 

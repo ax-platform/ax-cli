@@ -15,6 +15,7 @@ import mimetypes
 import os
 import platform
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -498,21 +499,25 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
-    def get_context(self, key: str) -> dict:
-        r = self._http.get(f"/api/v1/context/{key}")
+    def get_context(self, key: str, *, space_id: str | None = None) -> dict:
+        params = {"space_id": space_id} if space_id else None
+        r = self._http.get(f"/api/v1/context/{quote(key, safe='')}", params=params)
         r.raise_for_status()
         return self._parse_json(r)
 
-    def list_context(self, prefix: str | None = None) -> dict:
+    def list_context(self, prefix: str | None = None, *, space_id: str | None = None) -> dict:
         params = {}
         if prefix:
             params["prefix"] = prefix
+        if space_id:
+            params["space_id"] = space_id
         r = self._http.get("/api/v1/context", params=params)
         r.raise_for_status()
         return self._parse_json(r)
 
-    def delete_context(self, key: str) -> int:
-        r = self._http.delete(f"/api/v1/context/{key}")
+    def delete_context(self, key: str, *, space_id: str | None = None) -> int:
+        params = {"space_id": space_id} if space_id else None
+        r = self._http.delete(f"/api/v1/context/{quote(key, safe='')}", params=params)
         r.raise_for_status()
         return r.status_code
 

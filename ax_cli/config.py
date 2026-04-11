@@ -60,10 +60,55 @@ def _load_global_config() -> dict:
     return {}
 
 
+def _load_active_profile_config() -> dict:
+    """Load the active profile as normal command defaults.
+
+    `ax profile use` has always promised to set the default profile, but the
+    command factory only read config.toml. This makes profiles boring: once a
+    profile is active, ordinary `ax context ...` and `ax spaces ...` commands
+    use its base URL and token file unless env/local config overrides them.
+    """
+
+    marker = _global_config_dir() / "profiles" / ".active"
+    if not marker.exists():
+        return {}
+
+    name = marker.read_text().strip()
+    if not name:
+        return {}
+
+    profile_path = _global_config_dir() / "profiles" / name / "profile.toml"
+    if not profile_path.exists():
+        return {}
+
+    profile = tomllib.loads(profile_path.read_text())
+    cfg: dict = {}
+    if profile.get("base_url"):
+        cfg["base_url"] = profile["base_url"]
+    if "agent_name" in profile:
+        cfg["agent_name"] = profile.get("agent_name")
+    # Explicitly clear stale global config when the active profile is user-only.
+    cfg["agent_id"] = profile.get("agent_id")
+    cfg["space_id"] = profile.get("space_id")
+
+    token_file = profile.get("token_file")
+    if token_file:
+        try:
+            cfg["token"] = Path(token_file).expanduser().read_text().strip()
+        except OSError:
+            pass
+    return cfg
+
+
 def _load_config() -> dict:
-    """Merge local over global. Local wins."""
+    """Merge global -> active profile -> local. Local/env still win."""
     merged = _load_global_config()
-    merged.update(_load_local_config())
+    merged.update(_load_active_profile_config())
+    # When running from $HOME, the "local" config is the same ~/.ax/config.toml
+    # already loaded as global. Do not let that stale file override the active
+    # profile we just applied.
+    if _local_config_dir() != _global_config_dir():
+        merged.update(_load_local_config())
     return merged
 
 
