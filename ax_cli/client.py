@@ -587,9 +587,16 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
-    def mgmt_issue_agent_pat(self, agent_id: str, *, name: str | None = None, expires_in_days: int = 90) -> dict:
+    def mgmt_issue_agent_pat(
+        self,
+        agent_id: str,
+        *,
+        name: str | None = None,
+        expires_in_days: int = 90,
+        audience: str = "cli",
+    ) -> dict:
         """POST /credentials/agent-pat — requires user_admin + credentials.issue.agent."""
-        body = {"agent_id": agent_id, "expires_in_days": expires_in_days}
+        body = {"agent_id": agent_id, "expires_in_days": expires_in_days, "audience": audience}
         if name:
             body["name"] = name
         r = self._http.post(
@@ -598,9 +605,15 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
-    def mgmt_issue_enrollment(self, *, name: str | None = None, expires_in_hours: int = 1) -> dict:
+    def mgmt_issue_enrollment(
+        self,
+        *,
+        name: str | None = None,
+        expires_in_hours: int = 1,
+        audience: str = "cli",
+    ) -> dict:
         """POST /credentials/enrollment — requires user_admin + credentials.issue.agent."""
-        body = {"expires_in_hours": expires_in_hours}
+        body = {"expires_in_hours": expires_in_hours, "audience": audience}
         if name:
             body["name"] = name
         r = self._http.post(
@@ -623,7 +636,12 @@ class AxClient:
 
     # --- SSE ---
 
-    def connect_sse(self) -> httpx.Response:
+    def connect_sse(
+        self,
+        *,
+        space_id: str | None = None,
+        timeout: httpx.Timeout | None = None,
+    ) -> httpx.Response:
         """GET /api/sse/messages — returns streaming response.
 
         Usage:
@@ -634,11 +652,13 @@ class AxClient:
         """
         # Use JWT for SSE token param when exchange auth is available
         sse_token = self._get_jwt() if self._exchanger else self.token
+        params = {"token": sse_token}
+        if space_id:
+            params["space_id"] = space_id
         return self._http.stream(
-            "GET",
-            "/api/sse/messages",
-            params={"token": sse_token},
-            timeout=httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0),
+            "GET", "/api/sse/messages",
+            params=params,
+            timeout=timeout or httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0),
         )
 
     def close(self):
