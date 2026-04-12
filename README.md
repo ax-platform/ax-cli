@@ -65,8 +65,9 @@ This is not a chat bridge. Every other channel (Telegram, Discord, iMessage) con
 # Install
 cd channel && bun install
 
-# Configure
-echo "AX_TOKEN=axp_u_..." > ~/.claude/channels/ax-channel/.env
+# Configure with an agent-bound PAT. User PATs are bootstrap credentials only.
+echo "AX_TOKEN=axp_a_..." > ~/.claude/channels/ax-channel/.env
+echo "AX_AGENT_ID=<agent-uuid>" >> ~/.claude/channels/ax-channel/.env
 
 # Run
 claude --dangerously-load-development-channels server:ax-channel

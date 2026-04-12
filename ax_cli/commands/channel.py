@@ -191,25 +191,45 @@ class ChannelBridge:
         if not reply_to:
             await self.send_error(request_id, -32602, "reply_to is required until at least one aX message has arrived")
             return
+        if getattr(self.client, "_use_exchange", False) and not str(getattr(self.client, "token", "")).startswith(
+            "axp_a_"
+        ):
+            await self.send_response(
+                request_id,
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "reply failed: ax channel requires an agent-bound PAT (axp_a_). "
+                                "User PATs may create agent PATs but cannot speak as an agent."
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                },
+            )
+            return
+        if not self.agent_id:
+            await self.send_response(
+                request_id,
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "reply failed: channel agent_id is required for agent runtime replies.",
+                        }
+                    ],
+                    "isError": True,
+                },
+            )
+            return
 
         try:
 
             def _send_as_agent():
-                """Send message as agent, adding X-Agent-Id header for user tokens."""
-                body = {
-                    "content": text,
-                    "space_id": self.space_id,
-                    "channel": "main",
-                    "message_type": "text",
-                    "parent_id": reply_to,
-                }
-                # Build auth headers, then add agent identity
-                headers = self.client._auth_headers()
-                if self.agent_id:
-                    headers["X-Agent-Id"] = self.agent_id
-                r = self.client._http.post("/api/v1/messages", json=body, headers=headers)
-                r.raise_for_status()
-                return self.client._parse_json(r)
+                """Send using the agent_access JWT produced by the agent-bound PAT."""
+                return self.client.send_message(self.space_id, text, parent_id=reply_to)
 
             data = await asyncio.to_thread(_send_as_agent)
             message = data.get("message", data)
@@ -399,7 +419,9 @@ def channel(
         raise typer.Exit(1)
 
     sid = resolve_space_id(client, explicit=space_id)
-    agent_id = _resolve_agent_id(client, agent_name)
+    agent_id = client.agent_id or _resolve_agent_id(client, agent_name)
+    if agent_id and not client.agent_id:
+        client.agent_id = agent_id
     bridge = ChannelBridge(
         client=client,
         agent_name=agent_name,

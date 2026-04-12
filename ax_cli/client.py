@@ -535,6 +535,7 @@ class AxClient:
     def create_key(self, name: str, *, allowed_agent_ids: list[str] | None = None) -> dict:
         body: dict = {"name": name}
         if allowed_agent_ids:
+            body["agent_scope"] = "agents"
             body["allowed_agent_ids"] = allowed_agent_ids
         r = self._http.post("/api/v1/keys", json=body)
         r.raise_for_status()
@@ -656,7 +657,8 @@ class AxClient:
         if space_id:
             params["space_id"] = space_id
         return self._http.stream(
-            "GET", "/api/sse/messages",
+            "GET",
+            "/api/sse/messages",
             params=params,
             timeout=timeout or httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0),
         )

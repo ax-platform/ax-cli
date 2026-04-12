@@ -14,7 +14,7 @@ Most users start with Path 1. If you're running multiple agents or using Claude 
 
 ### Step 1: Get your token
 
-Your admin creates a PAT scoped to your agent on the aX platform (Settings > Credentials > Create PAT). They'll give you a token that looks like `axp_u_...`.
+Your admin creates a PAT scoped to your agent on the aX platform (Settings > Credentials > Create PAT). They'll give you a token that looks like `axp_a_...`.
 
 ### Step 2: Install and configure
 
@@ -37,7 +37,7 @@ Profiles add security — token fingerprinting, host binding, workdir verificati
 
 ```bash
 # Save your token to a file
-echo -n 'axp_u_...' > ~/.ax/my_token && chmod 600 ~/.ax/my_token
+echo -n 'axp_a_...' > ~/.ax/my_token && chmod 600 ~/.ax/my_token
 
 # Create a profile
 ax profile add my-agent \
@@ -56,12 +56,11 @@ Now `ax` commands use your profiled identity with fingerprint protection.
 
 ## Path 2: Set Up an Agent Swarm
 
-You have a **user PAT** (sometimes called a swarm token) — a token with `agent_scope: all` that can act as any agent and create new tokens. This is the operator token.
+You have a **user PAT** (sometimes called a bootstrap token) that can create scoped tokens for agents you own or administer. It must not be used as an agent runtime credential.
 
 ### What the user token can do
 
 - Create agent-scoped PATs for individual agents
-- Send messages as any agent you own
 - List and manage all agents in your space
 - View credentials, violations, and platform settings
 
@@ -75,7 +74,7 @@ You have a **user PAT** (sometimes called a swarm token) — a token with `agent
 ### The flow
 
 ```
-User PAT (swarm token)
+User PAT (bootstrap token)
   │
   ├── POST /api/v1/keys → creates agent-scoped PAT for @backend_sentinel
   ├── POST /api/v1/keys → creates agent-scoped PAT for @frontend_sentinel
@@ -146,9 +145,9 @@ ax assign @frontend_sentinel "Add the upload button"
 
 ## Using with Claude Code
 
-If you're using Claude Code to manage your agent swarm, give it the user PAT and point it at the ax-control-plane skill:
+If you're using Claude Code to manage your agent swarm, use the user PAT only for bootstrap work: creating scoped PATs, profiles, and verification. Claude Code channel sessions that speak as an agent must run with that agent's `axp_a_` PAT.
 
-1. Set the token: `ax auth token set <your-swarm-token>`
+1. Set the bootstrap token only for setup: `ax auth token set <your-bootstrap-token>`
 2. Tell Claude Code: "Read the ax-control-plane skill and set up my agent profiles"
 3. Claude Code will use the swarm token to create scoped PATs, set up profiles, and verify everything
 
@@ -162,9 +161,19 @@ The ax-control-plane skill knows how to:
 
 | Type | Scope | Use For | Risk |
 |------|-------|---------|------|
-| **User PAT** (swarm) | All agents | Operator bootstrap, creating scoped tokens | High — full user access |
+| **User PAT** (bootstrap) | User management authority | Operator bootstrap, creating scoped tokens | High — full user access |
 | **Agent-scoped PAT** | One agent | Runtime agent operations | Medium — limited to one agent |
 | **Home agent PAT** | User settings (read) | Platform monitoring (future) | Low — read-only |
+
+## User Experience Tokens
+
+The browser user JWT is the user's experience token. It powers user-owned UI actions:
+
+- Quick-action widgets and panels.
+- Explicit human-in-the-loop approvals.
+- User-approved artifact changes such as creating agents, updating agents, or creating spaces.
+
+It is not an agent runtime credential. Agents use their own agent PAT or agent access JWT. The user experience token can approve an action, but it should not be silently reused by an agent or channel process to speak as that agent.
 
 ## Security Model
 

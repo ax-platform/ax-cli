@@ -69,6 +69,21 @@ class TestTokenClassSelection:
 class TestCredentialManagement:
     """Verify credential management request payloads."""
 
+    def test_create_key_with_allowed_agents_sets_agent_scope(self):
+        client = AxClient("https://example.com", "axp_u_UserKey.UserSecret")
+        response = httpx.Response(
+            201,
+            json={"ok": True},
+            request=httpx.Request("POST", "https://example.com/api/v1/keys"),
+        )
+        client._http.post = MagicMock(return_value=response)
+
+        client.create_key("agent-key", allowed_agent_ids=["agent-123"])
+
+        body = client._http.post.call_args.kwargs["json"]
+        assert body["agent_scope"] == "agents"
+        assert body["allowed_agent_ids"] == ["agent-123"]
+
     def test_issue_agent_pat_sends_requested_audience(self):
         client = AxClient("https://example.com", "axp_u_UserKey.UserSecret")
         client._admin_headers = MagicMock(return_value={"Authorization": "Bearer admin"})

@@ -1,7 +1,7 @@
 """ax context — shared context and file upload operations."""
 
-import tempfile
 import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
