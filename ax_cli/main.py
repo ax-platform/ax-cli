@@ -1,11 +1,28 @@
 """aX Platform CLI — Typer app with subcommand registration."""
+
 import sys
 from typing import Optional
 
 import httpx
 import typer
 
-from .commands import auth, keys, agents, messages, tasks, events, listen, context, watch, upload, profile, assign, spaces, credentials, channel
+from .commands import (
+    agents,
+    assign,
+    auth,
+    channel,
+    context,
+    credentials,
+    events,
+    keys,
+    listen,
+    messages,
+    profile,
+    spaces,
+    tasks,
+    upload,
+    watch,
+)
 
 app = typer.Typer(name="ax", help="aX Platform CLI", no_args_is_help=True)
 app.add_typer(auth.app, name="auth")
@@ -30,6 +47,17 @@ app.add_typer(assign.app, name="manage", help="Manage an agent's task to complet
 app.add_typer(assign.app, name="boss", help="Boss an agent until they deliver")
 
 
+@app.command("login")
+def login(
+    token: str = typer.Option(None, "--token", "-t", help="PAT token (axp_u_... or axp_a_...)"),
+    base_url: str = typer.Option("http://localhost:8002", "--url", "-u", help="API base URL"),
+    agent: str = typer.Option(None, "--agent", "-a", help="Agent name or ID (auto-detected if not set)"),
+    space_id: str = typer.Option(None, "--space-id", "-s", help="Space ID (auto-detected if not set)"),
+):
+    """Alias for `ax auth init` using more familiar CLI vocabulary."""
+    auth.init(token=token, base_url=base_url, agent=agent, space_id=space_id)
+
+
 @app.command("send")
 def send_shortcut(
     content: str = typer.Argument(..., help="Message to send"),
@@ -37,7 +65,9 @@ def send_shortcut(
     timeout: int = typer.Option(60, "--timeout", "-t", help="Max seconds to wait"),
     reply_to: Optional[str] = typer.Option(None, "--reply-to", "-r", help="Reply to message ID (thread)"),
     to: Optional[str] = typer.Option(None, "--to", help="@mention another agent by name"),
-    act_as: Optional[str] = typer.Option(None, "--act-as", help="Impersonate: send as a different agent. Requires scoped token."),
+    act_as: Optional[str] = typer.Option(
+        None, "--act-as", help="Impersonate: send as a different agent. Requires scoped token."
+    ),
     files: Optional[list[str]] = typer.Option(None, "--file", "-f", help="Attach a local file (repeatable)"),
     space_id: Optional[str] = typer.Option(None, "--space-id", "-s", help="Override default space"),
     as_json: bool = typer.Option(False, "--json", help="Output as JSON"),

@@ -9,6 +9,7 @@ Usage:
     ax listen --dry-run                    # Watch only
     ax listen --agent mybot --exec ./bot   # Named agent
 """
+
 import json
 import os
 import queue
@@ -34,6 +35,7 @@ app = typer.Typer(name="listen", help="Listen for @mentions via SSE", no_args_is
 # SSE parsing
 # ---------------------------------------------------------------------------
 
+
 def _iter_sse(response: httpx.Response):
     """Yield (event_type, parsed_data) from an SSE stream."""
     event_type = None
@@ -56,7 +58,21 @@ def _iter_sse(response: httpx.Response):
 
 
 def _should_respond(data: dict, agent_name: str, agent_id: str | None) -> bool:
-    """Return True if this message is an @mention for our agent."""
+    """Return True if this message is an @mention for our agent.
+
+    Trusts the backend's authoritative `mentions` array in the event
+    payload. If the backend says this agent is NOT in the mentions list,
+    we do not respond — even if the content text contains "@<agent_name>".
+    That matters because the backend filters disabled / break'd agents
+    out of the mentions list at broadcast time (see AgentControlService
+    enforcement in ax-backend messages_notifications.broadcast_sse), so
+    trusting the list is how this client respects the universal kill
+    switch without duplicating the check. Enforcement belongs at the
+    API boundary; this function's job is to trust what the API publishes.
+
+    Falls back to a content regex only if `mentions` is completely
+    absent from the payload (legacy / non-standard event shapes).
+    """
     if not isinstance(data, dict):
         return False
     content = data.get("content", "")
@@ -69,14 +85,41 @@ def _should_respond(data: dict, agent_name: str, agent_id: str | None) -> bool:
         sender = author.get("name", "")
         sender_id = author.get("id", "")
     else:
-        sender = data.get("display_name") or data.get("username") or data.get("sender_name") or (author if isinstance(author, str) else "")
+        sender = (
+            data.get("display_name")
+            or data.get("username")
+            or data.get("sender_name")
+            or (author if isinstance(author, str) else "")
+        )
         sender_id = data.get("agent_id") or ""
 
+    # Self-filter: never respond to our own messages, regardless of content.
     if sender.lower() == agent_name.lower():
         return False
     if agent_id and sender_id == agent_id:
         return False
 
+    # Primary path: trust the backend's authoritative mentions list.
+    # An empty list is MEANINGFUL — it means "no active mentions for
+    # this message," which covers the kill-switch filter case where
+    # disabled agents have been removed server-side. Do NOT fall back
+    # to content regex if mentions is present but empty.
+    mentions = data.get("mentions")
+    if mentions is not None and isinstance(mentions, list):
+        agent_name_lower = agent_name.lower()
+        for m in mentions:
+            handle = ""
+            if isinstance(m, str):
+                handle = m
+            elif isinstance(m, dict):
+                handle = m.get("agent_name") or m.get("handle") or m.get("name") or ""
+            if handle.lower().lstrip("@").strip() == agent_name_lower:
+                return True
+        return False
+
+    # Fallback: `mentions` field absent entirely (legacy / non-standard
+    # event shape). Use content regex so we don't silently stop reacting
+    # to payloads that predate the current mentions contract.
     return f"@{agent_name}" in content
 
 
@@ -88,6 +131,7 @@ def _strip_mention(content: str, agent_name: str) -> str:
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
+
 
 def _run_handler(command: str, prompt: str, *, workdir: str | None = None) -> str:
     """Run an external command with the mention content.
@@ -128,6 +172,7 @@ def _echo_handler(prompt: str) -> str:
 # Pause gate (file-based, shared with killswitch.sh)
 # ---------------------------------------------------------------------------
 
+
 def _is_paused(agent_name: str) -> bool:
     pause_all = Path.home() / ".ax" / "sentinel_pause"
     pause_one = Path.home() / ".ax" / f"sentinel_pause_{agent_name}"
@@ -137,6 +182,7 @@ def _is_paused(agent_name: str) -> bool:
 # ---------------------------------------------------------------------------
 # Worker thread
 # ---------------------------------------------------------------------------
+
 
 def _worker(
     mention_queue: queue.Queue,
@@ -157,15 +203,31 @@ def _worker(
         if data is None:
             break
 
-        # Pause gate
-        was_paused = False
-        while _is_paused(agent_name):
-            if not was_paused:
-                console.print(f"[yellow]PAUSED[/yellow] — holding {mention_queue.qsize()+1} messages")
-                was_paused = True
-            time.sleep(2.0)
-        if was_paused:
-            console.print("[green]RESUMED[/green]")
+        # Kill switch gate — DROP semantics (local filesystem, operator
+        # hard stop). If the pause file exists at dequeue time, the mention
+        # is silently discarded. It does NOT queue for replay on resume.
+        # This matches the intent of a killswitch: disable a runaway agent
+        # and messages sent while it's disabled land in the void, not in a
+        # buffer that fires on re-enable.
+        #
+        # Note: the canonical platform killswitch lives in the ax-backend
+        # (see messages_notifications.broadcast_sse filtering disabled
+        # agents out of the mentions array — paired with PR #31's
+        # `_should_respond` trust-the-backend change). This local file
+        # gate is the operator escape hatch for halting a listener on the
+        # host without touching the backend API. Both layers drop; neither
+        # defers.
+        #
+        # If you need maintenance-window "pause + replay" semantics, that
+        # belongs behind a separate file (e.g. sentinel_maintenance_<agent>)
+        # with explicit queue-and-replay logic, not hidden behind "pause".
+        if _is_paused(agent_name):
+            author_drop = data.get("display_name") or data.get("username") or "?"
+            console.print(
+                f"[yellow]DROPPED[/yellow] — @{agent_name} paused (local); discarded mention from @{author_drop}"
+            )
+            mention_queue.task_done()
+            continue
 
         author = data.get("display_name") or data.get("username") or "?"
         content = data.get("content", "")
@@ -177,8 +239,7 @@ def _worker(
             continue
 
         console.print(
-            f"[bold cyan]@{author}[/bold cyan] → "
-            f"[dim]{prompt[:100]}{'...' if len(prompt) > 100 else ''}[/dim]"
+            f"[bold cyan]@{author}[/bold cyan] → [dim]{prompt[:100]}{'...' if len(prompt) > 100 else ''}[/dim]"
         )
 
         if dry_run:
@@ -207,34 +268,46 @@ def _worker(
 # Main command
 # ---------------------------------------------------------------------------
 
+
 @app.callback(invoke_without_command=True)
 def listen(
     exec_cmd: Optional[str] = typer.Option(
-        None, "--exec", "-e",
+        None,
+        "--exec",
+        "-e",
         help="Command to run for each mention. Gets content as last arg + AX_MENTION_CONTENT env var.",
     ),
     agent: Optional[str] = typer.Option(
-        None, "--agent", "-a",
+        None,
+        "--agent",
+        "-a",
         help="Agent name to listen as (default: from config)",
     ),
     space_id: Optional[str] = typer.Option(
-        None, "--space-id", "-s",
+        None,
+        "--space-id",
+        "-s",
         help="Space to listen in (default: from config)",
     ),
     workdir: Optional[str] = typer.Option(
-        None, "--workdir", "-w",
+        None,
+        "--workdir",
+        "-w",
         help="Working directory for handler command",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run",
+        False,
+        "--dry-run",
         help="Watch mentions without responding",
     ),
     queue_size: int = typer.Option(
-        50, "--queue-size",
+        50,
+        "--queue-size",
         help="Max queued mentions before dropping",
     ),
     as_json: bool = typer.Option(
-        False, "--json",
+        False,
+        "--json",
         help="Output events as JSON lines",
     ),
 ):
@@ -272,10 +345,7 @@ def listen(
     agent_id = None
     try:
         agents_data = client.list_agents()
-        agents_list = (
-            agents_data if isinstance(agents_data, list)
-            else agents_data.get("agents", [])
-        )
+        agents_list = agents_data if isinstance(agents_data, list) else agents_data.get("agents", [])
         for a in agents_list:
             if a.get("name", "").lower() == agent_name.lower():
                 agent_id = a["id"]
@@ -285,14 +355,15 @@ def listen(
 
     # Build handler function
     if exec_cmd:
-        handler = lambda prompt: _run_handler(exec_cmd, prompt, workdir=workdir)
+
+        def handler(prompt):
+            return _run_handler(exec_cmd, prompt, workdir=workdir)
     else:
         handler = _echo_handler
 
     # Print banner
     console.print("[bold]ax listen[/bold] — SSE agent listener")
-    console.print(f"  Agent:   @{agent_name}" +
-                  (f" ({agent_id[:12]}...)" if agent_id else ""))
+    console.print(f"  Agent:   @{agent_name}" + (f" ({agent_id[:12]}...)" if agent_id else ""))
     console.print(f"  Space:   {sid[:12]}...")
     console.print(f"  API:     {client.base_url}")
     console.print(f"  Handler: {exec_cmd or 'echo (built-in)'}")
@@ -314,9 +385,7 @@ def listen(
     SEEN_MAX = 500
     backoff = 1
 
-    console.print(
-        f"[green]Listening for @{agent_name} mentions...[/green]  (Ctrl+C to stop)\n"
-    )
+    console.print(f"[green]Listening for @{agent_name} mentions...[/green]  (Ctrl+C to stop)\n")
 
     # SSE loop with auto-reconnect
     while True:
@@ -329,14 +398,12 @@ def listen(
                 for event_type, data in _iter_sse(resp):
                     backoff = 1
 
-                    if event_type in ("bootstrap", "heartbeat", "ping",
-                                      "identity_bootstrap"):
+                    if event_type in ("bootstrap", "heartbeat", "ping", "identity_bootstrap"):
                         continue
 
                     if event_type == "connected":
                         if as_json:
-                            print(json.dumps({"event": "connected",
-                                              "agent": agent_name}))
+                            print(json.dumps({"event": "connected", "agent": agent_name}))
                             sys.stdout.flush()
                         continue
 
@@ -350,28 +417,28 @@ def listen(
                         if _should_respond(data, agent_name, agent_id):
                             seen_ids.add(msg_id)
                             if len(seen_ids) > SEEN_MAX:
-                                seen_ids = set(list(seen_ids)[-SEEN_MAX // 2:])
+                                seen_ids = set(list(seen_ids)[-SEEN_MAX // 2 :])
 
                             if as_json:
-                                print(json.dumps({
-                                    "event": "mention",
-                                    "from": data.get("display_name"),
-                                    "content": data.get("content", "")[:200],
-                                    "id": msg_id,
-                                }))
+                                print(
+                                    json.dumps(
+                                        {
+                                            "event": "mention",
+                                            "from": data.get("display_name"),
+                                            "content": data.get("content", "")[:200],
+                                            "id": msg_id,
+                                        }
+                                    )
+                                )
                                 sys.stdout.flush()
 
                             try:
                                 mention_q.put_nowait(data)
                             except queue.Full:
-                                console.print(
-                                    "[yellow]Queue full — dropping mention[/yellow]"
-                                )
+                                console.print("[yellow]Queue full — dropping mention[/yellow]")
 
         except (httpx.ConnectError, httpx.ReadTimeout):
-            console.print(
-                f"[yellow]Connection lost. Reconnecting in {backoff}s...[/yellow]"
-            )
+            console.print(f"[yellow]Connection lost. Reconnecting in {backoff}s...[/yellow]")
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
         except KeyboardInterrupt:

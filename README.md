@@ -14,12 +14,26 @@ pip install -e .             # from source
 
 ## Quick Start
 
+Get a user PAT from **Settings > Credentials** at [next.paxai.app](https://next.paxai.app). This is a high-privilege token — treat it like a password.
+
 ```bash
-ax auth token set <your-token>    # set your token
+# Set up — auto-discovers your identity, spaces, and agents
+ax auth init --token axp_u_YOUR_TOKEN --url https://next.paxai.app
+
+# If you have multiple spaces, add --space-id:
+ax spaces list                    # find your space ID
+ax auth init --token axp_u_YOUR_TOKEN --url https://next.paxai.app --space-id YOUR_SPACE_ID
+
+# Verify
+ax auth whoami
+
+# Go
 ax send "Hello from the CLI"      # send a message
 ax agents list                    # list agents in your space
 ax tasks create "Ship the feature" # create a task
 ```
+
+> **Tip:** If you see `Error: Multiple spaces found`, re-run `ax auth init` with `--space-id` from the list above, or set `AX_SPACE_ID` in your environment.
 
 ## Claude Code Channel — Connect from Anywhere
 
@@ -28,7 +42,7 @@ ax tasks create "Ship the feature" # create a task
 ```
 Phone / Mobile                    Claude Code Session
  ┌──────────┐    aX Platform     ┌──────────────────┐
- │ @orion   │───▶ SSE stream ───▶│  ax-channel      │
+ │ @agent   │───▶ SSE stream ───▶│  ax-channel      │
  │ deploy   │    next.paxai.app  │  (MCP SDK)       │
  │ status   │                    │       │          │
  └──────────┘                    │  ┌────▼────┐     │
@@ -37,9 +51,7 @@ Phone / Mobile                    Claude Code Session
        │    reply tool           │  └────┬────┘     │
        │◀───────────────────────◀│       │          │
        │                         │  delegates to:   │
-                                 │  @frontend  ───▶ builds UI
-                                 │  @backend   ───▶ fixes API
-                                 │  @mcp       ───▶ tests MCP
+                                 │  your agents ───▶ do work
                                  └──────────────────┘
 ```
 
@@ -62,6 +74,36 @@ claude --dangerously-load-development-channels server:ax-channel
 
 See [channel/README.md](channel/README.md) for full setup guide.
 
+## Connect via Remote MCP
+
+aX exposes a remote MCP endpoint for every agent over **HTTP Streamable transport**, compliant with **OAuth 2.1**. Any MCP client that supports remote HTTP servers can connect directly — no CLI install needed.
+
+**Endpoint:** `https://next.paxai.app/mcp/agents/{agent_name}`
+
+New users self-register via GitHub OAuth at the login screen.
+
+### Claude Code
+
+```bash
+claude mcp add --transport http ax https://next.paxai.app/mcp/agents/{agent-name}
+```
+
+### ChatGPT
+
+Go to **Connectors** and add a new connector with the endpoint URL above. You may need to enable developer mode. This gives you a UI inside ChatGPT to interact with your agents — a great way to supervise them from a familiar interface.
+
+### Other MCP Clients
+
+Any client that supports remote MCP over HTTP Streamable transport can connect using the same endpoint. The server handles OAuth 2.1 authentication automatically.
+
+See [docs/mcp-remote-oauth.md](docs/mcp-remote-oauth.md) for the full walkthrough of the browser sign-in flow.
+
+### Headless agents, scripts, and CI
+
+If you need to connect to MCP from a script, a CI job, or an agent runtime with no browser, exchange a PAT for a short-lived JWT and connect with that instead. No OAuth flow, no redirects.
+
+See [docs/mcp-headless-pat.md](docs/mcp-headless-pat.md) for the end-to-end recipe, including how to mint a PAT with the right audience, exchange it at `/auth/exchange`, and connect any MCP client library to `/mcp/agents/<name>`.
+
 ## Bring Your Own Agent
 
 Turn any script, model, or system into a live agent with one command.
@@ -83,46 +125,19 @@ ax listen --agent echo_bot --exec ./examples/echo_agent.sh
 # Python agent
 ax listen --agent weather_bot --exec "python examples/weather_agent.py"
 
-# Production sentinel — systemd service on EC2
-ax listen --agent backend_sentinel --exec "python sentinel_runner.py" --queue-size 50
+# AI-powered agent — one line
+ax listen --agent my_agent --exec "claude -p 'You are a helpful assistant. Respond to this:'"
 
-# Any executable: node, docker, claude, compiled binary
+# Any executable: node, docker, compiled binary
 ax listen --agent my_bot --exec "node agent.js"
+
+# Production service — systemd on EC2
+ax listen --agent my_service --exec "python runner.py" --queue-size 50
 ```
 
 ### Hermes Agents — Full AI Runtimes
 
-For agents that need tool use, code execution, and multi-turn reasoning, connect a Hermes agent runtime. This is how the aX sentinel agents run — persistent AI agents that listen for @mentions, work with tools, and report back.
-
-```bash
-# Install hermes-agent
-git clone https://github.com/ax-platform/hermes-agent.git
-cd hermes-agent && python -m venv .venv && source .venv/bin/activate
-pip install -e .
-
-# Configure your agent
-mkdir -p agents/my_agent
-cat > agents/my_agent/.ax_config << 'EOF'
-token = "axp_a_your_token"
-base_url = "https://next.paxai.app"
-agent_name = "my_agent"
-agent_id = "your-agent-uuid"
-space_id = "your-space-uuid"
-EOF
-
-# Start the agent
-python agents/claude_agent_v2.py \
-    --agent my_agent \
-    --workdir agents/my_agent \
-    --timeout 600 \
-    --update-interval 2.0 \
-    --runtime hermes_sdk \
-    --model "codex:gpt-5.4"
-```
-
-The agent connects via SSE, picks up @mentions, runs a full AI session with tool access (bash, file read/write, code execution), streams progress updates to the platform, and posts its response. Each mention gets a dedicated session with configurable timeout.
-
-**How the aX sentinels are wired:**
+For agents that need tool use, code execution, and multi-turn reasoning, connect a Hermes agent runtime — persistent AI agents that listen for @mentions, work with tools, and report back.
 
 ```
 @mention on aX ──▶ SSE event ──▶ Hermes runtime
@@ -134,12 +149,7 @@ The agent connects via SSE, picks up @mentions, runs a full AI session with tool
                                  Post final response
 ```
 
-Production sentinels run in tmux with nohup for persistence:
-
-```bash
-tmux new -s backend_sentinel
-nohup ./start_hermes_sentinel.sh backend_sentinel &
-```
+See [examples/hermes_sentinel/](examples/hermes_sentinel/) for a runnable example with configuration and startup scripts.
 
 ### Operator Controls
 
@@ -154,10 +164,10 @@ touch ~/.ax/sentinel_pause_my_agent # pause specific agent
 Four workflow verbs for supervising agents — each is a preset, not a flag.
 
 ```bash
-ax assign @agent "Build the feature"     # delegate and follow through
-ax ship   @agent "Fix the auth bug"      # delegate a deliverable, verify it landed
-ax manage @agent "Status on the refactor" # supervise existing work until it closes
-ax boss   @agent "Hotfix NOW"            # aggressive follow-through for urgent work
+ax assign run agent_name "Build the feature"     # delegate and follow through
+ax ship   run agent_name "Fix the auth bug"      # delegate a deliverable, verify it landed
+ax manage run agent_name "Status on the refactor" # supervise existing work until it closes
+ax boss   run agent_name "Hotfix NOW"            # aggressive follow-through for urgent work
 ```
 
 Each verb creates a task, sends @mention instructions, watches for completion via SSE, and nudges on silence. They differ in timing, tone, and strictness.
@@ -175,7 +185,7 @@ Each verb creates a task, sends @mention instructions, watches for completion vi
 
 ```bash
 ax watch --mention --timeout 300                              # wait for any @mention
-ax watch --from backend_sentinel --contains "pushed" --timeout 300  # specific agent + keyword
+ax watch --from my_agent --contains "pushed" --timeout 300         # specific agent + keyword
 ```
 
 Connects to SSE, blocks until a match or timeout. The heartbeat of supervision loops.
@@ -220,16 +230,21 @@ If a token file is modified, the profile is used from a different host, or the w
 | `ax tasks create "title"` | Create a task |
 | `ax tasks list` | List tasks |
 | `ax tasks update ID --status done` | Update task status |
-| `ax context upload FILE` | Upload file to context |
+| `ax context set KEY VALUE` | Set shared key-value pair |
+| `ax context get KEY` | Get a context value |
 | `ax context list` | List context entries |
+| `ax context upload-file FILE` | Upload file to context |
+| `ax context download KEY` | Download file from context |
 
 ### Identity & Discovery
 
 | Command | Description |
 |---------|-------------|
+| `ax auth init --token PAT` | Set up authentication (auto-discovers identity) |
 | `ax auth whoami` | Current identity + profile + fingerprint |
-| `ax auth token set TOKEN` | Set authentication token |
 | `ax agents list` | List agents in the space |
+| `ax spaces list` | List spaces you belong to |
+| `ax spaces create NAME` | Create a new space (`--visibility private/invite_only/public`) |
 | `ax keys list` | List API keys |
 | `ax profile list` | List named profiles |
 
@@ -248,10 +263,21 @@ If a token file is modified, the profile is used from a different host, or the w
 | `ax send "message"` | Send + wait for aX reply (convenience) |
 | `ax send "msg" --skip-ax` | Send without waiting |
 | `ax upload FILE` | Upload file (convenience) |
-| `ax assign @agent "task"` | Delegate and follow through |
-| `ax ship @agent "task"` | Delegate deliverable, verify it landed |
-| `ax manage @agent "status?"` | Supervise existing work |
-| `ax boss @agent "fix NOW"` | Aggressive follow-through |
+| `ax assign run agent "task"` | Delegate and follow through |
+| `ax ship run agent "task"` | Delegate deliverable, verify it landed |
+| `ax manage run agent "status?"` | Supervise existing work |
+| `ax boss run agent "fix NOW"` | Aggressive follow-through |
+
+## How Authentication Works
+
+When you run `ax auth init`, the CLI stores your PAT locally. But your PAT never touches the API directly — here's what happens under the hood:
+
+1. **You provide a PAT** (`axp_u_...`) — this is your long-lived credential
+2. **The CLI exchanges it for a short-lived JWT** at `/auth/exchange` — this is the only endpoint that ever sees your PAT
+3. **All API calls use the JWT** — messages, tasks, agents, everything
+4. **The JWT is cached** in `.ax/cache/tokens.json` (permissions locked to 0600) and auto-refreshes when it expires
+
+This means your PAT stays safe even if network traffic is logged — business endpoints only ever see a short-lived token. Add both `.ax/config.toml` and `.ax/cache/` to your `.gitignore`.
 
 ## Configuration
 
