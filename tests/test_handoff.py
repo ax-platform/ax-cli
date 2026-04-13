@@ -2,7 +2,7 @@
 
 from typer.testing import CliRunner
 
-from ax_cli.commands.handoff import _matches_handoff_reply
+from ax_cli.commands.handoff import _is_handoff_progress, _matches_handoff_progress, _matches_handoff_reply
 from ax_cli.main import app
 
 
@@ -61,6 +61,86 @@ def test_handoff_does_not_match_other_agent():
         current_agent_name="ChatGPT",
         started_at=0,
         require_completion=False,
+    )
+
+
+def test_handoff_progress_does_not_count_as_reply():
+    message = {
+        "id": "reply-1",
+        "content": "Working... (12 tools)\n  > checking repo\n  > running tests",
+        "parent_id": "sent-1",
+        "display_name": "mcp_sentinel",
+        "metadata": {"streaming_reply": {"enabled": True, "final": False}},
+    }
+
+    assert _is_handoff_progress(message)
+    assert _matches_handoff_progress(
+        message,
+        agent_name="mcp_sentinel",
+        sent_message_id="sent-1",
+        token="handoff:abc123",
+        current_agent_name="ChatGPT",
+        started_at=0,
+        require_completion=False,
+    )
+    assert not _matches_handoff_reply(
+        message,
+        agent_name="mcp_sentinel",
+        sent_message_id="sent-1",
+        token="handoff:abc123",
+        current_agent_name="ChatGPT",
+        started_at=0,
+        require_completion=False,
+    )
+
+
+def test_handoff_progress_can_change_without_matching_completion():
+    message = {
+        "id": "reply-2",
+        "content": "Working... (41 tools)\n  > ax context load\n  > ax messages list",
+        "conversation_id": "sent-1",
+        "display_name": "mcp_sentinel",
+    }
+
+    assert _is_handoff_progress(message)
+    assert _matches_handoff_progress(
+        message,
+        agent_name="mcp_sentinel",
+        sent_message_id="sent-1",
+        token="handoff:abc123",
+        current_agent_name="ChatGPT",
+        started_at=0,
+        require_completion=False,
+    )
+    assert not _matches_handoff_reply(
+        message,
+        agent_name="mcp_sentinel",
+        sent_message_id="sent-1",
+        token="handoff:abc123",
+        current_agent_name="ChatGPT",
+        started_at=0,
+        require_completion=True,
+    )
+
+
+def test_handoff_streaming_reply_with_token_counts_as_reply():
+    message = {
+        "id": "reply-3",
+        "content": "Received this. `handoff:abc123` Current state: smoke check acknowledged.",
+        "parent_id": "sent-1",
+        "display_name": "mcp_sentinel",
+        "metadata": {"streaming_reply": {"enabled": True, "final": False}},
+    }
+
+    assert _is_handoff_progress(message)
+    assert _matches_handoff_reply(
+        message,
+        agent_name="mcp_sentinel",
+        sent_message_id="sent-1",
+        token="handoff:abc123",
+        current_agent_name="ChatGPT",
+        started_at=0,
+        require_completion=True,
     )
 
 
