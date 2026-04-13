@@ -179,20 +179,25 @@ def _user_token_suppressed() -> bool:
     return os.environ.get("AX_I_KNOW_WHAT_IM_DOING", "").lower() in ("1", "true", "yes")
 
 
-def _warn_user_token(path: str) -> None:
-    """Emit user-token guardrail warning to stderr.
+def _block_user_token(context: str) -> None:
+    """Hard-block user tokens on routine operations.
 
-    This runs inside an httpx event hook so it must never block.
-    Warning only — no prompt. The warning fires once per session.
+    User PATs send messages as the USER, not the agent — causing attribution
+    errors. This is a hard block, not a warning. Use an agent PAT instead.
     """
     import sys
 
     sys.stderr.write(
-        f"\n\033[33m⚠  User token (axp_u_) used for: {path}\033[0m\n"
-        "   User tokens are management keys — use an agent token (axp_a_) for daily work.\n"
-        "   Suppress: AX_I_KNOW_WHAT_IM_DOING=1\n\n"
+        f"\n\033[31m✗  Blocked: user token (axp_u_) cannot be used for: {context}\033[0m\n"
+        "   Messages sent with user tokens appear as YOU, not your agent.\n"
+        "   Get an agent token first:\n"
+        "     ax token mint <agent-name>              # mint agent PAT (requires user PAT)\n"
+        "     ax credentials issue-enrollment          # create enrollment token for new agent\n"
+        "\n"
+        "   Override: AX_I_KNOW_WHAT_IM_DOING=1 (not recommended)\n\n"
     )
     sys.stderr.flush()
+    raise SystemExit(1)
 
 
 class AxClient:
@@ -270,10 +275,11 @@ class AxClient:
                 scope="messages tasks context agents spaces search",
                 force_refresh=force_refresh,
             )
-        # User PAT path — warn if this is routine work
+        # User PAT path — BLOCK routine work. User tokens send messages as the
+        # user, not the agent — causing attribution errors in the message stream.
         if self.token.startswith("axp_u_") and not AxClient._user_token_warned and not _user_token_suppressed():
             AxClient._user_token_warned = True
-            _warn_user_token("user_access exchange")
+            _block_user_token("user_access exchange (routine operation)")
         return self._exchanger.get_token(
             "user_access",
             scope="messages tasks context agents spaces search",
