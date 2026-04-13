@@ -32,6 +32,42 @@ Use Conventional Commit prefixes so Release Please can choose the version bump:
 The PyPI workflow also supports manual dispatch and GitHub Release publication.
 Those paths are fallbacks; the normal path is release PR merge to `main`.
 
+## Recommended Release Posture
+
+The current automation is directionally right: version bumps and changelog
+generation should be boring, reviewable, and mostly automated. The important
+boundary is that publishing must remain tied to an explicit release artifact,
+not to arbitrary commits.
+
+Target steady-state:
+
+1. Feature work lands in `dev/staging`.
+2. A reviewed promotion PR lands on `main`.
+3. Release Please opens a release PR that only changes release metadata.
+4. A human reviews and merges the release PR.
+5. Release Please creates the GitHub tag/release.
+6. The PyPI publish workflow runs from the GitHub release/tag.
+
+Avoid publishing directly from every `main` push long term. Publishing from
+`main` is convenient during bootstrap, but it can publish a package even if
+GitHub release creation fails. Release-triggered publishing keeps PyPI, git
+tags, GitHub Releases, and changelog state aligned.
+
+## Versioning Policy
+
+Use SemVer, with normal `0.x` pre-1.0 semantics:
+
+- `fix:` creates a patch release for compatible bug fixes.
+- `feat:` creates a minor release for user-visible CLI capability.
+- Breaking CLI changes should be rare; if needed before 1.0, document them
+  clearly in the release notes and prefer a minor bump.
+- Batch related `dev/staging` work into coherent releases instead of publishing
+  every small commit independently.
+
+For `axctl`, a good release is one that an operator can understand from the
+changelog: what changed, why it matters, and whether any setup or credential
+behavior changed.
+
 ## Automation Prerequisites
 
 Release Please needs permission to open and update pull requests.
@@ -49,3 +85,18 @@ Acceptable setup:
 If neither is configured, Release Please can create the release branch but will
 fail before opening the release PR. In that case, open a PR manually from the
 generated `release-please--branches--main--components--axctl` branch.
+
+## Follow-Up Hardening
+
+- Prefer a dedicated `RELEASE_PLEASE_TOKEN` bot secret over relying on broad
+  repository `GITHUB_TOKEN` behavior. The bot token should have only the
+  repository permissions Release Please needs.
+- Keep release-sensitive files covered by CODEOWNERS:
+  `.github/workflows/`, `pyproject.toml`, `release-please-config.json`,
+  `.release-please-manifest.json`, `CHANGELOG.md`, and this document.
+- After Release Please is confirmed to create GitHub releases reliably, remove
+  `push: main` from the PyPI publish workflow and publish only from
+  `release.published` plus manual dispatch.
+- If Release Please fails after a release PR merge, verify PyPI, create the
+  missing GitHub release/tag if needed, and delete any stale generated
+  release-please branch before the next release cycle.
