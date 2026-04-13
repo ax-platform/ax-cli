@@ -349,10 +349,12 @@ def list_messages(
             c = str(m.get("content", ""))
             m["content_short"] = c[:60] + "..." if len(c) > 60 else c
             m["sender"] = m.get("display_name") or m.get("sender_handle") or m.get("sender_type", "")
+            full_id = str(m.get("id", ""))
+            m["short_id"] = full_id[:8] if full_id else ""
         print_table(
             ["ID", "Sender", "Content", "Created At"],
             messages,
-            keys=["id", "sender", "content_short", "created_at"],
+            keys=["short_id", "sender", "content_short", "created_at"],
         )
 
 
