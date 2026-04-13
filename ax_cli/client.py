@@ -176,49 +176,37 @@ class _RetryOnAuthClient:
 
 def _user_token_suppressed() -> bool:
     """Check if user-token guardrail is suppressed via env or flag."""
-    return os.environ.get("AX_I_KNOW_WHAT_IM_DOING", "").lower() in ("1", "true", "yes")
+    return os.environ.get("AX_ALLOW_USER_TOKEN", "").lower() in ("1", "true", "yes")
 
 
 def _block_user_token(context: str) -> None:
-    """Hard-block user tokens on routine operations.
+    """Hard-block user tokens when they are mixed with agent identity config.
 
-    User PATs send messages as the USER, not the agent — causing attribution
-    errors. This is a hard block, not a warning. Use an agent PAT instead.
+    User PATs exchange to user JWTs and can operate as the user. They must not
+    be used from an agent profile, because that makes an agent appear to act
+    with the user's identity.
     """
     import sys
 
     sys.stderr.write(
         f"\n\033[31m✗  Blocked: user token (axp_u_) cannot be used for: {context}\033[0m\n"
-        "   Messages sent with user tokens appear as YOU, not your agent.\n"
+        "   User PATs exchange to user JWTs and act as the user.\n"
+        "   Agent profiles need an agent PAT so actions are attributed to the agent.\n"
         "   Get an agent token first:\n"
-        "     ax token mint <agent-name>              # mint agent PAT (requires user PAT)\n"
-        "     ax credentials issue-enrollment          # create enrollment token for new agent\n"
+        "     ax token mint <agent-name> --create      # mint agent PAT (requires user PAT)\n"
         "\n"
-        "   Override: AX_I_KNOW_WHAT_IM_DOING=1 (not recommended)\n\n"
+        "   Override: AX_ALLOW_USER_TOKEN=1 (not recommended)\n\n"
     )
     sys.stderr.flush()
     raise SystemExit(1)
 
 
 class AxClient:
-    # Paths that are legitimate user-token operations (management/admin).
-    # Everything else is routine work that should use agent tokens.
-    _USER_TOKEN_ALLOWED_PATHS = frozenset({
-        "/auth/exchange",
-        "/auth/me",
-        "/agents/manage/create",
-        "/agents/manage/list",
-        "/credentials/agent-pat",
-        "/credentials/enrollment",
-        "/api/v1/keys",
-        "/api/v1/agents",  # listing agents is needed for name resolution
-    })
-    _user_token_warned = False
-
     def __init__(self, base_url: str, token: str, *, agent_name: str | None = None, agent_id: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.agent_id = agent_id  # Used for exchange parameters, NOT headers (§13)
+        self.agent_name = agent_name
 
         # Check for honeypot keys before doing anything else
         _check_honeypot(token, self.base_url)
@@ -263,9 +251,9 @@ class AxClient:
         - axp_u_ (user PAT) → user_access always, even if agent_id is set
           (user PATs cannot exchange for agent_access — server returns 422)
 
-        Also enforces user-token guardrail: warns (once) when a user PAT
-        is used for a user_access exchange (routine work that should use
-        an agent token).
+        User PATs are valid for explicit user-authored CLI work and bootstrap,
+        but they must not be combined with agent identity config. That mix is
+        how an agent accidentally speaks as the user.
         """
         is_agent_pat = self.token.startswith("axp_a_")
         if self.agent_id and is_agent_pat:
@@ -275,11 +263,8 @@ class AxClient:
                 scope="messages tasks context agents spaces search",
                 force_refresh=force_refresh,
             )
-        # User PAT path — BLOCK routine work. User tokens send messages as the
-        # user, not the agent — causing attribution errors in the message stream.
-        if self.token.startswith("axp_u_") and not AxClient._user_token_warned and not _user_token_suppressed():
-            AxClient._user_token_warned = True
-            _block_user_token("user_access exchange (routine operation)")
+        if self.token.startswith("axp_u_") and (self.agent_id or self.agent_name) and not _user_token_suppressed():
+            _block_user_token("user PAT with agent identity configured")
         return self._exchanger.get_token(
             "user_access",
             scope="messages tasks context agents spaces search",
