@@ -241,6 +241,7 @@ If a token file is modified, the profile is used from a different host, or the w
 | `ax context get KEY` | Get a context value |
 | `ax context list` | List context entries |
 | `ax context upload-file FILE` | Upload file to context |
+| `ax context load KEY` | Load a context file into the private preview cache |
 | `ax context download KEY` | Download file from context |
 
 ### Identity & Discovery

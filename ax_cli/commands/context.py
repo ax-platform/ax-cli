@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import webbrowser
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
@@ -14,6 +15,34 @@ from ..context_keys import build_upload_context_key
 from ..output import JSON_OPTION, handle_error, print_json, print_kv, print_table
 
 app = typer.Typer(name="context", help="Context & file operations", no_args_is_help=True)
+
+TEXT_CONTENT_TYPES = {
+    "application/json",
+    "application/javascript",
+    "application/xml",
+    "application/yaml",
+    "image/svg+xml",
+    "text/x-python",
+    "text/typescript",
+}
+
+TEXT_SUFFIXES = {
+    ".css",
+    ".csv",
+    ".html",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".py",
+    ".svg",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
 
 def _normalize_upload(payload: dict) -> dict:
@@ -36,6 +65,111 @@ def _optional_space_id(client, explicit: str | None) -> str | None:
     if os.environ.get("AX_SPACE_ID"):
         return resolve_space_id(client)
     return None
+
+
+def _safe_filename(name: str) -> str:
+    candidate = Path(name).name.strip()
+    return candidate or "context-preview.bin"
+
+
+def _context_file_payload(data: dict, key: str) -> dict:
+    """Extract a file reference from a context get response."""
+    import json as _json
+
+    raw = data.get("value", data)
+    if isinstance(raw, dict) and "value" in raw:
+        raw = raw["value"]
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception as exc:
+            raise ValueError("Context value is not a file upload") from exc
+
+    if not isinstance(raw, dict) or not raw.get("url"):
+        raise ValueError("Context key is not a file upload")
+
+    filename = raw.get("filename") or raw.get("name") or key
+    return {
+        **raw,
+        "filename": _safe_filename(str(filename)),
+    }
+
+
+def _fetch_context_file(client, sid: str | None, payload: dict) -> bytes:
+    url = payload.get("url", "")
+    if not url:
+        raise ValueError("No URL in file upload")
+
+    download_url = urljoin(f"{client.base_url}/", url)
+    headers = {k: v for k, v in client._auth_headers().items() if k != "Content-Type"}
+    with httpx.Client(headers=headers, timeout=60.0, follow_redirects=True) as http:
+        response = http.get(download_url, params={"space_id": sid} if sid else None)
+        response.raise_for_status()
+        return response.content
+
+
+def _preview_cache_dir(explicit: str | None = None) -> Path:
+    if explicit:
+        return Path(explicit).expanduser()
+    if os.environ.get("AX_PREVIEW_CACHE_DIR"):
+        return Path(os.environ["AX_PREVIEW_CACHE_DIR"]).expanduser()
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg_cache).expanduser() if xdg_cache else Path.home() / ".cache"
+    return base / "axctl" / "previews"
+
+
+def _is_text_like(payload: dict) -> bool:
+    content_type = str(payload.get("content_type") or "").split(";")[0].strip().lower()
+    filename = str(payload.get("filename") or "")
+    return (
+        content_type.startswith("text/") or content_type in TEXT_CONTENT_TYPES or Path(filename).suffix in TEXT_SUFFIXES
+    )
+
+
+def _load_context_artifact(
+    *,
+    key: str,
+    cache_dir: str | None,
+    open_file: bool,
+    space_id: str | None,
+    include_content: bool,
+    max_content_bytes: int,
+) -> dict:
+    import hashlib
+
+    client = get_client()
+    sid = resolve_space_id(client, explicit=space_id)
+
+    data = client.get_context(key, space_id=sid)
+    payload = _context_file_payload(data, key)
+    content = _fetch_context_file(client, sid, payload)
+
+    key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
+    target_dir = _preview_cache_dir(cache_dir) / key_hash
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / payload["filename"]
+    target_path.write_bytes(content)
+
+    result = {
+        "key": key,
+        "filename": payload["filename"],
+        "content_type": payload.get("content_type"),
+        "size": len(content),
+        "path": str(target_path),
+        "source_url": payload.get("url"),
+        "cached": True,
+        "text_like": _is_text_like(payload),
+    }
+
+    if include_content and result["text_like"]:
+        trimmed = content[:max_content_bytes]
+        result["content"] = trimmed.decode("utf-8", errors="replace")
+        result["content_truncated"] = len(content) > max_content_bytes
+
+    if open_file:
+        result["opened"] = webbrowser.open(target_path.as_uri())
+
+    return result
 
 
 @app.command("upload-file")
@@ -349,8 +483,6 @@ def download_file(
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
 ):
     """Download a file from context to local disk."""
-    import json as _json
-
     client = get_client()
     sid = resolve_space_id(client, explicit=space_id)
 
@@ -359,38 +491,77 @@ def download_file(
     except httpx.HTTPStatusError as e:
         handle_error(e)
 
-    # Parse the value to find URL and filename
-    raw = data.get("value", data)
-    if isinstance(raw, dict) and "value" in raw:
-        raw = raw["value"]
-    if isinstance(raw, str):
-        try:
-            raw = _json.loads(raw)
-        except Exception:
-            typer.echo("[red]Context value is not a file upload[/red]")
-            raise typer.Exit(1)
-
-    if not isinstance(raw, dict) or raw.get("type") != "file_upload":
-        typer.echo("[red]Context key is not a file upload[/red]")
-        raise typer.Exit(1)
-
-    url = raw.get("url", "")
-    filename = output or raw.get("filename", key)
-
-    if not url:
-        typer.echo("[red]No URL in file upload[/red]")
-        raise typer.Exit(1)
-
-    # Download
     try:
-        download_url = urljoin(f"{client.base_url}/", url)
-        headers = {k: v for k, v in client._auth_headers().items() if k != "Content-Type"}
-        with httpx.Client(headers=headers, timeout=60.0, follow_redirects=True) as http:
-            r = http.get(download_url, params={"space_id": sid} if sid else None)
-            r.raise_for_status()
-            from pathlib import Path
-
-            Path(filename).write_bytes(r.content)
-            typer.echo(f"[green]Downloaded:[/green] {filename} ({len(r.content)} bytes)")
+        payload = _context_file_payload(data, key)
+        content = _fetch_context_file(client, sid, payload)
+    except ValueError as exc:
+        typer.echo(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
     except httpx.HTTPStatusError as e:
         handle_error(e)
+
+    filename = output or payload.get("filename", key)
+    Path(filename).write_bytes(content)
+    typer.echo(f"[green]Downloaded:[/green] {filename} ({len(content)} bytes)")
+
+
+@app.command("load")
+def load_file(
+    key: str = typer.Argument(..., help="Context key to load"),
+    cache_dir: Optional[str] = typer.Option(
+        None, "--cache-dir", help="Preview cache directory (default: ~/.cache/axctl/previews)"
+    ),
+    open_file: bool = typer.Option(False, "--open", help="Open with the system default viewer"),
+    include_content: bool = typer.Option(False, "--content", help="Include decoded text for text-like files"),
+    max_content_bytes: int = typer.Option(20000, "--max-content-bytes", help="Max decoded content bytes"),
+    space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
+    as_json: bool = JSON_OPTION,
+):
+    """Load a context artifact into a private local cache for agent inspection.
+
+    This keeps context as the source of truth while avoiding manual downloads
+    into the current working directory.
+    """
+    try:
+        result = _load_context_artifact(
+            key=key,
+            cache_dir=cache_dir,
+            open_file=open_file,
+            space_id=space_id,
+            include_content=include_content,
+            max_content_bytes=max_content_bytes,
+        )
+    except ValueError as exc:
+        typer.echo(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    except httpx.HTTPStatusError as exc:
+        handle_error(exc)
+
+    if as_json:
+        print_json(result)
+    else:
+        print_kv(result)
+
+
+@app.command("preview", hidden=True)
+def preview_file(
+    key: str = typer.Argument(..., help="Context key to preview"),
+    cache_dir: Optional[str] = typer.Option(
+        None, "--cache-dir", help="Preview cache directory (default: ~/.cache/axctl/previews)"
+    ),
+    open_file: bool = typer.Option(False, "--open", help="Open with the system default viewer"),
+    include_content: bool = typer.Option(False, "--content", help="Include decoded text for text-like files"),
+    max_content_bytes: int = typer.Option(20000, "--max-content-bytes", help="Max decoded content bytes"),
+    space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
+    as_json: bool = JSON_OPTION,
+):
+    """Backward-compatible alias for `context load`."""
+    load_file(
+        key=key,
+        cache_dir=cache_dir,
+        open_file=open_file,
+        include_content=include_content,
+        max_content_bytes=max_content_bytes,
+        space_id=space_id,
+        as_json=as_json,
+    )
