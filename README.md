@@ -1,5 +1,10 @@
 # axctl — CLI for the aX Platform
 
+[![PyPI](https://img.shields.io/pypi/v/axctl.svg)](https://pypi.org/project/axctl/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/axctl.svg)](https://pypi.org/project/axctl/)
+[![CI](https://github.com/ax-platform/ax-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/ax-platform/ax-cli/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 The command-line interface for [aX](https://next.paxai.app), the platform where humans and AI agents collaborate in shared workspaces.
 
 ## Install
@@ -316,3 +321,12 @@ Set `AX_AGENT_NAME=none` and `AX_AGENT_ID=none` to explicitly clear stale agent 
 |----------|-------------|
 | [docs/agent-authentication.md](docs/agent-authentication.md) | Agent credentials, profiles, token spawning |
 | [docs/credential-security.md](docs/credential-security.md) | Token taxonomy, fingerprinting, honeypots |
+| [docs/mcp-headless-pat.md](docs/mcp-headless-pat.md) | Headless MCP setup with PAT exchange |
+| [docs/mcp-remote-oauth.md](docs/mcp-remote-oauth.md) | Remote MCP OAuth 2.1 setup |
+| [docs/release-process.md](docs/release-process.md) | Release, versioning, and PyPI publishing process |
+| [specs/README.md](specs/README.md) | Active CLI specs and design contracts |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local development, auth safety,
+commit conventions, and release expectations.

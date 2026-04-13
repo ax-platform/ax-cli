@@ -8,10 +8,14 @@
 .github/ @madtank
 .github/workflows/ @madtank
 .github/CODEOWNERS @madtank
+.github/dependabot.yml @madtank
+.github/pull_request_template.md @madtank
 pyproject.toml @madtank
 release-please-config.json @madtank
 .release-please-manifest.json @madtank
 CHANGELOG.md @madtank
+CONTRIBUTING.md @madtank
+SECURITY.md @madtank
 docs/release-process.md @madtank
 
 # Channel MCP server (Bun/TypeScript) — anvil owns the runtime + SSE bridge

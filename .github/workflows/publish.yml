@@ -1,8 +1,6 @@
 name: Publish to PyPI
 
 on:
-  push:
-    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -28,10 +26,31 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build
+        run: pip install build twine
 
       - name: Build package
         run: python -m build
+
+      - name: Validate package metadata
+        run: twine check dist/*
+
+      - name: Validate release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          version="$(python - <<'PY'
+          import pathlib
+          import tomllib
+
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          print(data["project"]["version"])
+          PY
+          )"
+          expected="v${version}"
+          actual="${{ github.event.release.tag_name }}"
+          if [ "$actual" != "$expected" ]; then
+            echo "Release tag ${actual} does not match pyproject version ${expected}" >&2
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 ax_cli/_version.py
+uv.lock
 
 # ax-cli config (contains tokens)
 .ax/
