@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from ax_cli import config as config_module
 from ax_cli.config import (
     _find_project_root,
     _global_config_dir,
@@ -145,6 +146,76 @@ class TestLoadConfig:
         assert cfg["token"] == "axp_a_agent.secret"
         assert cfg["principal_type"] == "agent"
         assert cfg["agent_name"] == "orion"
+
+    def test_unsafe_local_user_pat_agent_config_does_not_override_active_profile(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        monkeypatch.setenv("AX_CONFIG_DIR", str(global_dir))
+        monkeypatch.setattr(config_module, "_unsafe_local_config_warned", False)
+
+        token_file = global_dir / "profiles" / "next-orion" / "token"
+        token_file.parent.mkdir(parents=True)
+        token_file.write_text("axp_a_agent.secret")
+        (global_dir / "profiles" / ".active").write_text("next-orion\n")
+        (global_dir / "profiles" / "next-orion" / "profile.toml").write_text(
+            f'base_url = "https://next.paxai.app"\n'
+            f'agent_name = "orion"\n'
+            f'agent_id = "agent-orion"\n'
+            f'space_id = "next-space"\n'
+            f'token_file = "{token_file}"\n'
+        )
+
+        local_ax = tmp_path / ".ax"
+        local_ax.mkdir()
+        (local_ax / "config.toml").write_text(
+            'token = "axp_u_user.secret"\n'
+            'base_url = "http://localhost:8002"\n'
+            'agent_name = "wire_tap"\n'
+            'agent_id = "agent-wire-tap"\n'
+            'space_id = "dev-space"\n'
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cfg = _load_config()
+
+        assert cfg["token"] == "axp_a_agent.secret"
+        assert cfg["base_url"] == "https://next.paxai.app"
+        assert cfg["agent_name"] == "orion"
+        assert cfg["agent_id"] == "agent-orion"
+        assert cfg["space_id"] == "next-space"
+        assert "Ignoring unsafe local aX config" in capsys.readouterr().err
+
+    def test_unsafe_local_user_pat_agent_config_falls_back_to_user_login(self, tmp_path, monkeypatch):
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        monkeypatch.setenv("AX_CONFIG_DIR", str(global_dir))
+        _save_user_config(
+            {
+                "token": "axp_u_user.secret",
+                "base_url": "https://dev.paxai.app",
+                "principal_type": "user",
+            }
+        )
+
+        local_ax = tmp_path / ".ax"
+        local_ax.mkdir()
+        (local_ax / "config.toml").write_text(
+            'token = "axp_u_stale.secret"\n'
+            'base_url = "http://localhost:8002"\n'
+            'agent_name = "wire_tap"\n'
+            'agent_id = "agent-wire-tap"\n'
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cfg = _load_config()
+
+        assert cfg["token"] == "axp_u_user.secret"
+        assert cfg["base_url"] == "https://dev.paxai.app"
+        assert cfg["principal_type"] == "user"
+        assert "agent_name" not in cfg
+        assert "agent_id" not in cfg
 
 
 class TestResolveAgentId:

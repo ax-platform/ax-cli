@@ -236,6 +236,12 @@ ax auth whoami        # my_agent on prod
 
 If a token file is modified, the profile is used from a different host, or the working directory changes — `ax profile use` catches it and refuses to activate.
 
+Local `.ax/config.toml` files can override the active profile for project-specific
+agent work. The CLI ignores a local config that combines a user PAT (`axp_u_`)
+with `agent_id` or `agent_name`, because that stale hybrid would make agent
+commands run with user identity. Use `axctl login` for user setup and an
+agent PAT profile for agent runtime.
+
 ## Commands
 
 ### Regression Smoke

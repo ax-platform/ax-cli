@@ -127,6 +127,7 @@ def _load_local_config() -> dict:
 
 
 _global_config_warned = False
+_unsafe_local_config_warned = False
 
 
 def _load_global_config() -> dict:
@@ -154,6 +155,37 @@ def _load_global_config() -> dict:
             "   Global config should only have defaults like base_url.\n\n"
         )
     return cfg
+
+
+def _has_agent_identity(cfg: dict) -> bool:
+    return bool(cfg.get("agent_id") or cfg.get("agent_name"))
+
+
+def _is_unsafe_user_token_agent_config(cfg: dict) -> bool:
+    """Detect local configs that would make an agent act with a user PAT.
+
+    A valid agent runtime config uses an agent PAT (`axp_a_`) or an explicit
+    non-PAT token. A valid user login config declares `principal_type = "user"`.
+    The unsafe shape is the stale hybrid: user PAT plus agent identity.
+    """
+    token = str(cfg.get("token") or "")
+    principal_type = str(cfg.get("principal_type") or "").lower()
+    return token.startswith("axp_u_") and principal_type != "user" and _has_agent_identity(cfg)
+
+
+def _warn_ignored_unsafe_local_config(config_path: Path) -> None:
+    global _unsafe_local_config_warned
+    if _unsafe_local_config_warned:
+        return
+    _unsafe_local_config_warned = True
+    import sys
+
+    sys.stderr.write(
+        f"\033[33m⚠  Ignoring unsafe local aX config: {config_path}\033[0m\n"
+        "   It combines a user PAT (axp_u_) with agent identity fields.\n"
+        "   User PATs are for user-authored setup and API work, not agent runtime identity.\n"
+        "   Use an agent PAT profile for agent work, or set principal_type = \"user\" for user-only config.\n\n"
+    )
 
 
 def _load_active_profile_config() -> dict:
@@ -217,9 +249,14 @@ def _load_config() -> dict:
     if _local_config_dir() != _global_config_dir():
         local_cfg = _load_local_config()
         if local_cfg:
-            merged.update(local_cfg)
-            if "principal_type" not in local_cfg and (local_cfg.get("agent_id") or local_cfg.get("agent_name")):
-                merged["principal_type"] = "agent"
+            if _is_unsafe_user_token_agent_config(local_cfg):
+                local_dir = _local_config_dir()
+                config_path = (local_dir / "config.toml") if local_dir else Path.cwd() / ".ax" / "config.toml"
+                _warn_ignored_unsafe_local_config(config_path)
+            else:
+                merged.update(local_cfg)
+                if "principal_type" not in local_cfg and _has_agent_identity(local_cfg):
+                    merged["principal_type"] = "agent"
     return merged
 
 

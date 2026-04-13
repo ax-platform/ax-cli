@@ -99,6 +99,15 @@ User credentials are valid for user-authored quick actions and user-requested
 context uploads. Agent runtime credentials remain required for agent-authored
 messages and headless agent work.
 
+The CLI must ignore a local runtime config that combines a user PAT (`axp_u_`)
+with agent identity fields. That shape is stale/unsafe: it can make an agent
+profile appear to operate as the user. The safe split is:
+
+- `axctl login` stores user setup credentials separately
+- named profiles or project-local configs use agent PATs for agent runtime
+- explicit `principal_type = "user"` marks a local config as user-only and
+  suppresses stale agent identity fields
+
 ## Space Routing Rule
 
 Commands that support a target space should pass it explicitly.
