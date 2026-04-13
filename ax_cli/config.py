@@ -207,9 +207,11 @@ def resolve_agent_name(*, explicit: str | None = None, client: AxClient | None =
         return env
 
     # Project-local config (no API calls needed — fastest path)
-    local = _load_local_config()
-    if local.get("agent_name"):
-        return local["agent_name"]
+    cfg = _load_config()
+    if cfg.get("principal_type") == "user":
+        return None
+    if cfg.get("agent_name"):
+        return cfg["agent_name"]
 
     # Auto-detect from single-agent scoped PAT (requires API call)
     if client:
@@ -283,7 +285,10 @@ def resolve_agent_id() -> str | None:
     env = os.environ.get("AX_AGENT_ID")
     if env is not None:
         return None if env.lower() in ("", "none", "null") else env
-    return _load_config().get("agent_id")
+    cfg = _load_config()
+    if cfg.get("principal_type") == "user":
+        return None
+    return cfg.get("agent_id")
 
 
 def get_client() -> AxClient:

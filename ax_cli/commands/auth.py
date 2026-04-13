@@ -145,11 +145,14 @@ def init(
     if not local:
         local = Path.cwd() / ".ax"
 
+    is_enrollment = token.startswith("axp_a_")
     cfg = _load_local_config()
     cfg["token"] = token
     cfg["base_url"] = base_url
-
-    is_enrollment = token.startswith("axp_a_")
+    cfg["principal_type"] = "agent" if is_enrollment else "user"
+    if not is_enrollment:
+        cfg.pop("agent_id", None)
+        cfg.pop("agent_name", None)
     console.print(f"\n[cyan]Connecting to {base_url}...[/cyan]")
 
     if is_enrollment:
@@ -273,7 +276,11 @@ def init(
             from ..token_cache import TokenExchanger
 
             exchanger = TokenExchanger(base_url, token)
-            exchanger.get_token("user_access", scope="messages tasks context agents spaces search")
+            exchanger.get_token(
+                "user_access",
+                scope="messages tasks context agents spaces search",
+                force_refresh=True,
+            )
             console.print("[green]Token verified.[/green] Exchange successful.")
         except Exception as e:
             console.print(f"[red]Token verification failed:[/red] {e}")
@@ -287,16 +294,6 @@ def init(
             me = client.whoami()
             username = me.get("username", "unknown")
             console.print(f"[green]Identity:[/green] {username} ({me.get('email', '')})")
-
-            bound = me.get("bound_agent")
-            if bound:
-                cfg["agent_id"] = bound.get("agent_id", "")
-                cfg["agent_name"] = bound.get("agent_name", "")
-                if bound.get("default_space_id"):
-                    cfg["space_id"] = bound["default_space_id"]
-                console.print(
-                    f"[green]Bound agent:[/green] {bound.get('agent_name')} ({bound.get('agent_id', '')[:12]}...)"
-                )
         except Exception:
             pass
 
@@ -320,24 +317,15 @@ def init(
             except Exception:
                 pass
 
-        # Discover agents
-        if not cfg.get("agent_id") and not agent_id:
-            try:
-                agents_data = client.list_agents()
-                agent_list = agents_data.get("agents", agents_data) if isinstance(agents_data, dict) else agents_data
-                if isinstance(agent_list, list) and len(agent_list) == 1:
-                    cfg["agent_id"] = str(agent_list[0].get("id"))
-                    cfg["agent_name"] = agent_list[0].get("name", "")
-                    console.print(f"[green]Agent:[/green] {agent_list[0].get('name')} (auto-selected)")
-                elif isinstance(agent_list, list) and len(agent_list) > 1:
-                    console.print(f"\n[cyan]{len(agent_list)} agents available.[/cyan] Use --agent-id to pick one.")
-            except Exception:
-                pass
+        if agent:
+            console.print(
+                "[yellow]Ignoring --agent for user login. Use an agent PAT/profile for agent runtime.[/yellow]"
+            )
 
     # Apply explicit overrides
-    if agent_name:
+    if is_enrollment and agent_name:
         cfg["agent_name"] = agent_name
-    if agent_id:
+    if is_enrollment and agent_id:
         cfg["agent_id"] = agent_id
     if space_id:
         cfg["space_id"] = space_id

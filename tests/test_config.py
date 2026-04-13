@@ -1,4 +1,5 @@
 """Tests for config resolution — the cascade that burned us (2026-04-05)."""
+
 from pathlib import Path
 
 from ax_cli.config import (
@@ -82,9 +83,7 @@ class TestLoadConfig:
         # Global config
         global_dir = tmp_path / "global"
         global_dir.mkdir()
-        (global_dir / "config.toml").write_text(
-            'agent_id = "global-agent"\nbase_url = "https://global.example.com"\n'
-        )
+        (global_dir / "config.toml").write_text('agent_id = "global-agent"\nbase_url = "https://global.example.com"\n')
         monkeypatch.setenv("AX_CONFIG_DIR", str(global_dir))
 
         # Local config (in CWD)
@@ -120,6 +119,11 @@ class TestResolveAgentId:
         monkeypatch.chdir(tmp_path)
         assert resolve_agent_id() == "config-agent-id"
 
+    def test_user_principal_ignores_stale_config_agent_id(self, tmp_path, monkeypatch, write_config):
+        write_config(principal_type="user", agent_id="stale-agent-id")
+        monkeypatch.chdir(tmp_path)
+        assert resolve_agent_id() is None
+
     def test_returns_none_when_not_set(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert resolve_agent_id() is None
@@ -146,6 +150,11 @@ class TestResolveAgentName:
         write_config(agent_name="config-agent")
         monkeypatch.chdir(tmp_path)
         assert resolve_agent_name() == "config-agent"
+
+    def test_user_principal_ignores_stale_config_agent_name(self, tmp_path, monkeypatch, write_config):
+        write_config(principal_type="user", agent_name="stale-agent")
+        monkeypatch.chdir(tmp_path)
+        assert resolve_agent_name() is None
 
     def test_returns_none_when_not_set(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
