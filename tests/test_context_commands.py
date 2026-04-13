@@ -1,7 +1,7 @@
 from typer.testing import CliRunner
 
-from ax_cli.context_keys import build_upload_context_key
 from ax_cli.commands import context
+from ax_cli.context_keys import build_upload_context_key
 from ax_cli.main import app
 
 runner = CliRunner()
@@ -49,8 +49,9 @@ def test_context_download_uses_base_url_and_auth_headers(monkeypatch, tmp_path):
         def __exit__(self, exc_type, exc, tb):
             return None
 
-        def get(self, url):
+        def get(self, url, params=None):
             calls["url"] = url
+            calls["params"] = params
             return FakeResponse()
 
     monkeypatch.setattr(context, "get_client", lambda: FakeClient())
@@ -63,6 +64,7 @@ def test_context_download_uses_base_url_and_auth_headers(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert output.read_bytes() == b"png-bytes"
     assert calls["url"] == "https://next.paxai.app/api/v1/uploads/files/image.png"
+    assert calls["params"] == {"space_id": "space-1"}
     assert calls["headers"] == {
         "Authorization": "Bearer exchanged.jwt",
         "X-AX-FP": "fp",

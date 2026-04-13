@@ -65,7 +65,7 @@ def upload_file(
 
     # Step 1: Upload the file
     try:
-        result = client.upload_file(str(path))
+        result = client.upload_file(str(path), space_id=space_id)
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc

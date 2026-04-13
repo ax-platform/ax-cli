@@ -64,7 +64,7 @@ def upload_file(
 
     # Upload the file
     try:
-        upload_data = client.upload_file(file_path)
+        upload_data = client.upload_file(file_path, space_id=sid)
     except FileNotFoundError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -192,7 +192,7 @@ def fetch_url(
             tmp_path = tmp.name
 
         try:
-            upload_data = client.upload_file(tmp_path)
+            upload_data = client.upload_file(tmp_path, space_id=sid)
         except httpx.HTTPStatusError as exc:
             handle_error(exc)
         finally:
@@ -386,7 +386,7 @@ def download_file(
         download_url = urljoin(f"{client.base_url}/", url)
         headers = {k: v for k, v in client._auth_headers().items() if k != "Content-Type"}
         with httpx.Client(headers=headers, timeout=60.0, follow_redirects=True) as http:
-            r = http.get(download_url)
+            r = http.get(download_url, params={"space_id": sid} if sid else None)
             r.raise_for_status()
             from pathlib import Path
 

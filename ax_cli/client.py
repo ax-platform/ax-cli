@@ -31,6 +31,12 @@ _EXT_MIME: dict[str, str] = {
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".txt": "text/plain",
+    ".py": "text/x-python",
+    ".js": "text/javascript",
+    ".jsx": "text/javascript",
+    ".ts": "text/typescript",
+    ".tsx": "text/typescript",
+    ".svg": "image/svg+xml",
     ".doc": "application/msword",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xls": "application/vnd.ms-excel",
@@ -333,7 +339,7 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
-    def upload_file(self, file_path: str) -> dict:
+    def upload_file(self, file_path: str, *, space_id: str | None = None) -> dict:
         """POST /api/v1/uploads — upload a local file.
 
         Uses a separate httpx client to avoid sending Content-Type: application/json
@@ -358,6 +364,7 @@ class AxClient:
                 r = upload_http.post(
                     "/api/v1/uploads/",
                     files={"file": (path.name, fh, content_type)},
+                    data={"space_id": space_id} if space_id else None,
                 )
         r.raise_for_status()
         return self._parse_json(r)
