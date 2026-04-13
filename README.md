@@ -172,10 +172,15 @@ ax handoff frontend_sentinel "Fix the app panel loading bug" --intent implement
 ax handoff cipher "Run QA on dev" --intent qa
 ax handoff backend_sentinel "Check dispatch health" --intent status
 ax handoff mcp_sentinel "Auth regression, urgent" --intent incident --nudge
+ax handoff orion "Pair on CLI listener UX" --follow-up
 ```
 
 The intent changes task priority and prompt framing without creating separate
 top-level commands.
+
+Use `--follow-up` for an interactive conversation loop. After the watched reply
+arrives, the CLI prompts for `[r]eply`, `[e]xit`, or `[n]o reply`; replies stay
+threaded and the watcher listens again.
 
 | Intent | Default priority | Use For |
 |--------|------------------|---------|

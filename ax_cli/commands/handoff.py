@@ -340,6 +340,71 @@ def _resolve_agent_id(client, agent_name: str) -> str | None:
     return None
 
 
+def _interactive_follow_up_loop(
+    client,
+    *,
+    space_id: str,
+    agent_name: str,
+    current_agent_name: str,
+    timeout: int,
+    token: str,
+    reply: dict[str, Any],
+) -> None:
+    """Prompt for threaded follow-ups after a watched handoff reply."""
+    parent_id = str(reply.get("id") or "")
+    if not parent_id:
+        return
+
+    while True:
+        choice = typer.prompt("Next action: [r]eply, [e]xit, [n]o reply", default="e").strip().lower()
+        if choice in {"e", "exit", "q", "quit"}:
+            console.print("[dim]Exited follow-up mode.[/dim]")
+            return
+        if choice in {"n", "no", "no-reply", "no reply", "skip"}:
+            console.print("[dim]No follow-up sent.[/dim]")
+            return
+        if choice not in {"r", "reply"}:
+            console.print("[yellow]Choose r, e, or n.[/yellow]")
+            continue
+
+        content = typer.prompt(f"Reply to @{agent_name}").strip()
+        if not content:
+            console.print("[yellow]Empty reply skipped.[/yellow]")
+            continue
+
+        started_at = time.time()
+        try:
+            sent_data = client.send_message(space_id, content, parent_id=parent_id)
+        except httpx.HTTPStatusError as exc:
+            handle_error(exc)
+            return
+
+        sent = sent_data.get("message", sent_data)
+        sent_message_id = str(sent.get("id") or sent_data.get("id") or "")
+        console.print(f"[green]Follow-up sent:[/green] {sent_message_id}")
+        if not sent_message_id:
+            return
+
+        next_reply = _wait_for_handoff_reply(
+            client,
+            space_id=space_id,
+            agent_name=agent_name,
+            sent_message_id=sent_message_id,
+            token=token,
+            current_agent_name=current_agent_name,
+            started_at=started_at,
+            timeout=timeout,
+            require_completion=False,
+        )
+        if not next_reply:
+            console.print(f"[yellow]No @{agent_name} follow-up reply within {timeout}s.[/yellow]")
+            return
+
+        parent_id = str(next_reply.get("id") or parent_id)
+        console.print(f"[green]Reply received from @{agent_name}.[/green]")
+        console.print(str(next_reply.get("content") or ""))
+
+
 def _task_id(task_data: dict[str, Any]) -> str:
     task = task_data.get("task", task_data)
     return str(task.get("id") or "")
@@ -364,6 +429,11 @@ def run(
         help="Wait only for replies that include the handoff token or completion language",
     ),
     nudge: bool = typer.Option(False, "--nudge/--no-nudge", help="Send one nudge if the first wait times out"),
+    follow_up: bool = typer.Option(
+        False,
+        "--follow-up/--no-follow-up",
+        help="After a reply, prompt to send threaded follow-ups until exit.",
+    ),
     space_id: Optional[str] = typer.Option(None, "--space-id", "-s", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
@@ -497,6 +567,16 @@ def run(
             print_json(result)
         else:
             console.print(str(reply.get("content") or ""))
+            if follow_up:
+                _interactive_follow_up_loop(
+                    client,
+                    space_id=sid,
+                    agent_name=agent_name,
+                    current_agent_name=current_agent_name,
+                    timeout=timeout,
+                    token=handoff_id,
+                    reply=reply,
+                )
     else:
         console.print(f"[yellow]No @{agent_name} reply within {timeout}s.[/yellow]")
         if as_json:
