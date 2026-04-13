@@ -76,6 +76,7 @@ def _load_global_config() -> dict:
     if found and not _global_config_warned:
         _global_config_warned = True
         import sys
+
         sys.stderr.write(
             f"\033[33m⚠  Global config (~/.ax/config.toml) contains credentials: {', '.join(sorted(found))}\033[0m\n"
             "   Move credentials to a profile (ax profile add) or workspace .ax/config.toml.\n"
@@ -301,6 +302,7 @@ def get_client() -> AxClient:
     if os.environ.get("AX_VERBOSE", "").lower() in ("1", "true", "yes"):
         import sys
         from urllib.parse import urlparse
+
         host = urlparse(base_url).hostname or base_url
         sys.stderr.write(f"\033[2m[env: {host}]\033[0m\n")
 

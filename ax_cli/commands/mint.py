@@ -70,7 +70,9 @@ def mint(
     expires_days: int = typer.Option(90, "--expires", help="PAT lifetime in days"),
     audience: str = typer.Option("both", "--audience", help="Target: cli, mcp, or both"),
     create: bool = typer.Option(False, "--create", help="Create the agent if it doesn't exist"),
-    save_to: Optional[str] = typer.Option(None, "--save-to", help="Directory to save token file (writes .ax/config.toml)"),
+    save_to: Optional[str] = typer.Option(
+        None, "--save-to", help="Directory to save token file (writes .ax/config.toml)"
+    ),
     profile_name: Optional[str] = typer.Option(None, "--profile", help="Create a named profile after minting"),
     as_json: bool = JSON_OPTION,
 ):

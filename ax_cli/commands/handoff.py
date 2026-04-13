@@ -215,7 +215,9 @@ def _wait_for_handoff_reply(
             timeout=httpx.Timeout(connect=10, read=float(timeout) if timeout else None, write=10, pool=10),
         ) as response:
             if response.status_code != 200:
-                console.print(f"[yellow]SSE unavailable ({response.status_code}); falling back to recent messages.[/yellow]")
+                console.print(
+                    f"[yellow]SSE unavailable ({response.status_code}); falling back to recent messages.[/yellow]"
+                )
                 return _recent_match(client, **kwargs)
 
             for event_type, data in _iter_sse(response):
@@ -313,7 +315,9 @@ def run(
                 assignee_id=target_agent_id,
             )
             task_id = _task_id(task_data)
-            console.print(f"[green]Task created:[/green] {task_id[:8]}..." if task_id else "[green]Task created.[/green]")
+            console.print(
+                f"[green]Task created:[/green] {task_id[:8]}..." if task_id else "[green]Task created.[/green]"
+            )
             if target_agent_id:
                 console.print(f"[dim]Assigned to @{agent_name} ({target_agent_id[:8]}...)[/dim]")
             else:
@@ -328,8 +332,12 @@ def run(
     context_parts = [f"Handoff token: `{handoff_id}`"]
     if task_id:
         context_parts.append(f"Task ID: `{task_id}`")
-    context_parts.append("Reply in this thread if possible; otherwise mention the sender and include the handoff token.")
-    content = spec["prompt"].format(agent=agent_name, instructions=instructions, context="\n".join(context_parts), token=handoff_id)
+    context_parts.append(
+        "Reply in this thread if possible; otherwise mention the sender and include the handoff token."
+    )
+    content = spec["prompt"].format(
+        agent=agent_name, instructions=instructions, context="\n".join(context_parts), token=handoff_id
+    )
 
     started_at = time.time()
     try:
