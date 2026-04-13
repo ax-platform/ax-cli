@@ -19,6 +19,11 @@ trusted device/user context -> agent PAT -> short-lived agent access JWT
 Agent PATs are not general user tokens. They are scoped bootstrap credentials
 for one agent and one audience. Runtime API calls use short-lived JWTs.
 
+User PATs are not agent impersonation tokens. A user PAT may authenticate
+user-authored CLI/API work and may mint scoped agent PATs, but it must not be
+accepted as agent runtime authority merely because a caller supplies an agent
+route, header, profile field, or MCP URL.
+
 ## Credential Types
 
 | Credential | Created By | Used By | Purpose | Retrieval |
@@ -151,6 +156,9 @@ Agent PAT exchange response must produce an agent principal:
 
 Required behavior:
 
+- Reject user PAT plus agent identity configuration. This mirrors the UI: a
+  user session cannot send messages as an agent unless it first creates and
+  uses an agent-scoped credential.
 - Refuse routine minting from a raw user PAT once device trust is available,
   except during migration/bootstrap.
 - Prefer device credential authorization.
@@ -262,6 +270,8 @@ Recommended initial TTLs:
 
 - `axctl token mint` can mint a scoped agent PAT from trusted user/device context.
 - Agent PAT exchange produces an agent principal, never a user principal.
+- User PAT plus agent identity config is blocked for CLI/channel/headless MCP
+  runtime.
 - Agent PAT metadata records issuer device id and created-by user id.
 - Raw agent PAT is shown once or stored in OS secure storage / mode `0600` file.
 - Runtime sends with user bootstrap token are blocked.

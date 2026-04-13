@@ -15,13 +15,84 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from "fs";
-import { join } from "path";
+import { dirname, join, resolve } from "path";
 import { homedir } from "os";
+
+// --- Load .env from ~/.claude/channels/ax-channel/.env as fallback ---
+function loadDotEnv(): Record<string, string> {
+  const envPath = join(homedir(), ".claude", "channels", "ax-channel", ".env");
+  if (!existsSync(envPath)) return {};
+  const vars: Record<string, string> = {};
+  for (const line of readFileSync(envPath, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq > 0) vars[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+  }
+  return vars;
+}
+
+const dotenv = loadDotEnv();
+
+function expandHome(path: string): string {
+  return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+}
+
+function parseFlatToml(text: string): Record<string, string> {
+  const vars: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    vars[key] = value;
+  }
+  return vars;
+}
+
+function findAxConfig(startDir: string): string | null {
+  let dir = resolve(startDir);
+  while (true) {
+    const candidate = join(dir, ".ax", "config.toml");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function loadAxConfig(): Record<string, string> {
+  const explicit = process.env["AX_CONFIG_FILE"] ?? dotenv["AX_CONFIG_FILE"];
+  const path = explicit ? expandHome(explicit) : findAxConfig(process.cwd());
+  if (!path || !existsSync(path)) return {};
+  return parseFlatToml(readFileSync(path, "utf-8"));
+}
+
+const axConfig = loadAxConfig();
+const hasAxConfig = Object.keys(axConfig).length > 0;
+
+function cfg(key: string, fallback: string, axKey?: string): string {
+  return process.env[key] ?? (hasAxConfig && axKey ? axConfig[axKey] : undefined) ?? dotenv[key] ?? fallback;
+}
+
+// --- Config: explicit env > AX_CONFIG_FILE/local .ax/config.toml > .env fallback > defaults ---
+const BASE_URL = cfg("AX_BASE_URL", "https://next.paxai.app", "base_url");
+const AGENT_NAME = cfg("AX_AGENT_NAME", "", "agent_name");
+const AGENT_ID = cfg("AX_AGENT_ID", "", "agent_id");
+const SPACE_ID = cfg("AX_SPACE_ID", "", "space_id");
 
 // --- PID file to prevent stale process accumulation ---
 // Use agent name in PID file so multiple agents can run concurrently.
-// Falls back to "default" if AX_AGENT_NAME isn't set yet (resolved below).
-const _pidAgent = process.env["AX_AGENT_NAME"] || "default";
+// Falls back to "default" if no agent name is configured.
+const _pidAgent = AGENT_NAME || "default";
 const PID_FILE = join(homedir(), ".claude", "channels", "ax-channel", `server.${_pidAgent}.pid`);
 try {
   // Kill any previous instance of the SAME agent
@@ -41,42 +112,41 @@ try {
   process.on("exit", () => { try { unlinkSync(PID_FILE); } catch {} });
 } catch {}
 
-// --- Load .env from ~/.claude/channels/ax-channel/.env as fallback ---
-function loadDotEnv(): Record<string, string> {
-  const envPath = join(homedir(), ".claude", "channels", "ax-channel", ".env");
-  if (!existsSync(envPath)) return {};
-  const vars: Record<string, string> = {};
-  for (const line of readFileSync(envPath, "utf-8").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq > 0) vars[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
-  }
-  return vars;
-}
-
-const dotenv = loadDotEnv();
-function cfg(key: string, fallback: string): string {
-  return process.env[key] ?? dotenv[key] ?? fallback;
-}
-
-// --- Config: env vars > .env file > defaults ---
-const BASE_URL = cfg("AX_BASE_URL", "https://next.paxai.app");
-const AGENT_NAME = cfg("AX_AGENT_NAME", "");
-const AGENT_ID = cfg("AX_AGENT_ID", "");
-const SPACE_ID = cfg("AX_SPACE_ID", "");
-
 function loadToken(): string {
-  // Direct token in env or .env
-  const direct = cfg("AX_TOKEN", "");
+  // Explicit env always wins.
+  const direct = process.env["AX_TOKEN"];
   if (direct) return direct;
-  // Token file path
-  const tokenFile = cfg("AX_TOKEN_FILE", join(homedir(), ".ax", "user_token"));
+
+  const tokenFileCandidates = [
+    process.env["AX_TOKEN_FILE"],
+    hasAxConfig ? axConfig["token_file"] : undefined,
+  ].filter(Boolean) as string[];
+
+  for (const candidate of tokenFileCandidates) {
+    try {
+      return readFileSync(expandHome(candidate), "utf-8").trim();
+    } catch {}
+  }
+
+  const configToken = hasAxConfig ? axConfig["token"] : undefined;
+  if (configToken) return configToken;
+
+  const dotenvTokenFile = dotenv["AX_TOKEN_FILE"];
+  if (dotenvTokenFile) {
+    try {
+      return readFileSync(expandHome(dotenvTokenFile), "utf-8").trim();
+    } catch {}
+  }
+
+  const dotenvToken = dotenv["AX_TOKEN"];
+  if (dotenvToken) return dotenvToken;
+
+  const fallbackTokenFile = join(homedir(), ".ax", "user_token");
   try {
-    return readFileSync(tokenFile, "utf-8").trim();
+    return readFileSync(fallbackTokenFile, "utf-8").trim();
   } catch {
     throw new Error(
-      `No AX_TOKEN set and cannot read token file at ${tokenFile}. Run /ax-channel:configure <token> to set up.`
+      `No AX_TOKEN set and cannot read token file at ${fallbackTokenFile}. Run axctl token mint --save-to for this agent, then set AX_CONFIG_FILE or AX_TOKEN_FILE.`
     );
   }
 }
@@ -87,16 +157,26 @@ function log(msg: string) {
 
 // --- JWT Exchange ---
 async function exchangeForJWT(pat: string): Promise<string> {
+  const isAgentPat = pat.startsWith("axp_a_");
+  if (pat.startsWith("axp_u_") && (AGENT_NAME || AGENT_ID)) {
+    throw new Error(
+      "Refusing to run agent channel with a user PAT. Mint an agent PAT with axctl token mint and point AX_CONFIG_FILE or AX_TOKEN_FILE at it."
+    );
+  }
+  const body: Record<string, unknown> = {
+    requested_token_class: isAgentPat ? "agent_access" : "user_access",
+    scope: "messages tasks context agents spaces",
+  };
+  if (isAgentPat && AGENT_ID) body.agent_id = AGENT_ID;
+  if (isAgentPat && AGENT_NAME) body.agent_name = AGENT_NAME;
+
   const resp = await fetch(`${BASE_URL}/auth/exchange`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${pat}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      requested_token_class: "user_access",
-      scope: "messages tasks context agents spaces",
-    }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     const text = await resp.text();
@@ -635,38 +715,44 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 // --- Start ---
 await mcp.connect(new StdioServerTransport());
 
-// Initialize auth and SSE after MCP is connected
-const jwt = await ensureJwt();
-resolvedAgentId = AGENT_ID || (await resolveAgentId(jwt, AGENT_NAME));
-log(
-  `identity: @${AGENT_NAME}${resolvedAgentId ? ` (${resolvedAgentId.slice(0, 12)}...)` : ""}`
-);
-log(`space: ${SPACE_ID}`);
-log(`api: ${BASE_URL}`);
+// Initialize auth and SSE after MCP is connected. Auth failures must not kill
+// the MCP server; clients should still be able to call get_messages and see
+// reply-time errors instead of losing the channel process.
+try {
+  const jwt = await ensureJwt();
+  resolvedAgentId = AGENT_ID || (await resolveAgentId(jwt, AGENT_NAME));
+  log(
+    `identity: @${AGENT_NAME}${resolvedAgentId ? ` (${resolvedAgentId.slice(0, 12)}...)` : ""}`
+  );
+  log(`space: ${SPACE_ID}`);
+  log(`api: ${BASE_URL}`);
 
-startSSE(ensureJwt, AGENT_NAME, resolvedAgentId, async (mention) => {
-  lastMessageId = mention.id;
+  startSSE(ensureJwt, AGENT_NAME, resolvedAgentId, async (mention) => {
+    lastMessageId = mention.id;
 
-  // Queue for reliability + get_messages polling
-  mentionQueue.push({ ...mention, delivered: false });
-  if (mentionQueue.length > QUEUE_MAX) mentionQueue.shift();
+    // Queue for reliability + get_messages polling
+    mentionQueue.push({ ...mention, delivered: false });
+    if (mentionQueue.length > QUEUE_MAX) mentionQueue.shift();
 
-  // Deliver to Claude Code session
-  void mcp.notification({
-    method: "notifications/claude/channel",
-    params: {
-      content: mention.content,
-      meta: {
-        chat_id: SPACE_ID,
-        message_id: mention.id,
-        parent_id: mention.parentId ?? undefined,
-        user: mention.author,
-        sender: mention.author,
-        source: "ax",
-        space_id: SPACE_ID,
-        ts: mention.ts ?? new Date().toISOString(),
+    // Deliver to Claude Code session
+    void mcp.notification({
+      method: "notifications/claude/channel",
+      params: {
+        content: mention.content,
+        meta: {
+          chat_id: SPACE_ID,
+          message_id: mention.id,
+          parent_id: mention.parentId ?? undefined,
+          user: mention.author,
+          sender: mention.author,
+          source: "ax",
+          space_id: SPACE_ID,
+          ts: mention.ts ?? new Date().toISOString(),
+        },
       },
-    },
+    });
+    log(`delivered ${mention.id.slice(0, 12)} from ${mention.author}`);
   });
-  log(`delivered ${mention.id.slice(0, 12)} from ${mention.author}`);
-});
+} catch (err) {
+  log(`auth init failed: ${err instanceof Error ? err.message : err}`);
+}

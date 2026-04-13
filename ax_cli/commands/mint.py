@@ -63,6 +63,26 @@ def _resolve_agent_id(client, agent: str) -> tuple[str, str]:
     return None, agent  # not found — caller decides whether to create
 
 
+def _is_management_route_miss_error(exc: httpx.HTTPStatusError) -> bool:
+    """Return true when the management route was missing or caught by frontend."""
+    response = exc.response
+    content_type = response.headers.get("content-type", "")
+    if "text/html" in content_type or response.text.lstrip().startswith("<!"):
+        return True
+    return response.status_code in {404, 405}
+
+
+def _create_agent_for_mint(client, agent: str) -> dict:
+    """Create an agent for token minting using the best available API route."""
+    try:
+        data = client.mgmt_create_agent(agent)
+    except httpx.HTTPStatusError as exc:
+        if not _is_management_route_miss_error(exc):
+            raise
+        data = client.create_agent(agent)
+    return data.get("agent", data) if isinstance(data, dict) else data
+
+
 @app.command()
 def mint(
     agent: str = typer.Argument(..., help="Agent name or UUID"),
@@ -130,8 +150,7 @@ def mint(
         if create:
             status(f"[yellow]Agent '{agent}' not found. Creating...[/yellow]")
             try:
-                data = client.mgmt_create_agent(agent)
-                agent_data = data.get("agent", data) if isinstance(data, dict) else data
+                agent_data = _create_agent_for_mint(client, agent)
                 agent_id = agent_data.get("id", "")
                 agent_name = agent_data.get("name", agent)
                 status(f"[green]Created:[/green] {agent_name} ({agent_id[:12]}...)")
@@ -142,8 +161,7 @@ def mint(
             console.print(f"[yellow]Agent '{agent}' not found.[/yellow]")
             if typer.confirm("Create it?"):
                 try:
-                    data = client.mgmt_create_agent(agent)
-                    agent_data = data.get("agent", data) if isinstance(data, dict) else data
+                    agent_data = _create_agent_for_mint(client, agent)
                     agent_id = agent_data.get("id", "")
                     agent_name = agent_data.get("name", agent)
                     status(f"[green]Created:[/green] {agent_name} ({agent_id[:12]}...)")

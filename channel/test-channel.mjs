@@ -27,15 +27,37 @@ function skip(name, reason) {
 // --- Check if we have a token ---
 let hasToken = false;
 try {
-  const envPath = `${homedir()}/.claude/channels/ax-channel/.env`;
-  readFileSync(envPath, 'utf-8');
-  hasToken = true;
+  if (process.env.AX_CONFIG_FILE) {
+    readFileSync(process.env.AX_CONFIG_FILE, 'utf-8');
+    hasToken = true;
+  }
+} catch {}
+try {
+  if (!hasToken) {
+    const envPath = `${homedir()}/.claude/channels/ax-channel/.env`;
+    readFileSync(envPath, 'utf-8');
+    hasToken = true;
+  }
 } catch {
   try {
-    const tokenPath = process.env.AX_TOKEN_FILE || `${homedir()}/.ax/user_token`;
-    readFileSync(tokenPath, 'utf-8');
-    hasToken = true;
+    if (!hasToken) {
+      const tokenPath = process.env.AX_TOKEN_FILE || `${homedir()}/.ax/user_token`;
+      readFileSync(tokenPath, 'utf-8');
+      hasToken = true;
+    }
   } catch {}
+}
+
+function liveEnv() {
+  const env = { ...process.env };
+  if (process.env.AX_CONFIG_FILE) {
+    return env;
+  }
+  env.AX_TOKEN_FILE = process.env.AX_TOKEN_FILE || `${homedir()}/.ax/user_token`;
+  env.AX_BASE_URL = process.env.AX_BASE_URL || 'https://next.paxai.app';
+  env.AX_AGENT_NAME = process.env.AX_AGENT_NAME || 'test_echo';
+  env.AX_SPACE_ID = process.env.AX_SPACE_ID || '';
+  return env;
 }
 
 console.log('=== ax-channel MCP Server Tests ===\n');
@@ -130,13 +152,7 @@ if (!hasToken) {
       command: 'bun',
       args: ['server.ts'],
       cwd: import.meta.dirname || '.',
-      env: {
-        ...process.env,
-        AX_TOKEN_FILE: process.env.AX_TOKEN_FILE || `${homedir()}/.ax/user_token`,
-        AX_BASE_URL: process.env.AX_BASE_URL || 'https://next.paxai.app',
-        AX_AGENT_NAME: process.env.AX_AGENT_NAME || 'test_echo',
-        AX_SPACE_ID: process.env.AX_SPACE_ID || '',
-      }
+      env: liveEnv()
     }
   };
 

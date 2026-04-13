@@ -10,6 +10,7 @@ agent skills.
 - [DEVICE-TRUST-001: Device Trust and Approval](DEVICE-TRUST-001/spec.md)
 - [AGENT-PAT-001: Agent PAT Minting and JWT Exchange](AGENT-PAT-001/spec.md)
 - [IDENTIFIER-DISPLAY-001: Human-Readable Identifier Display](IDENTIFIER-DISPLAY-001/spec.md)
+- [RUNTIME-CONFIG-001: Shared Agent Runtime Configuration](RUNTIME-CONFIG-001/spec.md)
 
 ## Workflow and Delivery
 

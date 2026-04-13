@@ -53,3 +53,12 @@ def test_profile_env_clears_stale_agent_id_when_missing(monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     assert 'export AX_AGENT_ID="none"' in result.stdout
+
+
+def test_profiles_dir_respects_ax_config_dir(monkeypatch, tmp_path):
+    config_dir = tmp_path / "custom-ax-config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(profile, "PROFILES_DIR", None)
+
+    assert profile._profiles_dir() == config_dir / "profiles"
+    assert (config_dir / "profiles").is_dir()

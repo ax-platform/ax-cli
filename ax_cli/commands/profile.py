@@ -19,15 +19,16 @@ import httpx
 import typer
 from rich.table import Table
 
+from ..config import _global_config_dir
 from ..output import console
 
 app = typer.Typer(help="Named profiles with credential fingerprinting")
 
-PROFILES_DIR = Path.home() / ".ax" / "profiles"
+PROFILES_DIR: Path | None = None
 
 
 def _profiles_dir() -> Path:
-    d = PROFILES_DIR
+    d = PROFILES_DIR or (_global_config_dir() / "profiles")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
