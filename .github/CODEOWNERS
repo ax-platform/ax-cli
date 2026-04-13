@@ -6,7 +6,13 @@
 
 # CI/CD and publishing
 .github/ @madtank
+.github/workflows/ @madtank
+.github/CODEOWNERS @madtank
 pyproject.toml @madtank
+release-please-config.json @madtank
+.release-please-manifest.json @madtank
+CHANGELOG.md @madtank
+docs/release-process.md @madtank
 
 # Channel MCP server (Bun/TypeScript) — anvil owns the runtime + SSE bridge
 channel/ @anvil @madtank
