@@ -289,6 +289,7 @@ def _build_signal_metadata(
     whoami_payload: dict[str, Any] | None,
     collection_payload: Any | None,
     summary: str | None,
+    target: str | None,
     alert_kind: str | None,
     severity: str,
 ) -> tuple[dict[str, Any], str]:
@@ -351,13 +352,22 @@ def _build_signal_metadata(
         },
     }
     if alert_kind:
-        metadata["alert"] = {
+        alert: dict[str, Any] = {
             "kind": alert_kind,
             "severity": severity,
             "source": "axctl_apps_signal",
             "context_key": context_key,
             "tool_call_id": tool_call_id,
         }
+        if title:
+            alert["title"] = title
+        if summary:
+            alert["summary"] = summary
+        target_agent = _mention_prefix(target).lstrip("@")
+        if target_agent:
+            alert["target_agent"] = target_agent
+            alert["response_required"] = True
+        metadata["alert"] = alert
     return metadata, tool_call_id
 
 
@@ -451,6 +461,7 @@ def signal(
         whoami_payload=whoami_payload,
         collection_payload=collection_payload,
         summary=summary,
+        target=to,
         alert_kind=alert_kind,
         severity=severity,
     )

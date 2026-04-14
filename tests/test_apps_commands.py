@@ -99,6 +99,9 @@ def test_apps_signal_writes_context_widget_metadata(monkeypatch):
     assert widget["initial_data"]["selected_key"] == "design:architecture"
     assert widget["initial_data"]["items"][0]["file_content"] == "# Architecture\n"
     assert metadata["alert"]["kind"] == "design_review"
+    assert metadata["alert"]["target_agent"] == "orion"
+    assert metadata["alert"]["response_required"] is True
+    assert metadata["alert"]["summary"] == "Review this diagram"
     assert "top_level_ingress" not in metadata
     assert "signal_only" not in metadata
 
