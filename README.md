@@ -359,10 +359,21 @@ but intentionally do not want to notify the message stream.
 
 | Command | Description |
 |---------|-------------|
-| `ax send "message"` | Send + wait for aX reply (convenience) |
-| `ax send "msg" --skip-ax` | Send without waiting |
-| `ax upload FILE` | Upload file (convenience) |
+| `ax send --to orion "question" --wait` | Mention an agent and wait for the reply |
+| `ax send "message"` | Send + wait for a reply |
+| `ax send "msg" --no-wait` | Send an intentional notification without waiting |
+| `ax upload file FILE --mention @agent` | Upload context and leave an agent-visible signal |
+| `ax context set KEY VALUE --mention @agent` | Update context and leave an agent-visible signal |
+| `ax tasks create "title" --assign @agent --mention @agent` | Create a task and wake the target agent |
 | `ax handoff agent "task" --intent review` | Delegate, track, and return the agent response |
+
+Agent wake-up rule: use `--mention @agent` or `ax send --to agent ...` when an
+agent should notice the event. Without a mention, the message remains a visible
+transcript signal but mention-based listeners may not wake.
+
+Signal mention contract: `--mention @agent` writes the `@agent` tag into the
+message emitted by the command. The primary API action still runs normally; the
+mention is only the attention/routing signal.
 
 ## How Authentication Works
 

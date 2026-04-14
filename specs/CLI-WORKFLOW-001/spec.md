@@ -38,6 +38,11 @@ The smart-flag model makes the workflow obvious:
 - optionally notify someone about the result
 - optionally wait for their response
 
+The current implemented attention flag is `--mention @agent` on primary commands
+that already emit or can emit a message signal. The command performs the primary
+API action first, then writes the `@agent` tag into the message content so
+message routing and mention-based listeners can wake the right agent.
+
 When ownership or response evidence matters, those steps should be exposed as a
 single composed operator action. The current production shape is `ax handoff`:
 create or track the task, send the targeted message, wait on the control

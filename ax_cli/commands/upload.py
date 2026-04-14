@@ -14,6 +14,15 @@ from ..output import JSON_OPTION, console, handle_error, print_json
 app = typer.Typer(name="upload", help="Upload files to context", no_args_is_help=True)
 
 
+def _mention_prefix(mention: str | None) -> str:
+    if not mention:
+        return ""
+    value = mention.strip()
+    if not value:
+        return ""
+    return value if value.startswith("@") else f"@{value}"
+
+
 def _message_attachment_ref(
     *,
     attachment_id: str,
@@ -38,9 +47,11 @@ def _message_attachment_ref(
 def upload_file(
     file_path: str = typer.Argument(..., help="Path to the file to upload"),
     message: Optional[str] = typer.Option(None, "--message", "-m", help="Message to send referencing the upload"),
+    mention: Optional[str] = typer.Option(None, "--mention", help="@mention a user or agent in the upload message"),
     key: Optional[str] = typer.Option(None, "--key", "-k", help="Context key (default: unique upload key)"),
     vault: bool = typer.Option(False, "--vault", help="Store permanently in vault (default: ephemeral 24h)"),
-    skip_ax: bool = typer.Option(True, "--skip-ax/--wait", help="Skip waiting for aX reply (default: skip)"),
+    wait: bool = typer.Option(False, "--wait/--no-wait", help="Wait for a reply to the upload message"),
+    skip_ax: bool = typer.Option(False, "--skip-ax", help="Deprecated alias for --no-wait.", hidden=True),
     no_message: bool = typer.Option(False, "--no-message", help="Store context without sending a chat signal"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Only output the attachment ID"),
     json_output: bool = JSON_OPTION,
@@ -133,6 +144,9 @@ def upload_file(
             content = f"{message}\n\n📎 Uploaded `{original_name}` to context (key: `{context_key}`)"
         else:
             content = f"📎 Uploaded `{original_name}` to context (key: `{context_key}`)"
+        prefix = _mention_prefix(mention)
+        if prefix:
+            content = f"{prefix} {content}"
         attachments = [
             _message_attachment_ref(
                 attachment_id=attachment_id,
@@ -153,8 +167,8 @@ def upload_file(
             handle_error(exc)
             raise typer.Exit(1)
 
-        # Wait for aX reply
-        if not skip_ax and msg_id:
+        # Wait for a reply when explicitly requested.
+        if wait and not skip_ax and msg_id:
             from .messages import _wait_for_reply
 
             _wait_for_reply(client, msg_id, timeout=60)

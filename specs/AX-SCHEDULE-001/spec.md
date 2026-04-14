@@ -164,7 +164,7 @@ If either exists, skip execution and log. Same pattern as `ax listen`.
 
 ```crontab
 # ax-schedule: health-check (every 15m)
-*/15 * * * * /usr/local/bin/ax send "@orion Run staging health checks" --skip-ax 2>&1 | /usr/local/bin/ax send --stdin --channel main
+*/15 * * * * /usr/local/bin/ax send --to orion "Run staging health checks" --no-wait 2>&1 | /usr/local/bin/ax send --stdin --channel main
 
 # ax-schedule: morning-briefing (daily at 09:00 UTC)
 0 9 * * * /usr/local/bin/ax send "@project_lead_ai Morning status update" --wait --timeout 120
@@ -179,10 +179,10 @@ When `report_to` is set, after command execution:
 ```python
 if exit_code == 0 and stdout:
     ax send f"**[{schedule.name}]** completed:\n```\n{stdout[:4000]}\n```" \
-        --channel {report_to} --skip-ax
+        --channel {report_to} --no-wait
 elif exit_code != 0:
     ax send f"**[{schedule.name}]** failed (exit {exit_code}):\n```\n{stderr[:2000]}\n```" \
-        --channel {report_to} --skip-ax
+        --channel {report_to} --no-wait
 ```
 
 ## Daemon Mode

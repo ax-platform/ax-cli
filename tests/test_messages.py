@@ -118,6 +118,16 @@ def test_messages_list_shows_short_ids_but_json_keeps_full_ids(monkeypatch):
     assert json.loads(json_result.output)[0]["id"] == message_id
 
 
+def test_send_help_prefers_no_wait_language():
+    result = runner.invoke(app, ["send", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--no-wait" in result.output
+    assert "--skip-ax" not in result.output
+    assert "--to" in result.output
+    assert "intercom" in result.output
+
+
 def test_messages_get_resolves_short_id_prefix(monkeypatch):
     message_id = "12345678-90ab-cdef-1234-567890abcdef"
     calls = {}

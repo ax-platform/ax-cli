@@ -67,6 +67,15 @@ def _resolve_assignee_id(client, assignee: str | None, *, space_id: str) -> str 
     return str(agent_id)
 
 
+def _mention_prefix(mention: str | None) -> str:
+    if not mention:
+        return ""
+    value = mention.strip()
+    if not value:
+        return ""
+    return value if value.startswith("@") else f"@{value}"
+
+
 @app.command("create")
 def create(
     title: str = typer.Argument(..., help="Task title"),
@@ -78,6 +87,7 @@ def create(
     notify: bool = typer.Option(
         True, "--notify/--no-notify", help="Send a message notifying the team about the new task"
     ),
+    mention: Optional[str] = typer.Option(None, "--mention", help="@mention a user or agent in the task notification"),
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
@@ -105,7 +115,10 @@ def create(
     if notify:
         try:
             prio = task.get("priority", "medium")
+            prefix = _mention_prefix(mention)
             msg = f"New task created: **{title}** (id: `{tid}…`, priority: {prio})"
+            if prefix:
+                msg = f"{prefix} {msg}"
             client.send_message(sid, msg)
             if not as_json:
                 console.print("[dim]Team notified.[/dim]")

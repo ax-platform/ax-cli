@@ -263,3 +263,66 @@ def test_context_upload_file_vault_stores_context_before_promote(monkeypatch, tm
     assert calls["promote"]["space_id"] == "space-1"
     assert calls["promote"]["key"] == calls["context"]["key"]
     assert calls["promote"]["artifact_type"] == "RESEARCH"
+
+
+def test_context_upload_file_mention_sends_context_signal(monkeypatch, tmp_path):
+    calls = {}
+    sample = tmp_path / "notes.md"
+    sample.write_text("# Notes\n")
+
+    class FakeClient:
+        def upload_file(self, path, *, space_id=None):
+            return {
+                "attachment_id": "att-1",
+                "url": "/api/v1/uploads/files/notes.md",
+                "content_type": "text/markdown",
+                "size": sample.stat().st_size,
+                "original_filename": "notes.md",
+            }
+
+        def set_context(self, space_id, key, value, *, ttl=None):
+            calls["context"] = {"space_id": space_id, "key": key, "value": value, "ttl": ttl}
+            return {"status": "stored"}
+
+        def send_message(self, space_id, content):
+            calls["message"] = {"space_id": space_id, "content": content}
+            return {"id": "msg-1"}
+
+    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
+
+    result = runner.invoke(
+        app,
+        ["context", "upload-file", str(sample), "--mention", "@orion", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["message"]["space_id"] == "space-1"
+    assert calls["message"]["content"].startswith("@orion Context uploaded:")
+    assert calls["context"]["key"] in calls["message"]["content"]
+    assert '"message_id": "msg-1"' in result.output
+
+
+def test_context_set_mention_sends_context_signal(monkeypatch):
+    calls = {}
+
+    class FakeClient:
+        def set_context(self, space_id, key, value, *, ttl=None):
+            calls["context"] = {"space_id": space_id, "key": key, "value": value, "ttl": ttl}
+            return {"status": "stored", "key": key}
+
+        def send_message(self, space_id, content):
+            calls["message"] = {"space_id": space_id, "content": content}
+            return {"id": "msg-1"}
+
+    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
+
+    result = runner.invoke(
+        app,
+        ["context", "set", "spec:cli", "ready", "--mention", "mcp_sentinel", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["message"]["content"] == "@mcp_sentinel Context updated: `spec:cli`"
+    assert '"message_id": "msg-1"' in result.output

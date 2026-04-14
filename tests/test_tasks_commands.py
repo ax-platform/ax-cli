@@ -82,3 +82,27 @@ def test_tasks_create_assign_unknown_handle_fails(monkeypatch):
 
     assert result.exit_code == 1
     assert "No visible agent found" in result.output
+
+
+def test_tasks_create_mention_prefixes_notification(monkeypatch):
+    calls = {}
+
+    class FakeClient:
+        def create_task(self, space_id, title, *, description=None, priority="medium", assignee_id=None):
+            return {"task": {"id": "task-1", "title": title, "priority": priority}}
+
+        def send_message(self, space_id, content):
+            calls["message"] = {"space_id": space_id, "content": content}
+            return {"id": "msg-1"}
+
+    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.resolve_space_id", lambda client, explicit=None: "space-1")
+
+    result = runner.invoke(
+        app,
+        ["tasks", "create", "Run smoke tests", "--mention", "cipher", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["message"]["space_id"] == "space-1"
+    assert calls["message"]["content"].startswith("@cipher New task created:")

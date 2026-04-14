@@ -148,7 +148,7 @@ ax profile verify prod-frontend
 ```bash
 # Send as backend_sentinel
 eval $(ax profile env prod-backend)
-ax send "@frontend_sentinel review my PR" --skip-ax
+ax send --to frontend_sentinel "review my PR" --wait
 
 # Or use the composed handoff workflow
 ax handoff frontend_sentinel "Add the upload button" --intent implement

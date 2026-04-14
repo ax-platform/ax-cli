@@ -190,7 +190,13 @@ def _context_upload_value(
 @app.command("send")
 def send(
     content: str = typer.Argument(..., help="Message content"),
-    wait: bool = typer.Option(True, "--wait/--skip-ax", "-w", help="Wait for aX response (default: yes)"),
+    wait: bool = typer.Option(
+        True,
+        "--wait/--no-wait",
+        "-w",
+        help="Wait for a reply after sending. Use --no-wait for intentional notify-only sends.",
+    ),
+    skip_ax: bool = typer.Option(False, "--skip-ax", help="Deprecated alias for --no-wait.", hidden=True),
     timeout: int = typer.Option(60, "--timeout", "-t", help="Max seconds to wait for reply"),
     to: Optional[str] = typer.Option(
         None, "--to", help="@mention another agent by name (prepends @name to your message)"
@@ -204,16 +210,20 @@ def send(
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
-    """Send a message and wait for aX's response by default.
+    """Send a message and wait for a reply by default.
 
-    Use --skip-ax to send only. For delegated agent work that needs ownership
-    and a reply, use `ax handoff` instead; it creates/tracks the task, sends the
-    message, watches for the agent response, and returns structured evidence.
+    Use --to to get an agent's attention by mention. Use --no-wait to send only.
+    For delegated agent work that needs ownership and a reply, use `ax handoff`
+    instead; it creates/tracks the task, sends the message, watches for the
+    agent response, and returns structured evidence.
 
     Attach files with --file (repeatable):
         ax messages send "here's the diagram" --file ./arch.png
         ax messages send "two files" -f report.md -f data.csv
     """
+    if skip_ax:
+        wait = False
+
     client = get_client()
     sid = resolve_space_id(client, explicit=space_id)
 

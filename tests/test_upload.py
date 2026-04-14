@@ -66,6 +66,8 @@ def test_upload_file_passes_resolved_space_to_upload_api(monkeypatch, tmp_path):
             "sample-key",
             "--message",
             "@madtank sample",
+            "--mention",
+            "orion",
             "--json",
         ],
     )
@@ -74,6 +76,7 @@ def test_upload_file_passes_resolved_space_to_upload_api(monkeypatch, tmp_path):
     assert calls["upload"]["space_id"] == "space-1"
     assert calls["context"]["space_id"] == "space-1"
     assert calls["message"]["space_id"] == "space-1"
+    assert calls["message"]["content"].startswith("@orion @madtank sample")
 
 
 def test_upload_file_no_message_still_stores_context(monkeypatch, tmp_path):

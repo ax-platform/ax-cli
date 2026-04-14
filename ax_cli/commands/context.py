@@ -45,6 +45,27 @@ TEXT_SUFFIXES = {
 }
 
 
+def _mention_prefix(mention: str | None) -> str:
+    if not mention:
+        return ""
+    value = mention.strip()
+    if not value:
+        return ""
+    return value if value.startswith("@") else f"@{value}"
+
+
+def _send_context_mention(client, sid: str, mention: str | None, message: str) -> str | None:
+    prefix = _mention_prefix(mention)
+    if not prefix:
+        return None
+    try:
+        sent = client.send_message(sid, f"{prefix} {message}")
+    except httpx.HTTPStatusError as exc:
+        typer.echo(f"Warning: context updated but mention failed: {exc}", err=True)
+        return None
+    return sent.get("id", sent.get("message", {}).get("id", ""))
+
+
 def _normalize_upload(payload: dict) -> dict:
     """Normalize varying upload response shapes into a consistent dict."""
     attachment = payload.get("attachment") if isinstance(payload, dict) else None
@@ -180,6 +201,7 @@ def upload_file(
         False, "--vault", help="Store permanently in the intelligence vault (default: ephemeral)"
     ),
     ttl: Optional[int] = typer.Option(None, "--ttl", help="Ephemeral TTL in seconds (default: 86400 = 24h)"),
+    mention: Optional[str] = typer.Option(None, "--mention", help="@mention a user or agent after storing context"),
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
@@ -187,13 +209,14 @@ def upload_file(
 
     By default, the reference is stored ephemerally (24h TTL in Redis).
     Use --vault to promote it to the permanent intelligence vault.
-    This command is storage-only; use `ax upload file` when collaborators
-    should see a message signal with the attachment.
+    This command is storage-only unless --mention is provided. Use
+    `ax upload file` when collaborators should see a message signal with the
+    attachment by default.
 
     Examples:
         ax context upload-file ./report.md
         ax context upload-file ./arch.png --key infra-diagram --vault
-        ax context upload-file ./data.csv --ttl 3600
+        ax context upload-file ./data.csv --ttl 3600 --mention @orion
     """
     client = get_client()
     sid = resolve_space_id(client, explicit=space_id)
@@ -257,6 +280,14 @@ def upload_file(
         typer.echo(f"Warning: file uploaded but context store failed: {exc}", err=True)
 
     context_value["key"] = context_key
+    msg_id = _send_context_mention(
+        client,
+        sid,
+        mention,
+        f"Context uploaded: `{context_key}` ({context_value.get('filename') or Path(file_path).name})",
+    )
+    if msg_id:
+        context_value["message_id"] = msg_id
 
     if as_json:
         print_json(context_value)
@@ -376,6 +407,7 @@ def set_ctx(
     key: str = typer.Argument(..., help="Context key"),
     value: str = typer.Argument(..., help="Context value"),
     ttl: Optional[int] = typer.Option(None, "--ttl", help="TTL in seconds"),
+    mention: Optional[str] = typer.Option(None, "--mention", help="@mention a user or agent after setting context"),
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
@@ -386,6 +418,9 @@ def set_ctx(
         data = client.set_context(sid, key, value, ttl=ttl)
     except httpx.HTTPStatusError as exc:
         handle_error(exc)
+    msg_id = _send_context_mention(client, sid, mention, f"Context updated: `{key}`")
+    if msg_id and isinstance(data, dict):
+        data = {**data, "message_id": msg_id}
     if as_json:
         print_json(data)
     else:

@@ -13,7 +13,7 @@ Usage:
     ax watch --count 3                          # Wait for 3 matching messages
 
 Examples in scripts:
-    ax send "@backend_sentinel implement uploads" --skip-ax
+    ax send --to backend_sentinel "implement uploads" --wait
     RESULT=$(ax watch --from backend_sentinel --timeout 600 --json)
     echo "Agent responded: $RESULT"
 """

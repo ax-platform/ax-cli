@@ -66,7 +66,13 @@ def login(
 @app.command("send")
 def send_shortcut(
     content: str = typer.Argument(..., help="Message to send"),
-    wait: bool = typer.Option(True, "--wait/--skip-ax", "-w", help="Wait for aX response (default: yes)"),
+    wait: bool = typer.Option(
+        True,
+        "--wait/--no-wait",
+        "-w",
+        help="Wait for a reply after sending. Use --no-wait for intentional notify-only sends.",
+    ),
+    skip_ax: bool = typer.Option(False, "--skip-ax", help="Deprecated alias for --no-wait.", hidden=True),
     timeout: int = typer.Option(60, "--timeout", "-t", help="Max seconds to wait"),
     reply_to: Optional[str] = typer.Option(None, "--reply-to", "--parent", "-r", help="Reply to message ID (thread)"),
     to: Optional[str] = typer.Option(None, "--to", help="@mention another agent by name"),
@@ -77,14 +83,16 @@ def send_shortcut(
     space_id: Optional[str] = typer.Option(None, "--space-id", "-s", help="Override default space"),
     as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
-    """Send a message and wait for aX's response by default.
+    """Send a message and wait for a reply by default.
 
-    Use `ax handoff` for delegated agent work that needs task ownership,
-    response waiting, and evidence.
+    Use --to for a simple agent mention/intercom. Use `ax handoff` for
+    delegated agent work that needs task ownership, response waiting, and
+    evidence.
     """
     messages.send(
         content=content,
-        wait=wait,
+        wait=False if skip_ax else wait,
+        skip_ax=False,
         timeout=timeout,
         to=to,
         act_as=act_as,

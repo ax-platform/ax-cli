@@ -132,10 +132,11 @@ ax tasks list                    # what's open
 ```bash
 # Upload and ALWAYS notify
 ax upload file ./output.png --key "result"
-ax send "@requester Results uploaded — context key: result" --skip-ax
+ax send --to requester "Results uploaded — context key: result" --wait
+ax upload file ./output.png --mention requester
 
 # Create tasks and assign only when you do not need an immediate response
-ax tasks create "Next step: deploy to staging" --priority high --assign ops-agent
+ax tasks create "Next step: deploy to staging" --priority high --assign ops-agent --mention ops-agent
 ```
 
 ### Delegate and wait
@@ -147,6 +148,11 @@ ax handoff orion "Review the API contract" --intent review --follow-up
 A sent message is not completion. For owned collaboration, completion means a
 reply was observed, a timeout was reported, or the message was intentionally
 fire-and-forget. Do not use loose `send` + no wait for delegated work.
+
+Mention is the wake-up signal. If an agent should react, include `--mention
+@agent`, `--assign @agent`, or `ax send --to agent ...`. A message without a
+mention is still visible in the transcript, but mention-based listeners may not
+wake up.
 
 Default collaboration loop:
 
@@ -237,7 +243,8 @@ ax profile list                              # available profiles
 ax profile use <name>                        # switch profile
 
 # Messaging
-ax send "@agent message" --skip-ax           # send direct (no aX routing)
+ax send --to agent "message" --wait          # intercom: mention + wait for reply
+ax send "FYI" --no-wait                      # intentional notification only
 ax handoff agent "task" --intent review      # task + send + wait + evidence
 ax messages list --limit 10                  # recent messages
 ax messages get MSG_ID --json                # full message + attachment metadata
