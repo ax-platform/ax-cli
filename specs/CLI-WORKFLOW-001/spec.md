@@ -112,6 +112,27 @@ commits, context keys, or a blocker report can prove progress.
 Loop target agents should reply when a round is complete or blocked. Progress
 chatter consumes loop rounds without adding a useful decision point.
 
+### `ax handoff ... --adaptive-wait`
+
+When listener status is uncertain, the CLI can probe before deciding whether to
+wait:
+
+```bash
+ax handoff cli_sentinel "Review CLI docs" --adaptive-wait
+```
+
+Behavior:
+
+1. Send a contact-mode ping to the target.
+2. If the target replies, continue with the normal wait/loop behavior.
+3. If the target does not reply, create the task and send the message, but do
+   not wait on a channel that is not proven live.
+4. Return `status=queued_not_listening` with the contact probe details.
+
+This keeps shared state durable even when live delivery is unavailable: the task
+and message exist for later pickup, and the CLI reports that it queued the work
+instead of presenting timeout as an agent decision.
+
 ### `--notify [@agent] ["optional message"]`
 
 After the primary command succeeds, send a message containing:

@@ -48,6 +48,111 @@ def _agent_mention_name(agent: dict[str, Any], fallback: str) -> str:
     return fallback.strip().removeprefix("@")
 
 
+def _agent_mesh_role(agent: dict[str, Any]) -> str:
+    name = str(agent.get("name") or "").lower()
+    origin = str(agent.get("origin") or "").lower()
+    agent_type = str(agent.get("agent_type") or "").lower()
+    specialization = str(agent.get("specialization") or "").lower()
+    description = str(agent.get("description") or "").lower()
+
+    if origin == "space_agent" or agent_type == "space_agent":
+        return "space_agent"
+    if "supervisor" in name or "supervisor" in specialization or "tech lead" in description:
+        return "supervisor_candidate"
+    if "sentinel" in name:
+        return "domain_sentinel"
+    if agent_type == "on_demand":
+        return "on_demand_worker"
+    return "worker"
+
+
+def _inferred_contact_mode(agent: dict[str, Any]) -> str:
+    origin = str(agent.get("origin") or "").lower()
+    agent_type = str(agent.get("agent_type") or "").lower()
+    if origin == "space_agent" or agent_type == "space_agent":
+        return "space_agent"
+    if agent_type == "on_demand":
+        return "on_demand"
+    return "unknown"
+
+
+def _recommended_contact(contact_mode: str, mesh_role: str) -> str:
+    if contact_mode == "event_listener":
+        return "handoff_or_send_wait"
+    if contact_mode == "space_agent":
+        return "product_request"
+    if contact_mode == "on_demand":
+        return "task_or_manual_check"
+    if mesh_role == "supervisor_candidate":
+        return "restore_listener_then_handoff"
+    return "ping_then_handoff"
+
+
+def _probe_agent_contact(
+    client,
+    *,
+    space_id: str,
+    target: dict[str, Any],
+    timeout: int,
+    current_agent_name: str,
+) -> dict[str, Any]:
+    agent_name = _agent_mention_name(target, str(target.get("name") or "agent"))
+    token = f"ping:{uuid.uuid4().hex[:8]}"
+    content = (
+        f"@{agent_name} Contact-mode ping from axctl. "
+        f"Please reply with `{token}` if this mention reached a live listener."
+    )
+    started_at = time.time()
+
+    sent_data = client.send_message(space_id, content)
+    sent = sent_data.get("message", sent_data)
+    sent_message_id = str(sent.get("id") or sent_data.get("id") or "")
+    reply = None
+    if sent_message_id and timeout > 0:
+        reply = _wait_for_handoff_reply(
+            client,
+            space_id=space_id,
+            agent_name=agent_name,
+            sent_message_id=sent_message_id,
+            token=token,
+            current_agent_name=current_agent_name,
+            started_at=started_at,
+            timeout=timeout,
+            require_completion=True,
+        )
+
+    return {
+        "sent_message_id": sent_message_id,
+        "ping_token": token,
+        "listener_status": "replied" if reply else "no_reply",
+        "contact_mode": "event_listener" if reply else "unknown_or_not_listening",
+        "reply": reply,
+    }
+
+
+def _discover_agent_row(agent: dict[str, Any], probe: dict[str, Any] | None = None) -> dict[str, Any]:
+    mesh_role = _agent_mesh_role(agent)
+    contact_mode = probe["contact_mode"] if probe else _inferred_contact_mode(agent)
+    listener_status = probe["listener_status"] if probe else "not_probed"
+    warning = ""
+    if mesh_role == "supervisor_candidate" and contact_mode != "event_listener":
+        warning = "supervisor_candidate_not_live"
+    return {
+        "name": agent.get("name"),
+        "agent_id": agent.get("id"),
+        "origin": agent.get("origin"),
+        "agent_type": agent.get("agent_type"),
+        "roster_status": agent.get("status"),
+        "mesh_role": mesh_role,
+        "listener_status": listener_status,
+        "contact_mode": contact_mode,
+        "recommended_contact": _recommended_contact(contact_mode, mesh_role),
+        "sent_message_id": probe.get("sent_message_id") if probe else None,
+        "ping_token": probe.get("ping_token") if probe else None,
+        "warning": warning,
+    }
+
+
 @app.command("list")
 def list_agents(
     space_id: str = typer.Option(None, "--space-id", help="Override default space"),
@@ -92,54 +197,32 @@ def ping_agent(
         typer.echo(f"Error: No visible agent found for '{agent}'.", err=True)
         raise typer.Exit(1)
 
-    agent_name = _agent_mention_name(target, agent)
-    token = f"ping:{uuid.uuid4().hex[:8]}"
-    content = (
-        f"@{agent_name} Contact-mode ping from axctl. "
-        f"Please reply with `{token}` if this mention reached a live listener."
-    )
-    started_at = time.time()
-
     try:
-        sent_data = client.send_message(sid, content)
+        probe = _probe_agent_contact(
+            client,
+            space_id=sid,
+            target=target,
+            timeout=timeout,
+            current_agent_name=resolve_agent_name(client=client) or "",
+        )
     except httpx.HTTPStatusError as exc:
         handle_error(exc)
 
-    sent = sent_data.get("message", sent_data)
-    sent_message_id = str(sent.get("id") or sent_data.get("id") or "")
-    current_agent_name = resolve_agent_name(client=client) or ""
-    reply = None
-    if sent_message_id and timeout > 0:
-        reply = _wait_for_handoff_reply(
-            client,
-            space_id=sid,
-            agent_name=agent_name,
-            sent_message_id=sent_message_id,
-            token=token,
-            current_agent_name=current_agent_name,
-            started_at=started_at,
-            timeout=timeout,
-            require_completion=True,
-        )
-
+    agent_name = _agent_mention_name(target, agent)
     result = {
         "agent": agent_name,
         "agent_id": target.get("id"),
         "origin": target.get("origin"),
         "agent_type": target.get("agent_type"),
         "roster_status": target.get("status"),
-        "sent_message_id": sent_message_id,
-        "ping_token": token,
-        "listener_status": "replied" if reply else "no_reply",
-        "contact_mode": "event_listener" if reply else "unknown_or_not_listening",
-        "reply": reply,
+        **probe,
     }
 
     if as_json:
         print_json(result)
         return
 
-    if reply:
+    if probe["reply"]:
         console.print(f"[green]@{agent_name} replied.[/green] contact_mode=event_listener")
     else:
         console.print(
@@ -152,9 +235,86 @@ def ping_agent(
             "origin": result["origin"],
             "agent_type": result["agent_type"],
             "roster_status": result["roster_status"],
-            "sent_message_id": sent_message_id,
-            "ping_token": token,
+            "sent_message_id": result["sent_message_id"],
+            "ping_token": result["ping_token"],
         }
+    )
+
+
+@app.command("discover")
+def discover_agents(
+    agents: list[str] = typer.Argument(None, help="Optional agent names, @handles, or UUIDs to inspect"),
+    ping: bool = typer.Option(False, "--ping/--no-ping", help="Send ping probes to classify live listeners"),
+    timeout: int = typer.Option(10, "--timeout", "-t", help="Seconds to wait per ping when --ping is enabled"),
+    space_id: str = typer.Option(None, "--space-id", help="Override default space"),
+    limit: int = typer.Option(500, "--limit", help="Max roster agents to inspect"),
+    as_json: bool = JSON_OPTION,
+):
+    """Discover agent mesh roles, listener state, and safe contact method."""
+    client = get_client()
+    sid = resolve_space_id(client, explicit=space_id)
+    try:
+        agents_data = client.list_agents(space_id=sid, limit=limit)
+    except httpx.HTTPStatusError as exc:
+        handle_error(exc)
+
+    roster = _agent_items(agents_data)
+    selected: list[dict[str, Any]] = []
+    if agents:
+        for identifier in agents:
+            match = _find_agent(roster, identifier)
+            if not match:
+                typer.echo(f"Error: No visible agent found for '{identifier}'.", err=True)
+                raise typer.Exit(1)
+            selected.append(match)
+    else:
+        selected = roster
+
+    current_agent_name = resolve_agent_name(client=client) or ""
+    rows: list[dict[str, Any]] = []
+    for target in selected:
+        probe = None
+        if ping:
+            try:
+                probe = _probe_agent_contact(
+                    client,
+                    space_id=sid,
+                    target=target,
+                    timeout=timeout,
+                    current_agent_name=current_agent_name,
+                )
+            except httpx.HTTPStatusError as exc:
+                handle_error(exc)
+        rows.append(_discover_agent_row(target, probe))
+
+    summary = {
+        "total": len(rows),
+        "event_listeners": sum(1 for row in rows if row["contact_mode"] == "event_listener"),
+        "unknown_or_not_listening": sum(1 for row in rows if row["contact_mode"] == "unknown_or_not_listening"),
+        "supervisor_candidates": sum(1 for row in rows if row["mesh_role"] == "supervisor_candidate"),
+        "supervisor_candidates_not_live": sum(
+            1 for row in rows if row["warning"] == "supervisor_candidate_not_live"
+        ),
+        "pinged": ping,
+    }
+    result = {"space_id": sid, "summary": summary, "agents": rows}
+
+    if as_json:
+        print_json(result)
+        return
+
+    print_table(
+        ["Name", "Role", "Roster", "Listener", "Contact Mode", "Recommended", "Warning"],
+        rows,
+        keys=[
+            "name",
+            "mesh_role",
+            "roster_status",
+            "listener_status",
+            "contact_mode",
+            "recommended_contact",
+            "warning",
+        ],
     )
 
 

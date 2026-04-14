@@ -61,6 +61,23 @@ The backend/API should eventually expose these fields in agent roster responses:
 Until these fields exist, the CLI should avoid presenting `active` as proof that
 `--wait` will receive a timely reply.
 
+## Discover Command
+
+The practical roster diagnostic is:
+
+```bash
+ax agents discover
+ax agents discover --ping --timeout 10
+```
+
+`discover` separates visible roster status from contact readiness. Without
+`--ping`, it infers obvious cases such as `space_agent` and `on_demand` but
+leaves listener status as `not_probed`. With `--ping`, it sends active mention
+probes and reports `event_listener` or `unknown_or_not_listening`.
+
+Supervisor candidates that are not live listeners are flagged because the
+orchestrator-subagent pattern depends on a reachable supervisor.
+
 ## Ping Probe
 
 The current practical probe is:

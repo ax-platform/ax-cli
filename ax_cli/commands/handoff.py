@@ -191,6 +191,45 @@ def _loop_continue_content(
     )
 
 
+def _probe_target_contact(
+    client,
+    *,
+    space_id: str,
+    agent_name: str,
+    current_agent_name: str,
+    timeout: int,
+) -> dict[str, Any]:
+    token = f"ping:{uuid.uuid4().hex[:8]}"
+    content = (
+        f"@{agent_name} Contact-mode ping from axctl. "
+        f"Please reply with `{token}` if this mention reached a live listener."
+    )
+    started_at = time.time()
+    sent_data = client.send_message(space_id, content)
+    sent = sent_data.get("message", sent_data)
+    sent_message_id = str(sent.get("id") or sent_data.get("id") or "")
+    reply = None
+    if sent_message_id and timeout > 0:
+        reply = _wait_for_handoff_reply(
+            client,
+            space_id=space_id,
+            agent_name=agent_name,
+            sent_message_id=sent_message_id,
+            token=token,
+            current_agent_name=current_agent_name,
+            started_at=started_at,
+            timeout=timeout,
+            require_completion=True,
+        )
+    return {
+        "sent_message_id": sent_message_id,
+        "ping_token": token,
+        "listener_status": "replied" if reply else "no_reply",
+        "contact_mode": "event_listener" if reply else "unknown_or_not_listening",
+        "reply": reply,
+    }
+
+
 def _matches_handoff_reply(
     message: dict[str, Any],
     *,
@@ -470,6 +509,16 @@ def run(
     priority: Optional[str] = typer.Option(None, "--priority", help="Task priority override"),
     create_task: bool = typer.Option(True, "--task/--no-task", help="Create a task for the handoff"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Wait for the target agent response"),
+    adaptive_wait: bool = typer.Option(
+        False,
+        "--adaptive-wait/--no-adaptive-wait",
+        help="Probe listener status first; wait only when the target replies to ping.",
+    ),
+    probe_timeout: int = typer.Option(
+        10,
+        "--probe-timeout",
+        help="Seconds to wait for the adaptive contact probe.",
+    ),
     require_completion: bool = typer.Option(
         False,
         "--require-completion",
@@ -502,6 +551,9 @@ def run(
     if loop and not watch:
         typer.echo("Error: --loop requires --watch so the CLI can receive agent replies.", err=True)
         raise typer.Exit(1)
+    if adaptive_wait and not watch:
+        typer.echo("Error: --adaptive-wait requires --watch so the CLI can adapt the wait path.", err=True)
+        raise typer.Exit(1)
     if loop and follow_up:
         typer.echo("Error: --loop and --follow-up are separate modes; choose one.", err=True)
         raise typer.Exit(1)
@@ -520,6 +572,28 @@ def run(
     task_priority = priority or spec["priority"]
     handoff_id = f"handoff:{uuid.uuid4().hex[:8]}"
     target_agent_id = _resolve_agent_id(client, agent_name)
+    contact_probe: dict[str, Any] | None = None
+    effective_watch = watch
+
+    if adaptive_wait:
+        try:
+            contact_probe = _probe_target_contact(
+                client,
+                space_id=sid,
+                agent_name=agent_name,
+                current_agent_name=current_agent_name,
+                timeout=probe_timeout,
+            )
+        except httpx.HTTPStatusError as exc:
+            handle_error(exc)
+        if contact_probe["contact_mode"] == "event_listener":
+            console.print(f"[green]@{agent_name} is live; waiting remains enabled.[/green]")
+        else:
+            effective_watch = False
+            console.print(
+                f"[yellow]@{agent_name} did not answer the contact probe; "
+                "queueing handoff without waiting.[/yellow]"
+            )
 
     task_data: dict[str, Any] | None = None
     task_error: str | None = None
@@ -566,6 +640,11 @@ def run(
                 f"Agentic loop mode is enabled for {max_rounds} reply rounds. "
                 "No completion promise is configured, so the CLI will stop at the round limit."
             )
+    if contact_probe and contact_probe["contact_mode"] != "event_listener":
+        context_parts.append(
+            "Adaptive wait contact probe did not receive a live listener reply. "
+            "This handoff is queued for the target's next check-in."
+        )
     content = spec["prompt"].format(
         agent=agent_name, instructions=instructions, context="\n".join(context_parts), token=handoff_id
     )
@@ -580,15 +659,17 @@ def run(
     sent_message_id = str(sent.get("id") or sent_data.get("id") or "")
     console.print(f"[green]Handoff sent:[/green] {sent_message_id}")
 
-    if not watch or not sent_message_id:
+    if not effective_watch or not sent_message_id:
+        status = "queued_not_listening" if contact_probe and not effective_watch else "sent"
         result = {
-            "status": "sent",
+            "status": status,
             "intent": normalized_intent,
             "agent": agent_name,
             "handoff_id": handoff_id,
             "task": task_data,
             "task_error": task_error,
             "sent": sent_data,
+            "contact_probe": contact_probe,
             "reply": None,
         }
         if as_json:
@@ -705,6 +786,7 @@ def run(
         "task": task_data,
         "task_error": task_error,
         "sent": sent_data,
+        "contact_probe": contact_probe,
         "reply": reply,
         "loop": loop_result,
     }

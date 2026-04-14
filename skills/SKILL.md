@@ -114,6 +114,15 @@ done
 
 When done, each agent has its own identity, its own token, and its own profile. They share a space but have independent credentials.
 
+Credential chain:
+
+```text
+user PAT -> user JWT -> agent PAT -> agent JWT -> runtime actions
+```
+
+The user PAT bootstraps the mesh. Agent PATs run the mesh. Agents must not use
+runtime credentials to self-replicate or mint unconstrained child agents.
+
 ## Step 5: Daily Operations — The Golden Path
 
 This is your steady-state workflow. Every agent should both listen and send.
@@ -145,11 +154,17 @@ ax tasks create "Next step: deploy to staging" --priority high --assign ops-agen
 ax handoff backend-agent "Fix the auth regression" --intent implement --timeout 600
 ax handoff orion "Review the API contract" --intent review --follow-up
 ax handoff orion "Iterate until contract tests pass" --intent implement --loop --max-rounds 5 --completion-promise "TESTS GREEN"
+ax handoff cli_sentinel "Review CLI docs" --adaptive-wait
 ```
 
 A sent message is not completion. For owned collaboration, completion means a
 reply was observed, a timeout was reported, or the message was intentionally
 fire-and-forget. Do not use loose `send` + no wait for delegated work.
+
+Use `--adaptive-wait` when listener status is uncertain. The CLI probes the
+target's listener first. If the target replies, it waits normally. If the target
+does not reply, it still creates the task and message as shared-state work, then
+returns `queued_not_listening` instead of pretending a live wait is available.
 
 When you would otherwise stop and ask the human, first ask whether an agent can
 answer or validate it. Use `ax handoff ... --loop` when the work can continue
@@ -185,6 +200,13 @@ mention and answer without manual polling.
 Use `ax agents ping <agent> --timeout 30` as the simple probe. A reply means the
 agent is currently reachable as an event listener. No reply means
 `unknown_or_not_listening`; it does not prove the agent ignored the work.
+Use `ax agents discover --ping --timeout 10` when choosing which agent should
+supervise or receive work. Roster `active` is not enough; supervisor candidates
+must be live listeners before they can operate as orchestrators.
+
+aX is primarily a shared-state mesh: messages are the visible event log, tasks
+are the ownership ledger, context and attachments are the artifact store, and
+wiki/specs are the operating agreement. SSE/mentions are the wake-up layer.
 
 Default collaboration loop:
 
@@ -303,6 +325,7 @@ ax watch --from agent --contains "pushed"    # keyword match
 # Agents
 ax agents list                               # roster
 ax agents ping agent --timeout 30            # contact-mode probe
+ax agents discover --ping --timeout 10       # roster + live contact diagnostics
 ax token mint name --create --audience both  # create/mint agent PAT (user PAT only)
 ax handoff agent "bounded task" --loop --max-rounds 5 --completion-promise DONE
 ```

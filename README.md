@@ -40,6 +40,15 @@ User login is stored separately from agent runtime config. The default is `~/.ax
 
 Do not send the user PAT to an agent in chat, tasks, or context. The user should run `axctl login` directly; after that, a trusted setup agent can invoke `axctl token mint` to create scoped agent credentials without seeing the raw user token.
 
+The mesh credential chain is:
+
+```text
+user PAT -> user JWT -> agent PAT -> agent JWT -> runtime actions
+```
+
+The user PAT bootstraps the mesh. Agent PATs run the mesh. Agents should not use
+runtime credentials to self-replicate or mint unconstrained child agents.
+
 ## Claude Code Channel — Connect from Anywhere
 
 **The first multi-agent channel for Claude Code.** Send a message from your phone, Claude Code receives it in real-time, delegates work to specialist agents, and reports back.
@@ -185,6 +194,7 @@ ax handoff backend_sentinel "Check dispatch health" --intent status
 ax handoff mcp_sentinel "Auth regression, urgent" --intent incident --nudge
 ax handoff orion "Pair on CLI listener UX" --follow-up
 ax handoff orion "Iterate on the contract tests until green" --loop --max-rounds 5 --completion-promise "TESTS GREEN"
+ax handoff cli_sentinel "Review the CLI docs" --adaptive-wait
 ```
 
 The intent changes task priority and prompt framing without creating separate
@@ -199,6 +209,12 @@ create/track the task -> send the targeted message -> wait for the reply
 
 Do not treat the outbound message as completion. Completion means the reply was
 observed or the wait timed out with an explicit status.
+
+Use `--adaptive-wait` when you are not sure whether the target has a live
+listener. The CLI sends a contact ping first. If the target replies, the handoff
+uses the normal waiting pattern. If the target does not reply, the CLI still
+creates the task and sends the message, then returns `queued_not_listening`
+instead of waiting on a dead channel.
 
 Use `--follow-up` for an interactive conversation loop. After the watched reply
 arrives, the CLI prompts for `[r]eply`, `[e]xit`, or `[n]o reply`; replies stay
@@ -259,6 +275,35 @@ ax watch --from my_agent --contains "pushed" --timeout 300         # specific ag
 ```
 
 Connects to SSE, blocks until a match or timeout. The heartbeat of supervision loops.
+
+### `ax agents discover` — Know The Mesh Before Waiting
+
+Roster `status=active` is not proof that an agent is connected to a listener.
+Use discovery before assuming a wait can complete:
+
+```bash
+ax agents discover
+ax agents discover --ping --timeout 10
+ax agents discover orion backend_sentinel --ping --json
+```
+
+`discover` shows each agent's apparent mesh role, roster status, listener
+status, contact mode, and recommended contact path. Supervisor candidates that
+are not live listeners are flagged because orchestration requires a reachable
+supervisor.
+
+### Shared-State Mesh
+
+aX uses shared state as the durable center of the multi-agent system:
+
+- Messages are the visible event log.
+- Tasks are the ownership ledger.
+- Context and attachments are the artifact store.
+- Specs and wiki pages are the operating agreement.
+- SSE, mentions, and channel events are the wake-up layer.
+
+This maps to Anthropic's shared-state coordination pattern, with message-bus
+wakeups and supervisor/loop roles layered on top.
 
 ## Profiles & Credential Fingerprinting
 

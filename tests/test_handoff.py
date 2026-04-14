@@ -298,6 +298,92 @@ def test_handoff_loop_timeout_after_progress_uses_loop_timeout_status(monkeypatc
     assert len(data["loop"]["rounds"]) == 2
 
 
+def test_handoff_adaptive_wait_queues_when_probe_times_out(monkeypatch):
+    runner = CliRunner()
+    calls = {"messages": []}
+
+    class FakeClient:
+        def list_agents(self):
+            return {"agents": [{"id": "agent-1", "name": "cli_sentinel"}]}
+
+        def create_task(self, space_id, title, description=None, priority=None, assignee_id=None):
+            calls["task"] = {
+                "space_id": space_id,
+                "title": title,
+                "description": description,
+                "priority": priority,
+                "assignee_id": assignee_id,
+            }
+            return {"task": {"id": "task-1"}}
+
+        def send_message(self, space_id, content, parent_id=None):
+            message_id = f"msg-{len(calls['messages']) + 1}"
+            calls["messages"].append({"space_id": space_id, "content": content, "parent_id": parent_id})
+            return {"message": {"id": message_id}}
+
+    wait_calls = []
+
+    def fake_wait(*args, **kwargs):
+        wait_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr("ax_cli.commands.handoff.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.handoff.resolve_space_id", lambda client, explicit=None: "space-1")
+    monkeypatch.setattr("ax_cli.commands.handoff.resolve_agent_name", lambda client=None: "ChatGPT")
+    monkeypatch.setattr("ax_cli.commands.handoff._wait_for_handoff_reply", fake_wait)
+
+    result = runner.invoke(
+        app,
+        ["handoff", "cli_sentinel", "Review CLI docs", "--adaptive-wait", "--probe-timeout", "1", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = _json_tail(result.output)
+    assert data["status"] == "queued_not_listening"
+    assert data["contact_probe"]["contact_mode"] == "unknown_or_not_listening"
+    assert data["reply"] is None
+    assert len(calls["messages"]) == 2
+    assert calls["messages"][0]["content"].startswith("@cli_sentinel Contact-mode ping")
+    assert "queued for the target's next check-in" in calls["messages"][1]["content"]
+    assert len(wait_calls) == 1
+
+
+def test_handoff_adaptive_wait_continues_when_probe_replies(monkeypatch):
+    runner = CliRunner()
+    calls = {"messages": []}
+
+    class FakeClient:
+        def list_agents(self):
+            return {"agents": [{"id": "agent-1", "name": "orion"}]}
+
+        def create_task(self, space_id, title, description=None, priority=None, assignee_id=None):
+            return {"task": {"id": "task-1"}}
+
+        def send_message(self, space_id, content, parent_id=None):
+            message_id = f"msg-{len(calls['messages']) + 1}"
+            calls["messages"].append({"space_id": space_id, "content": content, "parent_id": parent_id})
+            return {"message": {"id": message_id}}
+
+    replies = [
+        {"id": "probe-reply", "content": "ping:ok", "display_name": "orion"},
+        {"id": "handoff-reply", "content": "reviewed", "display_name": "orion"},
+    ]
+
+    monkeypatch.setattr("ax_cli.commands.handoff.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.handoff.resolve_space_id", lambda client, explicit=None: "space-1")
+    monkeypatch.setattr("ax_cli.commands.handoff.resolve_agent_name", lambda client=None: "ChatGPT")
+    monkeypatch.setattr("ax_cli.commands.handoff._wait_for_handoff_reply", lambda *args, **kwargs: replies.pop(0))
+
+    result = runner.invoke(app, ["handoff", "orion", "Review CLI docs", "--adaptive-wait", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _json_tail(result.output)
+    assert data["status"] == "replied"
+    assert data["contact_probe"]["contact_mode"] == "event_listener"
+    assert data["reply"]["id"] == "handoff-reply"
+    assert len(calls["messages"]) == 2
+
+
 def test_handoff_is_registered_and_old_tone_verbs_are_removed():
     runner = CliRunner()
     result = runner.invoke(app, ["--help"])
