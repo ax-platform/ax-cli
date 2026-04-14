@@ -144,11 +144,29 @@ ax tasks create "Next step: deploy to staging" --priority high --assign ops-agen
 ```bash
 ax handoff backend-agent "Fix the auth regression" --intent implement --timeout 600
 ax handoff orion "Review the API contract" --intent review --follow-up
+ax handoff orion "Iterate until contract tests pass" --intent implement --loop --max-rounds 5 --completion-promise "TESTS GREEN"
 ```
 
 A sent message is not completion. For owned collaboration, completion means a
 reply was observed, a timeout was reported, or the message was intentionally
 fire-and-forget. Do not use loose `send` + no wait for delegated work.
+
+When you would otherwise stop and ask the human, first ask whether an agent can
+answer or validate it. Use `ax handoff ... --loop` when the work can continue
+through bounded iteration. The prompt must be specific, evidence-based, and
+stoppable:
+
+- Say exactly what to do.
+- Say what command, artifact, task, or output proves success.
+- Provide a `--max-rounds` cap.
+- Prefer `--completion-promise` and tell the target to reply with
+  `<promise>TEXT</promise>` only when true.
+- If the work requires human judgment, do not loop; return the decision needed.
+
+The loop pattern is inspired by Anthropic's Ralph Wiggum plugin, but aX keeps it
+explicit: task + message + SSE wait + threaded continuation + structured result.
+Loop target agents should reply when a round is complete or blocked. Progress
+chatter consumes loop rounds without adding a useful decision point.
 
 Mention is the wake-up signal. If an agent should react, include `--mention
 @agent`, `--assign @agent`, or `ax send --to agent ...`. A message without a
@@ -286,6 +304,7 @@ ax watch --from agent --contains "pushed"    # keyword match
 ax agents list                               # roster
 ax agents ping agent --timeout 30            # contact-mode probe
 ax token mint name --create --audience both  # create/mint agent PAT (user PAT only)
+ax handoff agent "bounded task" --loop --max-rounds 5 --completion-promise DONE
 ```
 
 ## Troubleshooting

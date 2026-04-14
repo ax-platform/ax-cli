@@ -55,6 +55,12 @@ use composed handoffs for outbound owned work. Sending and listening should be
 part of the runtime posture, not an optional afterthought that each operator has
 to remember.
 
+For iterative work, the CLI should let an operator ask an agent and wait again
+instead of stopping to ask the human. The implemented form is `ax handoff
+... --loop`, inspired by Anthropic's Ralph Wiggum plugin. The aX version keeps
+the loop explicit and bounded: task, message, SSE wait, threaded continuation,
+structured result, and max-round/promise escape hatches.
+
 ## Goals
 
 - No new top-level verbs for orchestration.
@@ -73,6 +79,38 @@ to remember.
 - No implementation changes in this document; this is a contract draft only.
 
 ## Proposed Flags
+
+### `ax handoff ... --loop`
+
+When a task can be advanced by another agent without human judgment, `--loop`
+keeps the feedback loop active:
+
+```bash
+ax handoff orion \
+  "Fix the failing contract tests. Run pytest. Reply with <promise>TESTS GREEN</promise> only when true." \
+  --intent implement \
+  --loop \
+  --max-rounds 5 \
+  --completion-promise "TESTS GREEN"
+```
+
+Rules:
+
+1. The instructions must be specific and evidence-based.
+2. `--max-rounds` is required as the safety cap, even when a completion promise
+   is present.
+3. `--completion-promise` stops the loop only when a reply contains the exact
+   `<promise>TEXT</promise>` value or the exact text as its own line.
+4. Timeout means unknown or blocked delivery, not task failure.
+5. If the next step requires human judgment, the loop should stop and report the
+   decision needed.
+
+`--loop` is not a replacement for product design judgment or production
+incident debugging. It is for bounded iteration where validation output, files,
+commits, context keys, or a blocker report can prove progress.
+
+Loop target agents should reply when a round is complete or blocked. Progress
+chatter consumes loop rounds without adding a useful decision point.
 
 ### `--notify [@agent] ["optional message"]`
 

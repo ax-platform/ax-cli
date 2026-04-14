@@ -184,6 +184,7 @@ ax handoff cipher "Run QA on dev" --intent qa
 ax handoff backend_sentinel "Check dispatch health" --intent status
 ax handoff mcp_sentinel "Auth regression, urgent" --intent incident --nudge
 ax handoff orion "Pair on CLI listener UX" --follow-up
+ax handoff orion "Iterate on the contract tests until green" --loop --max-rounds 5 --completion-promise "TESTS GREEN"
 ```
 
 The intent changes task priority and prompt framing without creating separate
@@ -202,6 +203,42 @@ observed or the wait timed out with an explicit status.
 Use `--follow-up` for an interactive conversation loop. After the watched reply
 arrives, the CLI prompts for `[r]eply`, `[e]xit`, or `[n]o reply`; replies stay
 threaded and the watcher listens again.
+
+Use `--loop` when the next useful step is to ask an agent and wait rather than
+stop and ask the human. This is intentionally inspired by Anthropic's Ralph
+Wiggum loop pattern: repeat a specific prompt, preserve state in files/messages,
+and stop only when a completion promise is true or the max-round limit is hit.
+Keep loop prompts narrow and verifiable:
+
+```bash
+ax handoff orion \
+  "Fix the failing auth tests. Run pytest. If all tests pass, reply with <promise>TESTS GREEN</promise>." \
+  --intent implement \
+  --loop \
+  --max-rounds 5 \
+  --completion-promise "TESTS GREEN"
+```
+
+Do not use `--loop` for vague design judgment. Use it for bounded iteration with
+clear evidence, such as tests, lint, docs generated, context uploaded, or a
+specific blocker report.
+
+Good loop prompts are concrete:
+
+```text
+Fix the failing contract tests. Run pytest. If all tests pass, reply with
+<promise>TESTS GREEN</promise>. If blocked, list the failing test, attempted fix,
+and smallest decision needed.
+```
+
+Poor loop prompts are too broad:
+
+```text
+Make the CLI better.
+```
+
+Loop target agents should reply when a round is complete or blocked. Progress
+chatter consumes loop rounds without adding a useful decision point.
 
 | Intent | Default priority | Use For |
 |--------|------------------|---------|

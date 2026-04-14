@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import datetime
@@ -142,6 +143,52 @@ def _agent_matches(sender: str, agent_name: str) -> bool:
 def _is_completion(content: str, token: str) -> bool:
     text = content.lower()
     return token.lower() in text or any(word in text for word in COMPLETION_WORDS)
+
+
+def _completion_promise_satisfied(content: str, completion_promise: str | None) -> bool:
+    if not completion_promise:
+        return False
+
+    expected = " ".join(completion_promise.strip().split())
+    if not expected:
+        return False
+
+    for match in re.finditer(r"<promise>(.*?)</promise>", content, flags=re.IGNORECASE | re.DOTALL):
+        promised = " ".join(match.group(1).strip().split())
+        if promised == expected:
+            return True
+
+    return any(" ".join(line.strip().split()) == expected for line in content.splitlines())
+
+
+def _loop_continue_content(
+    *,
+    agent_name: str,
+    instructions: str,
+    handoff_id: str,
+    round_number: int,
+    max_rounds: int,
+    completion_promise: str | None,
+) -> str:
+    if completion_promise:
+        completion_line = (
+            f"When genuinely complete, reply with `<promise>{completion_promise}</promise>`. "
+            "Do not emit that promise until it is true."
+        )
+    else:
+        completion_line = "No completion promise is configured; continue until the max round limit is reached."
+
+    return (
+        f"@{agent_name} Continue agentic loop `{handoff_id}` "
+        f"(round {round_number}/{max_rounds}).\n\n"
+        "Same task:\n"
+        f"{instructions}\n\n"
+        "Use existing files, task state, previous replies, and validation output as context. "
+        "If you can continue without human judgment, continue. If blocked, report the blocker, "
+        "what was attempted, and the smallest next decision needed.\n\n"
+        f"{completion_line}\n"
+        f"Include `{handoff_id}` in the reply."
+    )
 
 
 def _matches_handoff_reply(
@@ -434,10 +481,31 @@ def run(
         "--follow-up/--no-follow-up",
         help="After a reply, prompt to send threaded follow-ups until exit.",
     ),
+    loop: bool = typer.Option(
+        False,
+        "--loop/--no-loop",
+        help="Keep the agent feedback loop going automatically until completion or max rounds.",
+    ),
+    max_rounds: int = typer.Option(3, "--max-rounds", help="Maximum reply rounds when --loop is enabled"),
+    completion_promise: Optional[str] = typer.Option(
+        None,
+        "--completion-promise",
+        help="Exact promise text the agent must return as <promise>TEXT</promise> to stop --loop early.",
+    ),
     space_id: Optional[str] = typer.Option(None, "--space-id", "-s", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
     """Hand work to an agent: create task, send message, watch SSE, and return the result."""
+    if loop and max_rounds < 1:
+        typer.echo("Error: --max-rounds must be at least 1 when --loop is enabled.", err=True)
+        raise typer.Exit(1)
+    if loop and not watch:
+        typer.echo("Error: --loop requires --watch so the CLI can receive agent replies.", err=True)
+        raise typer.Exit(1)
+    if loop and follow_up:
+        typer.echo("Error: --loop and --follow-up are separate modes; choose one.", err=True)
+        raise typer.Exit(1)
+
     normalized_intent = intent.strip().lower()
     if normalized_intent not in INTENTS:
         allowed = ", ".join(sorted(INTENTS))
@@ -486,6 +554,18 @@ def run(
     context_parts.append(
         "Reply in this thread if possible; otherwise mention the sender and include the handoff token."
     )
+    if loop:
+        if completion_promise:
+            context_parts.append(
+                f"Agentic loop mode is enabled for up to {max_rounds} reply rounds. "
+                f"When genuinely complete, reply with `<promise>{completion_promise}</promise>`. "
+                "Do not emit the promise until it is true."
+            )
+        else:
+            context_parts.append(
+                f"Agentic loop mode is enabled for {max_rounds} reply rounds. "
+                "No completion promise is configured, so the CLI will stop at the round limit."
+            )
     content = spec["prompt"].format(
         agent=agent_name, instructions=instructions, context="\n".join(context_parts), token=handoff_id
     )
@@ -524,7 +604,7 @@ def run(
         current_agent_name=current_agent_name,
         started_at=started_at,
         timeout=timeout,
-        require_completion=require_completion,
+        require_completion=False if loop else require_completion,
     )
 
     if reply is None and nudge:
@@ -543,12 +623,79 @@ def run(
                 current_agent_name=current_agent_name,
                 started_at=started_at,
                 timeout=timeout,
-                require_completion=require_completion,
+                require_completion=False if loop else require_completion,
             )
         except Exception:
             pass
 
+    loop_result: dict[str, Any] | None = None
+    if loop:
+        loop_records: list[dict[str, Any]] = []
+        completed = False
+        stop_reason = "timeout" if reply is None else "max_rounds"
+        if reply is not None:
+            loop_records.append({"round": 1, "sent_message_id": sent_message_id, "reply": reply})
+            completed = _completion_promise_satisfied(str(reply.get("content") or ""), completion_promise)
+            if completed:
+                stop_reason = "completion_promise"
+
+        round_number = 1
+        while reply is not None and not completed and round_number < max_rounds:
+            round_number += 1
+            parent_id = str(reply.get("id") or sent_message_id)
+            loop_content = _loop_continue_content(
+                agent_name=agent_name,
+                instructions=instructions,
+                handoff_id=handoff_id,
+                round_number=round_number,
+                max_rounds=max_rounds,
+                completion_promise=completion_promise,
+            )
+            started_at = time.time()
+            try:
+                loop_sent_data = client.send_message(sid, loop_content, parent_id=parent_id)
+            except httpx.HTTPStatusError as exc:
+                handle_error(exc)
+
+            loop_sent = loop_sent_data.get("message", loop_sent_data)
+            loop_sent_message_id = str(loop_sent.get("id") or loop_sent_data.get("id") or "")
+            console.print(f"[green]Loop round {round_number} sent:[/green] {loop_sent_message_id}")
+            if not loop_sent_message_id:
+                stop_reason = "send_failed"
+                break
+
+            reply = _wait_for_handoff_reply(
+                client,
+                space_id=sid,
+                agent_name=agent_name,
+                sent_message_id=loop_sent_message_id,
+                token=handoff_id,
+                current_agent_name=current_agent_name,
+                started_at=started_at,
+                timeout=timeout,
+                require_completion=False,
+            )
+            loop_records.append({"round": round_number, "sent_message_id": loop_sent_message_id, "reply": reply})
+            if reply is None:
+                stop_reason = "timeout"
+                break
+            completed = _completion_promise_satisfied(str(reply.get("content") or ""), completion_promise)
+            stop_reason = "completion_promise" if completed else "max_rounds"
+
+        loop_result = {
+            "enabled": True,
+            "max_rounds": max_rounds,
+            "completion_promise": completion_promise,
+            "completed": completed,
+            "stop_reason": stop_reason,
+            "rounds": loop_records,
+        }
+
     status = "replied" if reply else "timeout"
+    if loop_result and loop_result.get("stop_reason") == "timeout" and loop_result.get("rounds"):
+        status = "loop_timeout"
+    elif loop_result and loop_result.get("stop_reason") == "send_failed":
+        status = "loop_send_failed"
     result = {
         "status": status,
         "intent": normalized_intent,
@@ -559,6 +706,7 @@ def run(
         "task_error": task_error,
         "sent": sent_data,
         "reply": reply,
+        "loop": loop_result,
     }
 
     if reply:
