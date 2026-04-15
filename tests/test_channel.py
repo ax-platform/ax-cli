@@ -3,7 +3,7 @@
 import asyncio
 import os
 
-from ax_cli.commands.channel import ChannelBridge, _load_channel_env
+from ax_cli.commands.channel import ChannelBridge, MentionEvent, _load_channel_env
 from ax_cli.commands.listen import _is_self_authored, _remember_reply_anchor, _should_respond
 
 
@@ -130,6 +130,79 @@ def test_channel_returns_empty_optional_mcp_lists():
         {"jsonrpc": "2.0", "id": 2, "result": {"resourceTemplates": []}},
         {"jsonrpc": "2.0", "id": 3, "result": {"prompts": []}},
     ]
+
+
+def test_channel_tools_include_polling_fallback():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.handle_tools_list(1))
+
+    tools = bridge.writes[0]["result"]["tools"]
+    assert {tool["name"] for tool in tools} == {"reply", "get_messages"}
+
+
+def test_channel_get_messages_returns_pending_mentions():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+    bridge._pending_mentions.append(
+        MentionEvent(
+            message_id="incoming-123",
+            parent_id=None,
+            conversation_id=None,
+            author="madtank",
+            prompt="please check this",
+            raw_content="@anvil please check this",
+            created_at="2026-04-15T23:00:00Z",
+            space_id="space-123",
+        )
+    )
+
+    asyncio.run(bridge.handle_tool_call(1, {"name": "get_messages", "arguments": {"limit": 1}}))
+
+    result = bridge.writes[0]["result"]
+    assert "incoming-123" in result["content"][0]["text"]
+    assert "please check this" in result["content"][0]["text"]
+    assert bridge._pending_mentions == []
+
+
+def test_channel_notification_metadata_matches_claude_channel_contract():
+    async def run():
+        client = FakeClient("axp_a_AgentKey.Secret")
+        bridge = CaptureBridge(client)
+        bridge.initialized.set()
+        await bridge.mention_queue.put(
+            MentionEvent(
+                message_id="incoming-123",
+                parent_id=None,
+                conversation_id="conversation-ignored",
+                author="madtank",
+                prompt="please check this",
+                raw_content="@anvil please check this",
+                created_at=None,
+                space_id="space-123",
+            )
+        )
+        task = asyncio.create_task(bridge.emit_mentions())
+        await asyncio.wait_for(bridge.mention_queue.join(), timeout=1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return bridge
+
+    bridge = asyncio.run(run())
+
+    payload = bridge.writes[0]
+    assert payload["method"] == "notifications/claude/channel"
+    meta = payload["params"]["meta"]
+    assert meta["message_id"] == "incoming-123"
+    assert isinstance(meta["ts"], str)
+    assert meta["ts"]
+    assert "raw_content" not in meta
+    assert "conversation_id" not in meta
+    assert "parent_id" not in meta
 
 
 def test_channel_env_file_sets_missing_runtime_env(monkeypatch, tmp_path):

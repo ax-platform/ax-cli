@@ -87,6 +87,7 @@ class ChannelBridge:
         self._write_lock = asyncio.Lock()
         self._last_message_id: str | None = None
         self._reply_anchor_ids: set[str] = set()
+        self._pending_mentions: list[MentionEvent] = []
 
     def log(self, message: str) -> None:
         if not self.debug:
@@ -162,18 +163,21 @@ class ChannelBridge:
                 self.log("emit_mentions: initialized done, sending notification")
 
                 self._last_message_id = event.message_id
+                self._pending_mentions.append(event)
+                if len(self._pending_mentions) > SEEN_MAX:
+                    self._pending_mentions = self._pending_mentions[-SEEN_MAX // 2 :]
+                ts = event.created_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 meta: dict[str, Any] = {
                     "chat_id": event.space_id,
                     "message_id": event.message_id,
-                    "parent_id": event.parent_id,
-                    "conversation_id": event.conversation_id,
                     "user": event.author,
                     "sender": event.author,
                     "source": "ax",
                     "space_id": event.space_id,
-                    "ts": event.created_at,
-                    "raw_content": event.raw_content,
+                    "ts": ts,
                 }
+                if event.parent_id:
+                    meta["parent_id"] = event.parent_id
                 if event.attachments:
                     meta["attachments"] = event.attachments
                 await self.send_notification(
@@ -224,7 +228,24 @@ class ChannelBridge:
                             },
                             "required": ["text"],
                         },
-                    }
+                    },
+                    {
+                        "name": "get_messages",
+                        "description": "Get pending aX channel messages for clients that need a polling fallback.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {
+                                    "type": "number",
+                                    "description": "Max messages to return (default: 10).",
+                                },
+                                "mark_read": {
+                                    "type": "boolean",
+                                    "description": "Remove returned messages from the pending fallback queue (default: true).",
+                                },
+                            },
+                        },
+                    },
                 ]
             },
         )
@@ -232,9 +253,39 @@ class ChannelBridge:
     async def handle_empty_list(self, request_id: Any, key: str) -> None:
         await self.send_response(request_id, {key: []})
 
+    async def handle_get_messages(self, request_id: Any, arguments: dict[str, Any]) -> None:
+        try:
+            limit = max(1, int(arguments.get("limit") or 10))
+        except (TypeError, ValueError):
+            limit = 10
+        mark_read = arguments.get("mark_read") is not False
+        pending = self._pending_mentions[:limit]
+        if mark_read:
+            self._pending_mentions = self._pending_mentions[len(pending) :]
+        if not pending:
+            text = "No pending messages."
+        else:
+            text = json.dumps(
+                [
+                    {
+                        "message_id": event.message_id,
+                        "author": event.author,
+                        "content": event.prompt,
+                        "parent_id": event.parent_id,
+                        "ts": event.created_at,
+                    }
+                    for event in pending
+                ],
+                indent=2,
+            )
+        await self.send_response(request_id, {"content": [{"type": "text", "text": text}]})
+
     async def handle_tool_call(self, request_id: Any, params: dict[str, Any]) -> None:
         name = params.get("name")
         arguments = params.get("arguments") or {}
+        if name == "get_messages":
+            await self.handle_get_messages(request_id, arguments)
+            return
         if name != "reply":
             await self.send_error(request_id, -32601, f"Unknown tool: {name}")
             return
