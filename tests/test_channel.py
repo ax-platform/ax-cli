@@ -1,8 +1,9 @@
 """Tests for the Claude Code channel bridge identity boundary."""
 
 import asyncio
+import os
 
-from ax_cli.commands.channel import ChannelBridge
+from ax_cli.commands.channel import ChannelBridge, _load_channel_env
 from ax_cli.commands.listen import _is_self_authored, _remember_reply_anchor, _should_respond
 
 
@@ -114,6 +115,22 @@ def test_channel_processing_status_can_be_disabled():
     asyncio.run(bridge.publish_processing_status("incoming-123", "working"))
 
     assert client.processing_statuses == []
+
+
+def test_channel_env_file_sets_missing_runtime_env(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AX_CONFIG_FILE=/tmp/agent/.ax/config.toml\n"
+        "AX_SPACE_ID=space-123\n"
+        "AX_AGENT_NAME=ignored-agent\n"
+    )
+    monkeypatch.setenv("AX_AGENT_NAME", "existing-agent")
+
+    _load_channel_env(env_file)
+
+    assert os.environ["AX_CONFIG_FILE"] == "/tmp/agent/.ax/config.toml"
+    assert os.environ["AX_SPACE_ID"] == "space-123"
+    assert os.environ["AX_AGENT_NAME"] == "existing-agent"
 
 
 def test_listener_treats_parent_reply_as_delivery_signal():

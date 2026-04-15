@@ -329,12 +329,11 @@ Then run the channel from that generated agent config:
 {
   "mcpServers": {
     "ax-channel": {
-      "command": "bun",
-      "args": ["run", "server.ts"],
-      "env": {
-        "AX_CONFIG_FILE": "/home/my-agent/.ax/config.toml",
-        "AX_SPACE_ID": "<space-uuid>"
-      }
+      "command": "bash",
+      "args": [
+        "-lc",
+        "eval \"$(axctl profile env prod-my-agent)\" && exec axctl channel --agent my-agent --space-id <space-uuid>"
+      ]
     }
   }
 }

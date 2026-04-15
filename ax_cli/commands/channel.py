@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -28,6 +30,22 @@ PROTOCOL_VERSION = "2025-11-25"
 SERVER_NAME = "ax-channel"
 SERVER_VERSION = "0.1.0"
 SEEN_MAX = 500
+CHANNEL_ENV_PATH = Path.home() / ".claude" / "channels" / "ax-channel" / ".env"
+
+
+def _load_channel_env(path: Path = CHANNEL_ENV_PATH) -> None:
+    """Load KEY=VALUE channel env defaults without overriding real env vars."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip("\"'")
 
 
 @dataclass(slots=True)
@@ -494,6 +512,7 @@ def channel(
     ),
 ):
     """Run an MCP stdio server that bridges aX mentions into Claude Code."""
+    _load_channel_env()
     client = get_client()
     agent_name = agent or resolve_agent_name(client=client)
     if not agent_name:
