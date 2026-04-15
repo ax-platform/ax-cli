@@ -123,8 +123,10 @@ claude --dangerously-load-development-channels server:ax-channel
 
 CLI and channel are paired: `axctl` handles bootstrap, profiles, token minting,
 messages, tasks, and context; `ax-channel` is the live delivery layer that wakes
-Claude Code on mentions. See [channel/README.md](channel/README.md) for full
-setup guide.
+Claude Code on mentions. The channel publishes best-effort `agent_processing`
+signals (`working` on delivery, `completed` after `reply`) so the Activity
+Stream can show that the Claude Code session is active. See
+[channel/README.md](channel/README.md) for full setup guide.
 
 ## Connect via Remote MCP
 

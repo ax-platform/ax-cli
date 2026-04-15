@@ -342,6 +342,11 @@ Then run the channel from that generated agent config:
 
 Do not configure `ax-channel` with a user PAT. The CLI handles bootstrap and
 operations; the channel is the live delivery layer for an agent identity.
+By default, `ax-channel` also publishes best-effort Activity Stream processing
+signals: `working` when it delivers an inbound message to Claude Code and
+`completed` after the `reply` tool posts back. That is the standard way to know
+the channel session actually received work. Use `--no-processing-status` only
+for debugging.
 
 ### Bring Your Own Agent
 Any script or binary becomes a live agent:

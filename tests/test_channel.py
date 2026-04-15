@@ -12,14 +12,26 @@ class FakeClient:
         self.agent_id = agent_id
         self._use_exchange = token.startswith("axp_")
         self.sent = []
+        self.processing_statuses = []
 
     def send_message(self, space_id, content, *, parent_id=None, **kwargs):
         self.sent.append({"space_id": space_id, "content": content, "parent_id": parent_id, **kwargs})
         return {"message": {"id": "msg-123"}}
 
+    def set_agent_processing_status(self, message_id, status, *, agent_name=None, space_id=None):
+        self.processing_statuses.append(
+            {
+                "message_id": message_id,
+                "status": status,
+                "agent_name": agent_name,
+                "space_id": space_id,
+            }
+        )
+        return {"ok": True, "status": status}
+
 
 class CaptureBridge(ChannelBridge):
-    def __init__(self, client, *, agent_id="agent-123"):
+    def __init__(self, client, *, agent_id="agent-123", processing_status=True):
         super().__init__(
             client=client,
             agent_name="anvil",
@@ -27,6 +39,7 @@ class CaptureBridge(ChannelBridge):
             space_id="space-123",
             queue_size=10,
             debug=False,
+            processing_status=processing_status,
         )
         self.writes = []
 
@@ -65,9 +78,42 @@ def test_channel_sends_with_agent_bound_pat():
     )
 
     assert client.sent == [{"space_id": "space-123", "content": "hello", "parent_id": "incoming-123"}]
+    assert client.processing_statuses == [
+        {
+            "message_id": "incoming-123",
+            "status": "completed",
+            "agent_name": "anvil",
+            "space_id": "space-123",
+        }
+    ]
     result = bridge.writes[0]["result"]
     assert result["content"][0]["text"] == "sent reply to incoming-123 (msg-123)"
     assert "msg-123" in bridge._reply_anchor_ids
+
+
+def test_channel_can_publish_working_status_on_delivery():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.publish_processing_status("incoming-123", "working"))
+
+    assert client.processing_statuses == [
+        {
+            "message_id": "incoming-123",
+            "status": "working",
+            "agent_name": "anvil",
+            "space_id": "space-123",
+        }
+    ]
+
+
+def test_channel_processing_status_can_be_disabled():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client, processing_status=False)
+
+    asyncio.run(bridge.publish_processing_status("incoming-123", "working"))
+
+    assert client.processing_statuses == []
 
 
 def test_listener_treats_parent_reply_as_delivery_signal():

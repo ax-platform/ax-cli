@@ -53,12 +53,14 @@ class ChannelBridge:
         space_id: str,
         queue_size: int,
         debug: bool,
+        processing_status: bool,
     ) -> None:
         self.client = client
         self.agent_name = agent_name
         self.agent_id = agent_id
         self.space_id = space_id
         self.debug = debug
+        self.processing_status = processing_status
         self.loop: asyncio.AbstractEventLoop | None = None
         self.mention_queue: asyncio.Queue[MentionEvent] = asyncio.Queue(maxsize=queue_size)
         self.initialized = asyncio.Event()
@@ -99,6 +101,31 @@ class ChannelBridge:
     async def send_notification(self, method: str, params: dict[str, Any]) -> None:
         await self.write_message({"jsonrpc": "2.0", "method": method, "params": params})
 
+    async def publish_processing_status(self, message_id: str, status: str) -> None:
+        """Best-effort Activity Stream signal for channel delivery/progress.
+
+        This lets the frontend show the same inline "agent is working" affordance
+        for Claude Code channel sessions that it shows for other agent runtimes.
+        It is intentionally non-blocking: channel delivery/replies must still
+        work if the progress endpoint is unavailable.
+        """
+        if not self.processing_status:
+            return
+        try:
+
+            def _send_status():
+                return self.client.set_agent_processing_status(
+                    message_id,
+                    status,
+                    agent_name=self.agent_name,
+                    space_id=self.space_id,
+                )
+
+            await asyncio.to_thread(_send_status)
+            self.log(f"processing status {status} for {message_id[:12]}")
+        except Exception as exc:  # pragma: no cover - live best-effort path
+            self.log(f"processing status failed for {message_id[:12]}: {exc}")
+
     async def send_response(self, request_id: Any, result: dict[str, Any]) -> None:
         await self.write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
 
@@ -138,6 +165,7 @@ class ChannelBridge:
                         "meta": meta,
                     },
                 )
+                await self.publish_processing_status(event.message_id, "working")
                 self.log(f"delivered mention {event.message_id} from {event.author}")
             finally:
                 self.mention_queue.task_done()
@@ -242,6 +270,7 @@ class ChannelBridge:
             message = data.get("message", data)
             sent_id = message.get("id") or data.get("id")
             _remember_reply_anchor(self._reply_anchor_ids, sent_id)
+            await self.publish_processing_status(reply_to, "completed")
             await self.send_response(
                 request_id,
                 {
@@ -458,6 +487,11 @@ def channel(
     space_id: Optional[str] = typer.Option(None, "--space-id", "-s", help="Space to bridge (default: from config)"),
     queue_size: int = typer.Option(50, "--queue-size", help="Max queued mentions before dropping"),
     debug: bool = typer.Option(False, "--debug", help="Log bridge activity to stderr"),
+    processing_status: bool = typer.Option(
+        True,
+        "--processing-status/--no-processing-status",
+        help="Publish agent_processing events when messages are delivered and replies complete.",
+    ),
 ):
     """Run an MCP stdio server that bridges aX mentions into Claude Code."""
     client = get_client()
@@ -479,6 +513,7 @@ def channel(
         space_id=sid,
         queue_size=queue_size,
         debug=debug,
+        processing_status=processing_status,
     )
 
     listener = threading.Thread(target=_sse_loop, args=(bridge,), daemon=True)
