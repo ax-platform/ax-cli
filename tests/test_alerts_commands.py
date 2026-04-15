@@ -4,6 +4,7 @@ These lock down the contract the frontend AlertCardBody reads. If any of
 these fields drift, the alert card will silently render wrong or fall
 back to a generic result card.
 """
+
 from __future__ import annotations
 
 import json
@@ -116,9 +117,13 @@ def test_send_builds_alert_metadata_with_ui_card_type_alert(monkeypatch):
     result = runner.invoke(
         app,
         [
-            "alerts", "send", "ALB /auth/me is 5xx",
-            "--target", "@orion",
-            "--severity", "critical",
+            "alerts",
+            "send",
+            "ALB /auth/me is 5xx",
+            "--target",
+            "@orion",
+            "--severity",
+            "critical",
         ],
     )
     assert result.exit_code == 0, _strip_ansi(result.stdout)
@@ -140,9 +145,7 @@ def test_send_builds_alert_metadata_with_ui_card_type_alert(monkeypatch):
     cards = metadata["ui"]["cards"]
     assert len(cards) == 1
     card = cards[0]
-    assert card["type"] == "alert", (
-        "card type must be 'alert' so AxMessageWidgets renders AlertCardBody"
-    )
+    assert card["type"] == "alert", "card type must be 'alert' so AxMessageWidgets renders AlertCardBody"
     assert card["payload"]["intent"] == "alert"
     assert card["payload"]["alert"]["severity"] == "critical"
 
@@ -168,12 +171,19 @@ def test_reminder_requires_source_task_and_marks_kind_task_reminder(monkeypatch)
     result = runner.invoke(
         app,
         [
-            "alerts", "send", "review launch board",
-            "--kind", "reminder",
-            "--source-task", "dfef4c92",
-            "--target", "@orion",
-            "--remind-at", "2026-04-16T17:00:00Z",
-            "--due-at", "2026-04-16T20:00:00Z",
+            "alerts",
+            "send",
+            "review launch board",
+            "--kind",
+            "reminder",
+            "--source-task",
+            "dfef4c92",
+            "--target",
+            "@orion",
+            "--remind-at",
+            "2026-04-16T17:00:00Z",
+            "--due-at",
+            "2026-04-16T20:00:00Z",
         ],
     )
     assert result.exit_code == 0, _strip_ansi(result.stdout)
@@ -189,12 +199,8 @@ def test_reminder_requires_source_task_and_marks_kind_task_reminder(monkeypatch)
     # (the dogfood gap ChatGPT flagged).
     card = fake.sent["metadata"]["ui"]["cards"][0]
     assert card["type"] == "alert"
-    assert "initial_data" not in card.get("payload", {}), (
-        "reminder card must not embed task-board initial_data"
-    )
-    assert "widget" not in fake.sent["metadata"], (
-        "no mcp_app widget hydration for the first slice"
-    )
+    assert "initial_data" not in card.get("payload", {}), "reminder card must not embed task-board initial_data"
+    assert "widget" not in fake.sent["metadata"], "no mcp_app widget hydration for the first slice"
     # resource_uri should point at the linked task so the card is clickable
     assert card["payload"]["resource_uri"] == "ui://tasks/dfef4c92"
 
@@ -209,9 +215,13 @@ def test_reminder_shortcut_command_equivalent_to_send_kind_reminder(monkeypatch)
     result = runner.invoke(
         app,
         [
-            "alerts", "reminder", "check dev smoke",
-            "--source-task", "dfef4c92",
-            "--target", "orion",
+            "alerts",
+            "reminder",
+            "check dev smoke",
+            "--source-task",
+            "dfef4c92",
+            "--target",
+            "orion",
         ],
     )
     assert result.exit_code == 0, _strip_ansi(result.stdout)
@@ -432,9 +442,7 @@ def test_explicit_target_beats_task_auto_resolution(monkeypatch):
 
         def get(self, path: str, *, headers: dict) -> Any:
             # If this is called, auto-resolution is leaking past an explicit --target.
-            raise AssertionError(
-                f"explicit --target should skip task lookup, but got GET {path}"
-            )
+            raise AssertionError(f"explicit --target should skip task lookup, but got GET {path}")
 
     fake._http = _ShortCircuitHttp()
     _install_fake_client(monkeypatch, fake)
@@ -442,10 +450,15 @@ def test_explicit_target_beats_task_auto_resolution(monkeypatch):
     result = runner.invoke(
         app,
         [
-            "alerts", "send", "escalation",
-            "--kind", "reminder",
-            "--source-task", "dfef4c92",
-            "--target", "@madtank",
+            "alerts",
+            "send",
+            "escalation",
+            "--kind",
+            "reminder",
+            "--source-task",
+            "dfef4c92",
+            "--target",
+            "@madtank",
         ],
     )
     assert result.exit_code == 0, _strip_ansi(result.stdout)
@@ -463,6 +476,118 @@ def test_state_change_on_non_alert_message_errors_clearly(monkeypatch):
 
     bad = runner.invoke(app, ["alerts", "ack", "msg-plain"])
     assert bad.exit_code != 0, "ack on a non-alert message must fail loudly"
+
+
+def test_rejects_pre_2020_timestamps_as_clock_skew(monkeypatch):
+    """Guard against the 2000-01-01 remind_at class of bugs — a runner with
+    a frozen/unset clock was producing epoch-adjacent timestamps that
+    landed as the user-facing reminder time (real case: msg b9fb15b6)."""
+    fake = _FakeClient()
+    _install_fake_client(monkeypatch, fake)
+
+    bad_remind = runner.invoke(
+        app,
+        [
+            "alerts",
+            "send",
+            "clock-skew test",
+            "--target",
+            "orion",
+            "--remind-at",
+            "2000-01-01T00:00:00Z",
+        ],
+    )
+    assert bad_remind.exit_code != 0, "must reject remind_at before 2020 — caller has a broken clock"
+    assert "broken clock" in _strip_ansi(bad_remind.stdout + (bad_remind.stderr or ""))
+
+    bad_due = runner.invoke(
+        app,
+        [
+            "alerts",
+            "send",
+            "clock-skew test",
+            "--target",
+            "orion",
+            "--due-at",
+            "1999-12-31T23:59:59Z",
+        ],
+    )
+    assert bad_due.exit_code != 0
+
+    # Gibberish timestamps also get rejected with a clear message
+    malformed = runner.invoke(
+        app,
+        ["alerts", "send", "bad iso", "--target", "orion", "--remind-at", "not-a-date"],
+    )
+    assert malformed.exit_code != 0
+    assert "ISO-8601" in _strip_ansi(malformed.stdout + (malformed.stderr or ""))
+
+
+def test_valid_future_timestamps_accepted(monkeypatch):
+    fake = _FakeClient()
+    _install_fake_client(monkeypatch, fake)
+
+    ok = runner.invoke(
+        app,
+        [
+            "alerts",
+            "send",
+            "ok",
+            "--kind",
+            "reminder",
+            "--source-task",
+            "t1",
+            "--target",
+            "orion",
+            "--remind-at",
+            "2026-04-16T17:00:00Z",
+            "--due-at",
+            "2026-04-16T20:00:00Z",
+        ],
+    )
+    assert ok.exit_code == 0, _strip_ansi(ok.stdout)
+    assert fake.sent["metadata"]["alert"]["remind_at"] == "2026-04-16T17:00:00Z"
+    assert fake.sent["metadata"]["alert"]["due_at"] == "2026-04-16T20:00:00Z"
+
+
+def test_reminder_defaults_response_required_true(monkeypatch):
+    """Reminders are work nudges — the recipient is expected to ack or
+    snooze. Default response_required=true so the card shows a Required
+    chip. Alerts (--kind alert) stay opt-in."""
+    fake = _FakeClient()
+    _install_fake_client(monkeypatch, fake)
+
+    # Reminder with no explicit --response-required
+    r1 = runner.invoke(
+        app,
+        [
+            "alerts",
+            "send",
+            "nudge",
+            "--kind",
+            "reminder",
+            "--source-task",
+            "t1",
+            "--target",
+            "orion",
+        ],
+    )
+    assert r1.exit_code == 0
+    assert fake.sent["metadata"]["alert"]["response_required"] is True, (
+        "reminders should default to response_required=true"
+    )
+
+    # Plain alert should NOT auto-set response_required
+    fake2 = _FakeClient()
+    _install_fake_client(monkeypatch, fake2)
+    r2 = runner.invoke(
+        app,
+        ["alerts", "send", "heads up", "--target", "orion"],
+    )
+    assert r2.exit_code == 0
+    assert fake2.sent["metadata"]["alert"]["response_required"] is False, (
+        "alerts stay opt-in — only reminders default-true"
+    )
 
 
 def test_json_output_returns_send_response(monkeypatch):

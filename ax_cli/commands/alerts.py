@@ -105,6 +105,34 @@ def _iso_utc_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+_MIN_REASONABLE_YEAR = 2020
+
+
+def _validate_timestamp(value: str | None, *, flag: str) -> str | None:
+    """Reject obviously-broken timestamps (e.g. 2000-01-01 from a runner
+    with clock skew — caught in msg b9fb15b6 dogfood).
+
+    Accepts None/empty (field optional). Returns the validated string.
+    Raises typer.BadParameter with a clear message on garbage.
+    """
+    if not value:
+        return None
+    try:
+        # Normalize trailing Z to +00:00 for fromisoformat() on 3.10
+        probe = value.strip().replace("Z", "+00:00") if value.endswith("Z") else value.strip()
+        parsed = _dt.datetime.fromisoformat(probe)
+    except ValueError as exc:
+        raise typer.BadParameter(f"{flag}: not a valid ISO-8601 timestamp: {value!r} ({exc})")
+
+    if parsed.year < _MIN_REASONABLE_YEAR:
+        raise typer.BadParameter(
+            f"{flag}: timestamp {value!r} is before {_MIN_REASONABLE_YEAR} — "
+            f"this usually means the caller has a broken clock. Pass a real UTC ISO-8601 "
+            f"timestamp (e.g. 2026-04-16T17:00:00Z)."
+        )
+    return value
+
+
 def _build_alert_metadata(
     *,
     kind: str,
@@ -266,6 +294,18 @@ def send(
 
     if kind_n == "reminder" and not source_task:
         raise typer.BadParameter("--source-task is required for --kind reminder")
+
+    # Clock-skew guard: reject nonsense timestamps (e.g. 2000-01-01 from a
+    # runner with a frozen/unset system clock — real case caught via msg
+    # b9fb15b6). Applies to both --due-at and --remind-at.
+    due_at = _validate_timestamp(due_at, flag="--due-at")
+    remind_at = _validate_timestamp(remind_at, flag="--remind-at")
+
+    # Reminders that the recipient is expected to act on should default to
+    # response_required=true so the card shows a "Required" chip, unless the
+    # firer explicitly chose a one-shot-FYI (--kind alert).
+    if kind_n == "reminder" and not response_required:
+        response_required = True
 
     client = get_client()
     try:
