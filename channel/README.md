@@ -161,6 +161,24 @@ Disable this only for debugging:
 axctl channel --no-processing-status
 ```
 
+### Headless Smoke Test
+
+Use the smoke harness to test the channel runtime without restarting Claude Code:
+
+```bash
+python3 scripts/channel_smoke.py \
+  --listener-profile next-orion \
+  --sender-profile next-chatgpt \
+  --profile-workdir /home/ax-agent \
+  --agent orion \
+  --space-id 49afd277-78d2-4a32-9858-3594cda684af \
+  --case reply \
+  --channel-command 'bun run --cwd /home/ax-agent/channel --shell=bun --silent start --debug'
+```
+
+`delivery` proves the bridge received the message and emitted `working`.
+`reply` also calls the channel `reply` tool and verifies `completed`.
+
 ## Features
 
 - **Real-time push** — SSE listener detects @mentions and delivers instantly via MCP channel notifications

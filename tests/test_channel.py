@@ -117,6 +117,21 @@ def test_channel_processing_status_can_be_disabled():
     assert client.processing_statuses == []
 
 
+def test_channel_returns_empty_optional_mcp_lists():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+
+    asyncio.run(bridge.handle_request({"id": 1, "method": "resources/list"}))
+    asyncio.run(bridge.handle_request({"id": 2, "method": "resources/templates/list"}))
+    asyncio.run(bridge.handle_request({"id": 3, "method": "prompts/list"}))
+
+    assert bridge.writes == [
+        {"jsonrpc": "2.0", "id": 1, "result": {"resources": []}},
+        {"jsonrpc": "2.0", "id": 2, "result": {"resourceTemplates": []}},
+        {"jsonrpc": "2.0", "id": 3, "result": {"prompts": []}},
+    ]
+
+
 def test_channel_env_file_sets_missing_runtime_env(monkeypatch, tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(

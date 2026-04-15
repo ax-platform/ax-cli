@@ -229,6 +229,9 @@ class ChannelBridge:
             },
         )
 
+    async def handle_empty_list(self, request_id: Any, key: str) -> None:
+        await self.send_response(request_id, {key: []})
+
     async def handle_tool_call(self, request_id: Any, params: dict[str, Any]) -> None:
         name = params.get("name")
         arguments = params.get("arguments") or {}
@@ -319,6 +322,12 @@ class ChannelBridge:
             await self.handle_initialize(request_id)
         elif method == "tools/list":
             await self.handle_tools_list(request_id)
+        elif method == "resources/list":
+            await self.handle_empty_list(request_id, "resources")
+        elif method == "resources/templates/list":
+            await self.handle_empty_list(request_id, "resourceTemplates")
+        elif method == "prompts/list":
+            await self.handle_empty_list(request_id, "prompts")
         elif method == "tools/call":
             await self.handle_tool_call(request_id, params)
         elif method == "ping":
