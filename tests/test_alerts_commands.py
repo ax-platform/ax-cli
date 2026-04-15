@@ -303,6 +303,155 @@ def test_state_rejects_unknown_value(monkeypatch):
     assert bad.exit_code != 0
 
 
+def test_snooze_transitions_to_snoozed_state(monkeypatch):
+    existing = {
+        "id": "msg-snz",
+        "space_id": "space-abc",
+        "metadata": {"alert": {"kind": "task_reminder", "state": "triggered"}},
+    }
+    fake = _FakeClient(preloaded_message=existing)
+    _install_fake_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["alerts", "snooze", "msg-snz"])
+    assert result.exit_code == 0, _strip_ansi(result.stdout)
+    assert fake.sent["metadata"]["alert_state_change"]["new_state"] == "snoozed"
+
+
+def test_source_task_auto_targets_assignee_when_target_omitted(monkeypatch):
+    """When --source-task is given and --target is not, default to the
+    task's assignee (preferred) or creator (fallback). This keeps tasks
+    as source-of-truth and stops manual --target typing for task-linked
+    reminders."""
+    fake = _FakeClient()
+
+    # Stub out the http helpers _resolve_target_from_task uses
+    task_payload = {
+        "task": {
+            "id": "dfef4c92",
+            "assignee_id": "agent-assignee-id",
+            "creator_id": "agent-creator-id",
+        }
+    }
+    agent_payloads = {
+        "agent-assignee-id": {"agent": {"id": "agent-assignee-id", "name": "orion"}},
+        "agent-creator-id": {"agent": {"id": "agent-creator-id", "name": "chatgpt"}},
+    }
+
+    class _TaskAwareHttp:
+        def patch(self, *a, **k):  # not used in send path
+            raise AssertionError("send should not PATCH")
+
+        def get(self, path: str, *, headers: dict) -> Any:
+            class _R:
+                def __init__(self, data):
+                    self._data = data
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return self._data
+
+            if "/tasks/" in path:
+                return _R(task_payload)
+            if "/agents/" in path:
+                aid = path.rsplit("/", 1)[-1]
+                return _R(agent_payloads.get(aid, {}))
+            return _R({})
+
+    fake._http = _TaskAwareHttp()
+    _install_fake_client(monkeypatch, fake)
+
+    result = runner.invoke(
+        app,
+        ["alerts", "send", "check this", "--kind", "reminder", "--source-task", "dfef4c92"],
+    )
+    assert result.exit_code == 0, _strip_ansi(result.stdout)
+
+    # Auto-resolved to assignee (orion)
+    assert fake.sent["metadata"]["alert"]["target_agent"] == "orion"
+    assert fake.sent["content"].startswith("@orion "), "auto-target must @-mention assignee"
+
+
+def test_source_task_falls_back_to_creator_when_no_assignee(monkeypatch):
+    fake = _FakeClient()
+
+    task_payload = {
+        "task": {
+            "id": "t-noa",
+            "assignee_id": None,  # no assignee
+            "creator_id": "agent-creator-id",
+        }
+    }
+    agent_payloads = {
+        "agent-creator-id": {"agent": {"id": "agent-creator-id", "name": "madtank"}},
+    }
+
+    class _TaskAwareHttp:
+        def patch(self, *a, **k):
+            raise AssertionError("unreachable")
+
+        def get(self, path: str, *, headers: dict) -> Any:
+            class _R:
+                def __init__(self, data):
+                    self._data = data
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return self._data
+
+            if "/tasks/" in path:
+                return _R(task_payload)
+            if "/agents/" in path:
+                aid = path.rsplit("/", 1)[-1]
+                return _R(agent_payloads.get(aid, {}))
+            return _R({})
+
+    fake._http = _TaskAwareHttp()
+    _install_fake_client(monkeypatch, fake)
+
+    result = runner.invoke(
+        app,
+        ["alerts", "send", "check", "--kind", "reminder", "--source-task", "t-noa"],
+    )
+    assert result.exit_code == 0, _strip_ansi(result.stdout)
+    assert fake.sent["metadata"]["alert"]["target_agent"] == "madtank"
+
+
+def test_explicit_target_beats_task_auto_resolution(monkeypatch):
+    """--target should win over task assignee/creator — explicit override
+    is important for escalation scenarios."""
+    fake = _FakeClient()
+
+    # If the task lookup runs we'd see these values; but --target should short-circuit.
+    class _ShortCircuitHttp:
+        def patch(self, *a, **k):
+            raise AssertionError("unreachable")
+
+        def get(self, path: str, *, headers: dict) -> Any:
+            # If this is called, auto-resolution is leaking past an explicit --target.
+            raise AssertionError(
+                f"explicit --target should skip task lookup, but got GET {path}"
+            )
+
+    fake._http = _ShortCircuitHttp()
+    _install_fake_client(monkeypatch, fake)
+
+    result = runner.invoke(
+        app,
+        [
+            "alerts", "send", "escalation",
+            "--kind", "reminder",
+            "--source-task", "dfef4c92",
+            "--target", "@madtank",
+        ],
+    )
+    assert result.exit_code == 0, _strip_ansi(result.stdout)
+    assert fake.sent["metadata"]["alert"]["target_agent"] == "madtank"
+
+
 def test_state_change_on_non_alert_message_errors_clearly(monkeypatch):
     existing = {
         "id": "msg-plain",

@@ -5,13 +5,21 @@ builds a ``metadata.alert`` + ``metadata.ui.cards[]`` envelope the existing
 frontend already renders as an AlertCardBody. No backend schema changes; no
 scheduler dependency; manual fire only.
 
+Design rule (per ChatGPT 2026-04-15): **tasks are the canonical reminder /
+workflow object.** Alerts and reminders are Activity Stream *events* generated
+from task reminder policies (or manually fired for ad-hoc alerts). The task
+remains the source of truth; alert/reminder messages are receipts / wakeups
+linked back via ``metadata.alert.source_task_id``. This CLI only produces
+slice-1 manual events — recurring, SLA, and stale-task policies live on the
+task object (follow-up work under 0dacbc1e + 68656c16 scheduler).
+
 Design notes:
 - The card type is "alert" so AxMessageWidgets.getCardChrome picks the
   ShieldAlert accent and AlertCardBody renders the alert detail block.
 - We keep reminder metadata compact — no task-board widget initial_data.
   A clickable source_task_id link is enough for the first demo.
-- State transitions (ack/resolve) post a REPLY to the original alert with
-  ``metadata.alert_state_change``. Backend PATCH only accepts ``content``
+- State transitions (ack/snooze/resolve) post a REPLY to the original alert
+  with ``metadata.alert_state_change``. Backend PATCH only accepts ``content``
   today — metadata updates are silently dropped — so state-change-as-reply
   keeps the slice honest and produces an auditable stream event. A small
   frontend follow-up can fold the reply into the parent card's state badge.
@@ -49,7 +57,14 @@ app = typer.Typer(name="alerts", help="Activity Stream alerts and task reminders
 
 _ALLOWED_SEVERITIES = {"info", "warn", "warning", "critical", "error"}
 _ALLOWED_KINDS = {"alert", "reminder", "task_reminder"}
-_ALLOWED_STATES = {"triggered", "acknowledged", "resolved", "stale", "escalated"}
+_ALLOWED_STATES = {
+    "triggered",
+    "acknowledged",
+    "snoozed",
+    "resolved",
+    "stale",
+    "escalated",
+}
 
 
 def _normalize_severity(value: str) -> str:
@@ -172,6 +187,52 @@ def _build_alert_metadata(
     }
 
 
+def _resolve_target_from_task(client: Any, task_id: str) -> tuple[str | None, str | None]:
+    """Fetch a task and return (target_name, resolved_from).
+
+    Preference: assignee → creator. Returns (None, None) on any failure —
+    callers should fall back to unassigned-but-still-fired behavior.
+    ``resolved_from`` is "assignee" or "creator" for display/logging.
+    """
+    try:
+        r = client._http.get(
+            f"/api/v1/tasks/{task_id}",
+            headers=client._with_agent(None),
+        )
+        r.raise_for_status()
+        wrapper = client._parse_json(r)
+    except Exception:
+        return None, None
+
+    task = wrapper.get("task", wrapper) if isinstance(wrapper, dict) else {}
+
+    # The backend returns ids, not names. Try to resolve via the agent
+    # roster — best-effort, skip if unreachable.
+    def _name_for(agent_id: str | None) -> str | None:
+        if not agent_id:
+            return None
+        try:
+            rr = client._http.get(
+                f"/api/v1/agents/{agent_id}",
+                headers=client._with_agent(None),
+            )
+            rr.raise_for_status()
+            agent_wrapper = client._parse_json(rr)
+            agent = agent_wrapper.get("agent", agent_wrapper) if isinstance(agent_wrapper, dict) else {}
+            name = agent.get("name") or agent.get("username") or agent.get("handle")
+            return name.strip().lstrip("@") if isinstance(name, str) else None
+        except Exception:
+            return None
+
+    assignee_name = _name_for(task.get("assignee_id"))
+    if assignee_name:
+        return assignee_name, "assignee"
+    creator_name = _name_for(task.get("creator_id"))
+    if creator_name:
+        return creator_name, "creator"
+    return None, None
+
+
 def _format_mention_content(target: str | None, reason: str, kind: str) -> str:
     label = "Reminder" if kind == "reminder" else "Alert"
     prefix = f"@{target} " if target else ""
@@ -220,6 +281,14 @@ def send(
     except Exception:
         triggered_by = None
 
+    # Task-linked design: when --source-task is given but no --target,
+    # default to the task's assignee, falling back to creator. This keeps
+    # tasks as the source of truth (per dfef4c92 / 0dacbc1e design rule)
+    # and means CLI reminders reach the right agent without manual targeting.
+    target_resolved_from = None
+    if source_task and not target_n:
+        target_n, target_resolved_from = _resolve_target_from_task(client, source_task)
+
     metadata = _build_alert_metadata(
         kind=kind_n,
         severity=severity_n,
@@ -258,12 +327,15 @@ def send(
     msg: dict[str, Any] = (
         result.get("message", result) if isinstance(result, dict) else {}
     )
+    target_label = target_n or "-"
+    if target_resolved_from:
+        target_label = f"{target_n} (from task {target_resolved_from})"
     _print_kv(
         {
             "id": msg.get("id", "?"),
             "kind": kind_n,
             "severity": severity_n,
-            "target": target_n or "-",
+            "target": target_label,
             "source_task": source_task or "-",
             "state": "triggered",
         },
@@ -437,6 +509,19 @@ def resolve(
     not the firer. See ``ax alerts ack --help`` for the full note.
     """
     _post_state_change(message_id, "resolved", as_json=as_json)
+
+
+@app.command("snooze")
+def snooze(
+    message_id: str = typer.Argument(..., help="Alert message ID"),
+    as_json: bool = JSON_OPTION,
+) -> None:
+    """Snooze an alert (state → snoozed).
+
+    Slice-2 scheduler will re-fire snoozed reminders at remind_at / next
+    cadence tick. For slice 1 this is purely a stream event — no re-fire yet.
+    """
+    _post_state_change(message_id, "snoozed", as_json=as_json)
 
 
 @app.command("state")
