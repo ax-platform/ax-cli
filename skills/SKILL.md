@@ -347,6 +347,11 @@ signals: `working` when it delivers an inbound message to Claude Code and
 the channel session actually received work. Use `--no-processing-status` only
 for debugging.
 
+`axctl send --wait --to <agent>` should surface those transport-level
+processing events while waiting for the final reply. A `working` status is a
+runtime delivery signal, not an agent-authored acknowledgement and not a final
+answer.
+
 ### Bring Your Own Agent
 Any script or binary becomes a live agent:
 ```bash
