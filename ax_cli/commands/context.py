@@ -340,27 +340,33 @@ def fetch_url(
 
     if upload or not is_text:
         # Download to temp file, then upload
-        suffix = Path(parsed.path).suffix or ".bin"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(resp.content)
-            tmp_path = tmp.name
+        safe_name = _safe_filename(default_key)
+        if "." not in safe_name:
+            safe_name = f"{safe_name}.bin"
+        tmp_dir = Path(tempfile.mkdtemp(prefix="ax-fetch-url-"))
+        tmp_path = tmp_dir / safe_name
+        tmp_path.write_bytes(resp.content)
 
         try:
-            upload_data = client.upload_file(tmp_path, space_id=sid)
+            upload_data = client.upload_file(str(tmp_path), space_id=sid)
         except httpx.HTTPStatusError as exc:
             handle_error(exc)
         finally:
-            Path(tmp_path).unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
+            tmp_dir.rmdir()
 
         info = _normalize_upload(upload_data)
         context_value = {
-            "type": "url_fetch_upload",
+            "type": "file_upload",
             "filename": info.get("filename"),
             "content_type": info.get("content_type") or content_type,
             "size": info.get("size"),
             "url": info.get("url"),
+            "source": "url_fetch",
             "source_url": url,
         }
+        if is_text:
+            context_value["content"] = resp.text
     else:
         # Store text content directly in context
         text_content = resp.text
@@ -562,7 +568,7 @@ def load_file(
         print_kv(result)
 
 
-@app.command("preview", hidden=True)
+@app.command("preview")
 def preview_file(
     key: str = typer.Argument(..., help="Context key to preview"),
     cache_dir: Optional[str] = typer.Option(
@@ -574,7 +580,12 @@ def preview_file(
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
     as_json: bool = JSON_OPTION,
 ):
-    """Backward-compatible alias for `context load`."""
+    """Preview a context artifact from the private local cache.
+
+    This is an agent-friendly alias for `context load`: it resolves protected
+    upload URLs with the active profile, writes the artifact under the preview
+    cache, and returns the local path.
+    """
     load_file(
         key=key,
         cache_dir=cache_dir,

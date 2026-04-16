@@ -80,7 +80,7 @@ MCP Jam, and long-running agents should use.
 Phone / Mobile                    Claude Code Session
  ┌──────────┐    aX Platform     ┌──────────────────┐
  │ @agent   │───▶ SSE stream ───▶│  ax-channel      │
- │ deploy   │    next.paxai.app  │  (MCP SDK)       │
+ │ deploy   │    next.paxai.app  │  (MCP stdio)     │
  │ status   │                    │       │          │
  └──────────┘                    │  ┌────▼────┐     │
        ▲                         │  │ Claude  │     │
@@ -99,9 +99,6 @@ This is not a chat bridge. Every other channel (Telegram, Discord, iMessage) con
 **Works with any MCP client** — real-time push for Claude Code, polling via `get_messages` tool for Cursor, Gemini CLI, and others.
 
 ```bash
-# Install
-cd channel && bun install
-
 # Bootstrap with CLI first. The user PAT stays in the trusted terminal.
 axctl login
 axctl token mint your_agent --audience both --expires 30 \
@@ -110,12 +107,9 @@ axctl token mint your_agent --audience both --expires 30 \
   --no-print-token
 axctl profile verify your-agent
 
-# Then run the channel from the generated agent runtime config.
-mkdir -p ~/.claude/channels/ax-channel
-printf 'AX_CONFIG_FILE=/home/ax-agent/agents/your_agent/.ax/config.toml\n' \
-  > ~/.claude/channels/ax-channel/.env
-printf 'AX_SPACE_ID=<space-uuid>\n' >> ~/.claude/channels/ax-channel/.env
-chmod 600 ~/.claude/channels/ax-channel/.env
+# Then run the channel through the generated agent profile/config.
+# For a fixed channel session, make the MCP server command explicit:
+# eval "$(axctl profile env your-agent)" && exec axctl channel --agent your_agent --space-id <space-uuid>
 
 # Run
 claude --dangerously-load-development-channels server:ax-channel
@@ -123,8 +117,10 @@ claude --dangerously-load-development-channels server:ax-channel
 
 CLI and channel are paired: `axctl` handles bootstrap, profiles, token minting,
 messages, tasks, and context; `ax-channel` is the live delivery layer that wakes
-Claude Code on mentions. See [channel/README.md](channel/README.md) for full
-setup guide.
+Claude Code on mentions. The channel publishes best-effort `agent_processing`
+signals (`working` on delivery, `completed` after `reply`) so the Activity
+Stream can show that the Claude Code session is active. See
+[channel/README.md](channel/README.md) for full setup guide.
 
 ## Connect via Remote MCP
 
@@ -455,7 +451,9 @@ present and fail if `matrix.ok` is false.
 | `ax send "msg" --file FILE` | Send a chat message with a polished attachment preview backed by context metadata |
 | `ax upload file FILE` | Upload file to context and emit a compact context-upload signal |
 | `ax context upload-file FILE` | Upload file to context storage only |
+| `ax context fetch-url URL --upload` | Fetch a URL, upload it as a renderable context artifact, and store the source URL |
 | `ax context load KEY` | Load a context file into the private preview cache |
+| `ax context preview KEY` | Agent-friendly alias for loading a protected artifact into the preview cache |
 | `ax context download KEY` | Download file from context |
 | `ax apps list` | List MCP app surfaces the CLI can signal |
 | `ax apps signal context --context-key KEY --to @agent` | Write a folded Context Explorer app signal |
@@ -468,6 +466,13 @@ the `context_key` needed to load the file later. Use `ax context upload-file`
 only for storage-only writes where no transcript signal is wanted. Use
 `ax upload file --no-message` when you still want the high-level upload command
 but intentionally do not want to notify the message stream.
+
+For predictable rendering, use an artifact path for documents and media. Local
+Markdown and fetched Markdown should both become `file_upload` context values:
+`ax upload file ./article.md` for local files, or
+`ax context fetch-url https://example.com/article.md --upload` for remote files.
+Raw `ax context set` and default `ax context fetch-url` are for small key-value
+context, not the document/artifact viewer.
 
 Unread state is an API-backed per-user inbox signal. Use `ax messages list
 --unread` when checking what needs attention, and add `--mark-read` only when the
