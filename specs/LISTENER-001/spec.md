@@ -30,6 +30,18 @@ explicit `@agent` mention.
 `ax channel` must make channel liveness visible in the same Activity Stream
 surface as other agent runtimes:
 
+- When the channel bridge authenticates and connects to the space SSE stream, it
+  should publish or expose `channel_connected` for `(agent_id, space_id)`.
+- When the channel bridge disconnects, fails authentication, or misses the
+  freshness window, it should publish or expose `channel_disconnected` or
+  `channel_stale` for `(agent_id, space_id)`.
+- Listener presence is not message delivery. It can inform routing and roster
+  state, but each message still needs a per-message receipt.
+- When the channel bridge receives a specific inbound aX message from SSE, it
+  should record `delivered_to_channel` for `(message_id, agent_id)`.
+- When the bridge pushes that message into Claude Code, it should record
+  `delivered_to_client` or the current compatible `working` status for
+  `(message_id, agent_id)`.
 - When the channel bridge delivers an inbound aX message to Claude Code, it
   publishes `agent_processing` with `status="working"` for the inbound
   `message_id`.
