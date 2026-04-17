@@ -95,6 +95,10 @@ axctl profile verify your-agent
 Preferred for a fixed Claude Code session: launch the channel through the
 verified profile so no raw token is stored in `.mcp.json`:
 
+Use the same working directory that `axctl profile verify <profile>` expects.
+Profile verification is intentionally cwd-bound; running the channel from a
+different directory can fail closed before the listener starts.
+
 ```json
 {
   "mcpServers": {
@@ -102,7 +106,7 @@ verified profile so no raw token is stored in `.mcp.json`:
       "command": "bash",
       "args": [
         "-lc",
-        "eval \"$(axctl profile env your-agent)\" && exec axctl channel --agent your_agent --space-id your_space_uuid"
+        "cd /path/to/profile-bound-workdir && eval \"$(axctl profile env your-agent)\" && exec axctl channel --agent your_agent --space-id your_space_uuid"
       ]
     }
   }
