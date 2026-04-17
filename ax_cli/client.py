@@ -616,6 +616,37 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
+    def create_agent_draft(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        agent_mode: str = "sandbox",
+        target_space_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """POST /api/v1/drafts/agents — create a HITL agent draft."""
+        agent: dict = {"name": name}
+        if description is not None:
+            agent["description"] = description
+        if system_prompt:
+            agent["system_prompt"] = system_prompt
+        if model:
+            agent["model"] = model
+        body: dict = {
+            "agent_mode": agent_mode,
+            "agent": agent,
+        }
+        if target_space_id:
+            body["target_space_id"] = target_space_id
+        if idempotency_key:
+            body["idempotency_key"] = idempotency_key
+        r = self._http.post("/api/v1/drafts/agents", json=body)
+        r.raise_for_status()
+        return self._parse_json(r)
+
     def get_agent(self, identifier: str) -> dict:
         """GET /api/v1/agents/manage/{identifier} — get by name or UUID."""
         r = self._http.get(f"/api/v1/agents/manage/{identifier}")

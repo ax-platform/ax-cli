@@ -334,6 +334,8 @@ def test_widgets_generates_current_signal_fixture_contract(monkeypatch):
     assert review["ui"]["cards"][0]["payload"]["intent"] == "review"
     assert review["ui"]["widget"]["lifecycle"] == "approval_required"
     assert review["ui"]["widget"]["initial_data"]["state"] == "approval_required"
+    assert review["ui"]["widget"]["initial_data"]["data"]["scope"] == "create"
+    assert review["ui"]["widget"]["initial_data"]["data"]["draft"]["name"].startswith("qa_demo_fixture")
 
     context = by_title["QA context artifact fixture-1"]["ui"]["widget"]
     assert context["resource_uri"] == "ui://context/explorer"

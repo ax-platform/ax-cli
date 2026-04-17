@@ -186,6 +186,85 @@ def _first_text(*values: Any) -> str | None:
     return None
 
 
+def _safe_identifier(value: str, *, max_length: int = 48) -> str:
+    safe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in value.lower()).strip("_")
+    if not safe or not safe[0].isalpha():
+        safe = f"qa_{safe}"
+    return safe[:max_length].rstrip("_") or "qa_agent"
+
+
+def _agent_draft_initial_data(
+    *,
+    draft: dict[str, Any],
+    required_fields: list[str] | None = None,
+    hint: str = "Review this draft before creating the agent.",
+) -> dict[str, Any]:
+    return {
+        "kind": "agent_collection",
+        "version": 2,
+        "state": "approval_required",
+        "data": {
+            "scope": "create",
+            "draft": draft,
+            "required_fields": required_fields or ["name", "description", "agent_mode"],
+            "hint": hint,
+        },
+    }
+
+
+def _draft_from_response(result: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    agent = result.get("agent") if isinstance(result.get("agent"), dict) else {}
+    return {
+        "draft_id": result.get("draft_id"),
+        "version": result.get("version"),
+        "status": result.get("status"),
+        "kind": result.get("kind"),
+        "card": result.get("card"),
+        "agent_mode": result.get("agent_mode") or fallback.get("agent_mode") or "sandbox",
+        "name": agent.get("name") or fallback.get("name") or "",
+        "description": agent.get("description") or fallback.get("description") or "",
+        "system_prompt": agent.get("system_prompt") or fallback.get("system_prompt") or "",
+        "model": agent.get("model") or fallback.get("model") or "",
+        "target_space_id": result.get("target_space_id") or fallback.get("target_space_id"),
+        "enabled_tools": result.get("enabled_tools") or {},
+        "editable_fields": result.get("editable_fields") or [],
+        "requested_scopes": result.get("requested_scopes") or [],
+        "approval_required": result.get("approval_required", True),
+        "risk_class": result.get("risk_class"),
+        "backend": result,
+    }
+
+
+def _agent_draft_fixture_data(client: AxClient, *, space_id: str, run_id: str) -> dict[str, Any]:
+    name = _safe_identifier(f"qa_demo_{run_id}")
+    fallback = {
+        "name": name,
+        "description": "QA-only draft for Activity Stream widget review.",
+        "system_prompt": "You are a temporary QA fixture agent. Do not perform external actions.",
+        "model": "gpt-5.4-mini",
+        "agent_mode": "sandbox",
+        "target_space_id": space_id,
+    }
+    try:
+        result = client.create_agent_draft(
+            name,
+            description=fallback["description"],
+            system_prompt=fallback["system_prompt"],
+            model=fallback["model"],
+            agent_mode=fallback["agent_mode"],
+            target_space_id=space_id,
+            idempotency_key=f"qa-widgets:{run_id}:agent-draft",
+        )
+        if isinstance(result, dict):
+            return _agent_draft_initial_data(draft=_draft_from_response(result, fallback))
+    except Exception:
+        # Agent-bound QA profiles may not have manage-agent rights. Keep the
+        # visual contract test useful by opening a prefilled draft form instead
+        # of falling back to the generic agent list.
+        pass
+    return _agent_draft_initial_data(draft=fallback)
+
+
 def _client_for_env(env_name: str) -> tuple[AxClient, dict[str, Any]]:
     """Return a user-authored client for a named login environment."""
     normalized = _normalize_user_env(env_name)
@@ -515,6 +594,13 @@ def _run_widget_fixtures(
         "space_id": sid,
         "source": "axctl_qa_widgets",
     }
+    task_detail_arguments = {
+        "action": "get",
+        "space_id": sid,
+        "task_id": task_detail_id,
+        "selected_task_id": task_detail_id,
+    }
+    agent_draft_initial_data = _agent_draft_fixture_data(client, space_id=sid, run_id=resolved_run_id)
     agents_payload = client.list_agents(space_id=sid, limit=500)
     spaces_payload = client.list_spaces()
 
@@ -562,6 +648,7 @@ def _run_widget_fixtures(
                 "status": task_detail.get("status") or "open",
                 "priority": task_detail.get("priority") or "medium",
             },
+            widget_updates={"arguments": task_detail_arguments},
             widget_initial_data_updates=task_detail_initial_data,
         )
     )
@@ -580,6 +667,7 @@ def _run_widget_fixtures(
             severity="warn",
             name="alert:task_reminder",
             card_payload_updates={"task_id": task_detail_id},
+            widget_updates={"arguments": task_detail_arguments},
             widget_initial_data_updates=task_detail_initial_data,
             alert_updates={
                 "task_id": task_detail_id,
@@ -606,6 +694,7 @@ def _run_widget_fixtures(
             severity="info",
             name="notice:task_completed",
             card_payload_updates={"task_id": task_detail_id},
+            widget_updates={"arguments": task_detail_arguments},
             widget_initial_data_updates={
                 **task_detail_initial_data,
                 "items": [
@@ -674,18 +763,7 @@ def _run_widget_fixtures(
                 "lifecycle": "approval_required",
                 "title": f"Approve agent creation {resolved_run_id}",
             },
-            widget_initial_data_updates={
-                "kind": "agents",
-                "version": 1,
-                "action": "create_draft",
-                "state": "approval_required",
-                "draft": {
-                    "display_name": f"QA Demo Agent {resolved_run_id}",
-                    "handle": f"qa_demo_{resolved_run_id.replace('-', '_')}"[:48],
-                    "purpose": "QA-only draft for Activity Stream widget review.",
-                },
-                "summary": "Open the widget for approve/deny controls.",
-            },
+            widget_initial_data_updates=agent_draft_initial_data,
             expected=[
                 "Review card is slim and has no inline Approve/Deny buttons",
                 "Open-widget icon launches the HITL app panel",
