@@ -210,6 +210,91 @@ def send_spaces_signal(client: Any, sid: str) -> str | None:
     return message_id(client.send_message(sid, "Workspace map is ready.", metadata=metadata, message_type="system"))
 
 
+def send_space_draft(client: Any, sid: str) -> tuple[str | None, str]:
+    suffix = time.strftime("%H%M%S", time.gmtime()) + "_" + uuid.uuid4().hex[:4]
+    name = f"demo_workspace_{suffix}"
+    tool_call_id = str(uuid.uuid4())
+    draft = {
+        "id": name,
+        "name": name,
+        "description": "Temporary demo workspace for reviewing activity-stream cards, context artifacts, and team-agent handoffs.",
+        "space_mode": "private_team",
+        "visibility": "private",
+        "target_space_id": sid,
+        "status": "needs_review",
+    }
+    initial_data = {
+        "kind": "space_collection",
+        "version": 2,
+        "state": "approval_required",
+        "data": {
+            "scope": "create",
+            "draft": draft,
+            "items": [draft],
+            "keys": [name],
+            "count": 1,
+            "total": 1,
+            "required_fields": ["name"],
+            "hint": "Review this draft before creating the space.",
+        },
+    }
+    metadata = {
+        "ui": {
+            "cards": [
+                {
+                    "card_id": f"app-signal:{tool_call_id}",
+                    "type": "confirmation",
+                    "version": 1,
+                    "payload": {
+                        "title": f"Review space draft: {name}",
+                        "summary": "Human review required. Open the Spaces widget to inspect and create the workspace.",
+                        "tool_name": "spaces",
+                        "resource_uri": "ui://spaces/navigator",
+                        "source": "widget_demo",
+                        "intent": "review",
+                        "evidence_mode": "widget",
+                        "status": "needs_review",
+                        "severity": "info",
+                        "count": 1,
+                        "resource_type": "space_draft",
+                    },
+                }
+            ],
+            "widget": {
+                "kind": "mcp_app",
+                "tool_name": "spaces",
+                "tool_action": "create_draft",
+                "tool_call_id": tool_call_id,
+                "resource_uri": "ui://spaces/navigator",
+                "display_mode": "inline",
+                "lifecycle": "approval_required",
+                "revision": 2,
+                "title": f"Review space draft: {name}",
+                "arguments": {"action": "create_draft", "space_id": sid},
+                "initial_data": initial_data,
+                "result_kind": "space_collection",
+                "source": "widget_demo",
+            },
+        },
+        "app_signal": {
+            "app": "spaces",
+            "resource_uri": "ui://spaces/navigator",
+            "tool_call_id": tool_call_id,
+            "source": "widget_demo",
+            "signal_only": True,
+        },
+        "top_level_ingress": False,
+        "signal_only": True,
+    }
+    data = client.send_message(
+        sid,
+        f"Demo HITL space draft ready: {name}. Open the widget to review and create it.",
+        metadata=metadata,
+        message_type="system",
+    )
+    return message_id(data), name
+
+
 def send_task_detail(client: Any, sid: str, run_id: str) -> tuple[str | None, str | None]:
     title = "Demo: Review Activity Stream launch checklist"
     description = (
@@ -292,6 +377,14 @@ def main() -> None:
     cards.append({"name": "identity", "message_id": send_whoami_signal(client, sid, run_id)})
     cards.append({"name": "spaces", "message_id": send_spaces_signal(client, sid)})
     cards.append({"name": "media_sidecar", "message_id": send_media_sidecar(client, sid, run_id)})
+    space_draft_message_id, space_draft_name = send_space_draft(client, sid)
+    cards.append(
+        {
+            "name": "hitl:space_draft",
+            "message_id": space_draft_message_id,
+            "space_draft": space_draft_name,
+        }
+    )
 
     print(json.dumps({"ok": True, "run_id": run_id, "space_id": sid, "cards": cards}, indent=2))
 
