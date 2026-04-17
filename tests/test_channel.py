@@ -1,8 +1,10 @@
 """Tests for the Claude Code channel bridge identity boundary."""
 
 import asyncio
+import json
 import os
 
+from ax_cli.commands import channel as channel_mod
 from ax_cli.commands.channel import ChannelBridge, MentionEvent, _load_channel_env
 from ax_cli.commands.listen import _is_self_authored, _remember_reply_anchor, _should_respond
 
@@ -46,6 +48,24 @@ class CaptureBridge(ChannelBridge):
 
     async def write_message(self, payload):
         self.writes.append(payload)
+
+
+class FakeSseResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def iter_lines(self):
+        yield "event: message"
+        yield f"data: {json.dumps(self.payload)}"
+        yield ""
 
 
 def test_channel_rejects_user_pat_for_agent_reply():
@@ -106,6 +126,48 @@ def test_channel_can_publish_working_status_on_delivery():
             "space_id": "space-123",
         }
     ]
+
+
+def test_channel_processes_idle_event_before_jwt_reconnect(monkeypatch):
+    """The event that wakes an idle stream must not be dropped for reconnect."""
+
+    class FakeSseClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.connect_calls = 0
+
+        def connect_sse(self, *, space_id):
+            self.connect_calls += 1
+            assert space_id == "space-123"
+            return FakeSseResponse(
+                {
+                    "id": "incoming-123",
+                    "content": "@anvil please check this",
+                    "author": {"id": "user-123", "name": "madtank", "type": "user"},
+                    "mentions": ["anvil"],
+                }
+            )
+
+        def get_message(self, message_id):
+            assert message_id == "incoming-123"
+            return {"message": {"metadata": {}}}
+
+    client = FakeSseClient()
+    bridge = CaptureBridge(client)
+    delivered: list[MentionEvent] = []
+
+    def capture_delivery(event):
+        delivered.append(event)
+        bridge.shutdown.set()
+
+    bridge.enqueue_from_thread = capture_delivery
+    ticks = iter([0, channel_mod._SSE_RECONNECT_INTERVAL + 1])
+    monkeypatch.setattr(channel_mod.time, "monotonic", lambda: next(ticks, channel_mod._SSE_RECONNECT_INTERVAL + 2))
+
+    channel_mod._sse_loop(bridge)
+
+    assert [event.message_id for event in delivered] == ["incoming-123"]
+    assert delivered[0].prompt == "please check this"
 
 
 def test_channel_processing_status_can_be_disabled():

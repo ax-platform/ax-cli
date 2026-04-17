@@ -456,15 +456,21 @@ def _sse_loop(bridge: ChannelBridge) -> None:
                 for event_type, data in _iter_sse(response):
                     if bridge.shutdown.is_set():
                         return
-                    # Reconnect before JWT expires (15-min TTL, reconnect at 10 min)
-                    if time.monotonic() - connect_time > _SSE_RECONNECT_INTERVAL:
-                        bridge.log("SSE reconnecting to refresh JWT")
-                        break
+                    # Reconnect before JWT expires (15-min TTL, reconnect at
+                    # 10 min), but never drop the event that woke an idle
+                    # stream. Process the current event first, then reconnect.
+                    reconnect_after_event = time.monotonic() - connect_time > _SSE_RECONNECT_INTERVAL
                     if event_type in {"bootstrap", "heartbeat", "ping", "connected", "identity_bootstrap"}:
                         bridge.log(f"skip {event_type}")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
                         continue
                     if event_type not in {"message", "mention"} or not isinstance(data, dict):
                         bridge.log(f"skip non-msg: {event_type}")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
                         continue
 
                     message_id = data.get("id") or ""
@@ -472,11 +478,17 @@ def _sse_loop(bridge: ChannelBridge) -> None:
                     bridge.log(f"event {event_type} id={message_id[:12]} content={content_preview!r}")
                     if not message_id or message_id in seen_ids:
                         bridge.log("  -> skip: dup or no id")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
                         continue
                     if _is_self_authored(data, bridge.agent_name, bridge.agent_id):
                         _remember_reply_anchor(bridge._reply_anchor_ids, message_id)
                         seen_ids.add(message_id)
                         bridge.log("  -> skip self-authored, remembered as reply anchor")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
                         continue
                     if not _should_respond(
                         data,
@@ -485,11 +497,17 @@ def _sse_loop(bridge: ChannelBridge) -> None:
                         reply_anchor_ids=bridge._reply_anchor_ids,
                     ):
                         bridge.log(f"  -> skip: not for @{bridge.agent_name}")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
                         continue
                     bridge.log("  -> MATCH! delivering")
 
                     prompt = _strip_mention(data.get("content", ""), bridge.agent_name)
                     if not prompt:
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
                         continue
 
                     seen_ids.add(message_id)
@@ -549,6 +567,9 @@ def _sse_loop(bridge: ChannelBridge) -> None:
                             attachments=attachments,
                         )
                     )
+                    if reconnect_after_event:
+                        bridge.log("SSE reconnecting to refresh JWT")
+                        break
         except (httpx.ConnectError, httpx.ReadTimeout, ConnectionError) as exc:
             bridge.log(f"SSE reconnect in {backoff}s after: {exc}")
             time.sleep(backoff)
