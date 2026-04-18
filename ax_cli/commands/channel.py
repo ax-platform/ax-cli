@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -439,6 +440,28 @@ def _resolve_agent_id(client, agent_name: str | None) -> str | None:
 
 _SSE_RECONNECT_INTERVAL = 600  # reconnect every 10 min to refresh JWT before 15-min expiry
 
+# Defensive fallback for runtime progress messages that arrive without the
+# `metadata.streaming_reply.final=false` hint. Every branch is anchored with
+# \Z so we only suppress lines that are EXACTLY progress chatter — never
+# legitimate user prompts that merely start with the same word. Example:
+# "Working…" is dropped, but "Working-state cleanup proposal" is delivered.
+#
+# Emitters that feed this:
+#   - hermes_sdk / ax-agents callbacks: "Working…", "Received", "Thinking...",
+#     "Processing..." (exact word + trailing whitespace/dot/ellipsis only).
+#   - channel/server.ts: "No response after <N>[smh] - session may need
+#     attention." — the `\d+[smh]` anchor keeps user phrases like "No response
+#     after the deploy broke things" from matching.
+_RUNTIME_PROGRESS_RE = re.compile(
+    r"^(?:"
+    r"(?:Working|Received|Thinking|Processing)[\s.\u2026]*"
+    r"|"
+    r"No response after\s+\d+\s*[smh]\b.*"
+    r")\Z",
+    re.IGNORECASE,
+)
+_LEADING_MENTION_RE = re.compile(r"^@[\w-]+\s*[-\u2014]?\s*")
+
 
 def _sse_loop(bridge: ChannelBridge) -> None:
     seen_ids: set[str] = set()
@@ -466,22 +489,63 @@ def _sse_loop(bridge: ChannelBridge) -> None:
                             bridge.log("SSE reconnecting to refresh JWT")
                             break
                         continue
-                    if event_type not in {"message", "mention"} or not isinstance(data, dict):
+                    # Accept message/mention (creation) and message_updated
+                    # (final streamed content). Hermes-runtime sentinels seed a
+                    # placeholder message on start and overwrite it in place
+                    # via message_updated events as the reply streams in.
+                    if event_type not in {"message", "mention", "message_updated"} or not isinstance(data, dict):
                         bridge.log(f"skip non-msg: {event_type}")
                         if reconnect_after_event:
                             bridge.log("SSE reconnecting to refresh JWT")
                             break
                         continue
 
+                    is_update = event_type == "message_updated"
                     message_id = data.get("id") or ""
                     content_preview = (data.get("content") or "")[:60]
                     bridge.log(f"event {event_type} id={message_id[:12]} content={content_preview!r}")
-                    if not message_id or message_id in seen_ids:
+                    # New messages: skip if already delivered. Updates bypass
+                    # the dedup so the final streamed payload can supersede the
+                    # placeholder.
+                    if not message_id or (not is_update and message_id in seen_ids):
                         bridge.log("  -> skip: dup or no id")
                         if reconnect_after_event:
                             bridge.log("SSE reconnecting to refresh JWT")
                             break
                         continue
+                    if is_update and message_id in seen_ids:
+                        bridge.log("  -> skip: update for already-delivered msg")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
+                        continue
+
+                    # Skip runtime progress chatter. Two signals:
+                    #   1. metadata.streaming_reply.final is explicitly false,
+                    #      meaning the payload is a placeholder/progress chunk
+                    #      the runtime will overwrite via message_updated.
+                    #   2. Defensive regex: first line matches the known
+                    #      progress patterns ("Working…", "Received",
+                    #      "Thinking", "Processing", "No response after").
+                    # We skip WITHOUT adding to seen_ids so the subsequent
+                    # final message_updated for the same id can be delivered.
+                    metadata_obj = data.get("metadata") or {}
+                    streaming = metadata_obj.get("streaming_reply") if isinstance(metadata_obj, dict) else None
+                    if isinstance(streaming, dict) and streaming.get("final") is False:
+                        bridge.log("  -> skip: streaming_reply non-final")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
+                        continue
+                    raw_first_line = (data.get("content") or "").strip().split("\n", 1)[0].strip()
+                    stripped_first_line = _LEADING_MENTION_RE.sub("", raw_first_line, count=1).strip()
+                    if _RUNTIME_PROGRESS_RE.match(stripped_first_line):
+                        bridge.log(f"  -> skip: runtime progress message ({raw_first_line!r})")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
+                        continue
+
                     if _is_self_authored(data, bridge.agent_name, bridge.agent_id):
                         _remember_reply_anchor(bridge._reply_anchor_ids, message_id)
                         seen_ids.add(message_id)
