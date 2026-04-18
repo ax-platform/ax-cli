@@ -68,6 +68,7 @@ def _check_avatar_url_length(avatar_url: str) -> None:
         )
         raise typer.Exit(1)
 
+
 app = typer.Typer(name="agents", help="Agent management", no_args_is_help=True)
 
 
@@ -473,8 +474,7 @@ def update_agent(
     avatar_file: str = typer.Option(
         None,
         "--avatar-file",
-        help="Read avatar from a file (svg/png/jpg/gif/webp) and set it. "
-        "Mutually exclusive with --avatar-url.",
+        help="Read avatar from a file (svg/png/jpg/gif/webp) and set it. Mutually exclusive with --avatar-url.",
     ),
     as_json: bool = JSON_OPTION,
 ):
@@ -519,8 +519,7 @@ def update_agent(
 
     if not fields:
         typer.echo(
-            "Nothing to update. Use --type, --model, --bio, --description, "
-            "--status, --avatar-url, --avatar-file, etc.",
+            "Nothing to update. Use --type, --model, --bio, --description, --status, --avatar-url, --avatar-file, etc.",
             err=True,
         )
         raise typer.Exit(1)

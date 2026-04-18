@@ -154,9 +154,7 @@ def test_update_avatar_file_rejected_over_cap(monkeypatch, tmp_path):
 
 
 def test_avatar_set_uses_put_not_patch(monkeypatch):
-    http = _RecordingHttp(
-        status_code=200, response_json={"id": "agent-1", "name": "axolotl"}
-    )
+    http = _RecordingHttp(status_code=200, response_json={"id": "agent-1", "name": "axolotl"})
     fake = _FakeClient(http)
     monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
 
@@ -189,14 +187,10 @@ def test_avatar_set_rejects_oversized_uri(monkeypatch):
     fake = _FakeClient(http)
     monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
 
-    monkeypatch.setattr(
-        "ax_cli.avatar.generate_avatar", lambda *a, **k: "<svg/>"
-    )
+    monkeypatch.setattr("ax_cli.avatar.generate_avatar", lambda *a, **k: "<svg/>")
     # Intentionally produce an over-cap data URI
     oversized = "data:image/svg+xml;base64," + ("A" * (AVATAR_URL_MAX_LENGTH + 1))
-    monkeypatch.setattr(
-        "ax_cli.avatar.avatar_data_uri", lambda *a, **k: oversized
-    )
+    monkeypatch.setattr("ax_cli.avatar.avatar_data_uri", lambda *a, **k: oversized)
 
     result = runner.invoke(app, ["agents", "avatar", "axolotl", "--set"])
     assert result.exit_code == 1, result.output
@@ -226,14 +220,10 @@ def test_update_prints_effective_config(monkeypatch):
 
 
 def test_avatar_set_prints_effective_config(monkeypatch):
-    http = _RecordingHttp(
-        status_code=200, response_json={"id": "agent-1", "name": "axolotl"}
-    )
+    http = _RecordingHttp(status_code=200, response_json={"id": "agent-1", "name": "axolotl"})
     fake = _FakeClient(http)
     monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
-    monkeypatch.setattr(
-        "ax_cli.avatar.generate_avatar", lambda *a, **k: "<svg/>"
-    )
+    monkeypatch.setattr("ax_cli.avatar.generate_avatar", lambda *a, **k: "<svg/>")
     small = "data:image/svg+xml;base64," + base64.b64encode(b"<svg/>").decode()
     monkeypatch.setattr("ax_cli.avatar.avatar_data_uri", lambda *a, **k: small)
 
