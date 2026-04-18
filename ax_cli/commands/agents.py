@@ -17,7 +17,7 @@ from ..config import (
     resolve_base_url,
     resolve_space_id,
 )
-from ..output import JSON_OPTION, console, handle_error, print_json, print_kv, print_table
+from ..output import JSON_OPTION, console, err_console, handle_error, print_json, print_kv, print_table
 from .handoff import _wait_for_handoff_reply
 
 # Backend caps avatar_url at 512 chars (see ax-backend app/api/v1/agents.py
@@ -29,16 +29,23 @@ AVATAR_URL_MAX_LENGTH = 512
 def _effective_config_line() -> str:
     """One-liner describing the resolved environment, for mutating commands.
 
-    Printed to stderr before any write so operators can eyeball that they're
-    targeting the right environment. Addresses the common footgun where
-    ~/.ax/users/.active silently overrides AX_BASE_URL (see
-    shared/state/axctl-friction-2026-04-17.md §2).
+    Returned as a string so tests can assert on the format. Callers should
+    emit it via :func:`_print_effective_config_line` (which routes to
+    stderr) so the preamble never contaminates ``--json`` stdout or any
+    piped consumer of the command's output. See
+    shared/state/axctl-friction-2026-04-17.md §2.
     """
     base_url = resolve_base_url()
     user_env = _resolve_user_env() or "default"
     user_cfg_path = _user_config_path()
     source = str(user_cfg_path) if user_cfg_path.exists() else "(none)"
     return f"[dim]base_url={base_url}  user_env={user_env}  source={source}[/dim]"
+
+
+def _print_effective_config_line() -> None:
+    """Print the effective-config preamble to **stderr** so stdout stays
+    clean for ``--json`` parsers and pipe consumers."""
+    err_console.print(_effective_config_line())
 
 
 def _build_avatar_data_uri_from_file(path: str) -> str:
@@ -496,7 +503,7 @@ def update_agent(
     if avatar_url is not None:
         _check_avatar_url_length(avatar_url)
 
-    console.print(_effective_config_line())
+    _print_effective_config_line()
 
     client = get_client()
     fields = {}
@@ -623,7 +630,7 @@ def avatar(
         client = get_client()
         data_uri = avatar_data_uri(agent, agent_type, size)
         _check_avatar_url_length(data_uri)
-        console.print(_effective_config_line())
+        _print_effective_config_line()
         try:
             # Find the agent by name
             agents_data = client.list_agents()

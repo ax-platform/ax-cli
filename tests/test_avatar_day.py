@@ -19,7 +19,11 @@ from ax_cli.commands.agents import (
 )
 from ax_cli.main import app
 
+# Click 8.3+ always separates stdout/stderr on CliRunner.Result. We assert
+# on result.stderr for the effective-config-line tests so the preamble
+# is proved to NOT leak into stdout (which --json consumers / pipes read).
 runner = CliRunner()
+split_runner = runner
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -209,17 +213,23 @@ def test_effective_config_line_format():
     assert "source=" in line
 
 
-def test_update_prints_effective_config(monkeypatch):
+def test_update_prints_effective_config_to_stderr(monkeypatch):
+    """The config preamble MUST land on stderr so --json consumers and
+    pipes don't see it. See friction §2 + PR #65 review."""
     fake = _FakeClient(_RecordingHttp())
     monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
 
-    result = runner.invoke(app, ["agents", "update", "axolotl", "--bio", "hi"])
-    assert result.exit_code == 0, result.output
-    assert "base_url=" in result.output
-    assert "user_env=" in result.output
+    result = split_runner.invoke(app, ["agents", "update", "axolotl", "--bio", "hi"])
+    assert result.exit_code == 0, result.stderr
+    assert "base_url=" in result.stderr
+    assert "user_env=" in result.stderr
+    # Critical: the preamble must NOT leak into stdout
+    assert "base_url=" not in result.stdout
+    assert "user_env=" not in result.stdout
 
 
-def test_avatar_set_prints_effective_config(monkeypatch):
+def test_avatar_set_prints_effective_config_to_stderr(monkeypatch):
+    """Same stderr invariant for `ax agents avatar --set`."""
     http = _RecordingHttp(status_code=200, response_json={"id": "agent-1", "name": "axolotl"})
     fake = _FakeClient(http)
     monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
@@ -227,6 +237,24 @@ def test_avatar_set_prints_effective_config(monkeypatch):
     small = "data:image/svg+xml;base64," + base64.b64encode(b"<svg/>").decode()
     monkeypatch.setattr("ax_cli.avatar.avatar_data_uri", lambda *a, **k: small)
 
-    result = runner.invoke(app, ["agents", "avatar", "axolotl", "--set"])
-    assert result.exit_code == 0, result.output
-    assert "base_url=" in result.output
+    result = split_runner.invoke(app, ["agents", "avatar", "axolotl", "--set"])
+    assert result.exit_code == 0, result.stderr
+    assert "base_url=" in result.stderr
+    assert "base_url=" not in result.stdout
+
+
+def test_update_json_stdout_is_clean_of_config_preamble(monkeypatch):
+    """With --json, stdout must be parseable as JSON alone — the preamble
+    must stay on stderr."""
+    import json as _json
+
+    fake = _FakeClient(_RecordingHttp())
+    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+
+    result = split_runner.invoke(app, ["agents", "update", "axolotl", "--bio", "hi", "--json"])
+    assert result.exit_code == 0, result.stderr
+    # stdout should be parseable as JSON with no preamble contamination
+    parsed = _json.loads(result.stdout)
+    assert parsed["name"] == "axolotl"
+    assert parsed["bio"] == "hi"
+    assert "base_url=" in result.stderr
