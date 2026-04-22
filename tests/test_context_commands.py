@@ -69,7 +69,7 @@ def test_context_download_uses_base_url_and_auth_headers(monkeypatch, tmp_path):
     assert "[green]" not in result.output
     assert output.read_bytes() == b"png-bytes"
     assert calls["url"] == "https://paxai.app/api/v1/uploads/files/image.png"
-    assert calls["params"] == {"space_id": "space-1"}
+    assert calls["params"] is None
     assert calls["headers"] == {
         "Authorization": "Bearer exchanged.jwt",
         "X-AX-FP": "fp",
@@ -143,7 +143,7 @@ def test_context_load_fetches_to_preview_cache(monkeypatch, tmp_path):
     assert len(preview_files) == 1
     assert preview_files[0].read_bytes() == b"png-bytes"
     assert calls["url"] == "https://paxai.app/api/v1/uploads/files/image.png"
-    assert calls["params"] == {"space_id": "space-1"}
+    assert calls["params"] is None
     assert calls["headers"] == {"Authorization": "Bearer exchanged.jwt"}
     assert '"text_like": false' in result.output
 
