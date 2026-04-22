@@ -118,7 +118,10 @@ def _fetch_context_file(client, sid: str | None, payload: dict) -> bytes:
     download_url = urljoin(f"{client.base_url}/", url)
     headers = {k: v for k, v in client._auth_headers().items() if k != "Content-Type"}
     with httpx.Client(headers=headers, timeout=60.0, follow_redirects=True) as http:
-        response = http.get(download_url, params={"space_id": sid} if sid else None)
+        # Upload downloads are authorized against the attachment's owning
+        # space. Passing the caller's current space can turn a valid download
+        # into a 404 after the user switches spaces.
+        response = http.get(download_url)
         response.raise_for_status()
         return response.content
 
