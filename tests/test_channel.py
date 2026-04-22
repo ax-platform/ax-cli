@@ -37,7 +37,7 @@ class CaptureBridge(ChannelBridge):
     def __init__(self, client, *, agent_id="agent-123", processing_status=True):
         super().__init__(
             client=client,
-            agent_name="anvil",
+            agent_name="peer-agent",
             agent_id=agent_id,
             space_id="space-123",
             queue_size=10,
@@ -53,8 +53,9 @@ class CaptureBridge(ChannelBridge):
 class FakeSseResponse:
     status_code = 200
 
-    def __init__(self, payload):
+    def __init__(self, payload, *, event_type: str = "message"):
         self.payload = payload
+        self.event_type = event_type
 
     def __enter__(self):
         return self
@@ -63,9 +64,30 @@ class FakeSseResponse:
         return False
 
     def iter_lines(self):
-        yield "event: message"
+        yield f"event: {self.event_type}"
         yield f"data: {json.dumps(self.payload)}"
         yield ""
+
+
+class FakeMultiEventSseResponse:
+    """SSE response that yields a scripted sequence of (event_type, payload) events."""
+
+    status_code = 200
+
+    def __init__(self, events: list[tuple[str, dict]]):
+        self.events = events
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def iter_lines(self):
+        for event_type, payload in self.events:
+            yield f"event: {event_type}"
+            yield f"data: {json.dumps(payload)}"
+            yield ""
 
 
 def test_channel_rejects_user_pat_for_agent_reply():
@@ -103,7 +125,7 @@ def test_channel_sends_with_agent_bound_pat():
         {
             "message_id": "incoming-123",
             "status": "completed",
-            "agent_name": "anvil",
+            "agent_name": "peer-agent",
             "space_id": "space-123",
         }
     ]
@@ -122,7 +144,7 @@ def test_channel_can_publish_working_status_on_delivery():
         {
             "message_id": "incoming-123",
             "status": "working",
-            "agent_name": "anvil",
+            "agent_name": "peer-agent",
             "space_id": "space-123",
         }
     ]
@@ -142,9 +164,9 @@ def test_channel_processes_idle_event_before_jwt_reconnect(monkeypatch):
             return FakeSseResponse(
                 {
                     "id": "incoming-123",
-                    "content": "@anvil please check this",
-                    "author": {"id": "user-123", "name": "madtank", "type": "user"},
-                    "mentions": ["anvil"],
+                    "content": "@peer-agent please check this",
+                    "author": {"id": "user-123", "name": "alex", "type": "user"},
+                    "mentions": ["peer-agent"],
                 }
             )
 
@@ -168,6 +190,233 @@ def test_channel_processes_idle_event_before_jwt_reconnect(monkeypatch):
 
     assert [event.message_id for event in delivered] == ["incoming-123"]
     assert delivered[0].prompt == "please check this"
+
+
+def _run_sse_loop_with_events(
+    events: list[tuple[str, dict]],
+    *,
+    stop_after_delivery: int = 1,
+    monkeypatch=None,
+):
+    """Drive `_sse_loop` against a scripted SSE event list and capture deliveries."""
+
+    class ScriptedClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.connect_calls = 0
+            self.get_message_calls: list[str] = []
+
+        def connect_sse(self, *, space_id):
+            self.connect_calls += 1
+            return FakeMultiEventSseResponse(events)
+
+        def get_message(self, message_id):
+            self.get_message_calls.append(message_id)
+            return {"message": {"metadata": {}}}
+
+    client = ScriptedClient()
+    bridge = CaptureBridge(client)
+    delivered: list[MentionEvent] = []
+    deliveries_needed = stop_after_delivery
+
+    def capture_delivery(event):
+        delivered.append(event)
+        if len(delivered) >= deliveries_needed:
+            bridge.shutdown.set()
+
+    bridge.enqueue_from_thread = capture_delivery
+
+    # Make reconnect path inert so the bridge processes all scripted events in
+    # one pass and only stops when shutdown is set (either by delivery capture
+    # or because the scripted stream is exhausted).
+    if monkeypatch is not None:
+        monkeypatch.setattr(channel_mod.time, "monotonic", lambda: 0.0)
+
+    # Run the loop; it exits when the scripted iter_lines generator completes
+    # and ConnectionError propagates, or when shutdown is set inside capture.
+    # We wrap in a bounded number of connect_sse calls to avoid infinite loop
+    # if the test script doesn't produce deliveries.
+    original_connect = client.connect_sse
+
+    def limited_connect(*args, **kwargs):
+        if client.connect_calls >= 2:
+            bridge.shutdown.set()
+            raise ConnectionError("test: exhausted scripted connects")
+        return original_connect(*args, **kwargs)
+
+    client.connect_sse = limited_connect  # type: ignore[assignment]
+
+    channel_mod._sse_loop(bridge)
+    return bridge, client, delivered
+
+
+def test_channel_skips_streaming_reply_non_final(monkeypatch):
+    """Placeholder/progress chunks marked non-final must not wake the session."""
+
+    events = [
+        (
+            "message",
+            {
+                "id": "stream-1",
+                "content": "Working…",
+                "author": {"id": "user-1", "name": "alex", "type": "user"},
+                "mentions": ["peer-agent"],
+                "metadata": {
+                    "streaming_reply": {"enabled": True, "final": False, "runtime": "hermes_sdk"},
+                },
+            },
+        ),
+    ]
+    _, _, delivered = _run_sse_loop_with_events(events, monkeypatch=monkeypatch)
+    assert delivered == []
+
+
+def test_channel_skips_working_progress_message(monkeypatch):
+    """Defensive regex catches progress payloads even without streaming metadata."""
+
+    events = [
+        (
+            "message",
+            {
+                "id": "progress-1",
+                "content": "@peer-agent Working…",
+                "author": {"id": "user-1", "name": "alex", "type": "user"},
+                "mentions": ["peer-agent"],
+            },
+        ),
+        (
+            "message",
+            {
+                "id": "progress-2",
+                "content": "Received",
+                "author": {"id": "user-1", "name": "alex", "type": "user"},
+                "mentions": ["peer-agent"],
+            },
+        ),
+        (
+            "message",
+            {
+                "id": "progress-3",
+                "content": "@peer-agent Thinking...",
+                "author": {"id": "user-1", "name": "alex", "type": "user"},
+                "mentions": ["peer-agent"],
+            },
+        ),
+        (
+            "message",
+            {
+                "id": "progress-4",
+                "content": "@peer-agent No response after 5m - session may need attention.",
+                "author": {"id": "user-1", "name": "alex", "type": "user"},
+                "mentions": ["peer-agent"],
+            },
+        ),
+    ]
+    _, _, delivered = _run_sse_loop_with_events(events, monkeypatch=monkeypatch)
+    assert delivered == []
+
+
+def test_channel_delivers_prompts_that_merely_start_with_progress_words(monkeypatch):
+    """A legitimate prompt like '@peer-agent Working-state cleanup proposal' must land.
+
+    The fallback progress regex must be anchored — otherwise user messages that
+    happen to start with Working/Processing/Thinking/Received would be dropped
+    silently. Regression for PR #70 review (2026-04-18).
+    """
+
+    events = [
+        (
+            "message",
+            {
+                "id": "real-prompt-1",
+                "content": "@peer-agent Working-state cleanup proposal",
+                "author": {"id": "user-1", "name": "alex", "type": "user"},
+                "mentions": ["peer-agent"],
+            },
+        ),
+    ]
+    _, _, delivered = _run_sse_loop_with_events(events, monkeypatch=monkeypatch)
+    assert len(delivered) == 1
+    assert "Working-state cleanup proposal" in delivered[0].prompt
+
+
+def test_channel_delivers_processing_webhook_errors_prompt(monkeypatch):
+    """`Processing webhook errors` is a real user prompt, not a progress marker."""
+
+    events = [
+        (
+            "message",
+            {
+                "id": "real-prompt-2",
+                "content": "@peer-agent Processing webhook errors in the dispatch queue",
+                "author": {"id": "user-1", "name": "alex", "type": "user"},
+                "mentions": ["peer-agent"],
+            },
+        ),
+    ]
+    _, _, delivered = _run_sse_loop_with_events(events, monkeypatch=monkeypatch)
+    assert len(delivered) == 1
+    assert "Processing webhook errors" in delivered[0].prompt
+
+
+def test_channel_delivers_thinking_through_issue_prompt(monkeypatch):
+    """`Thinking through this API issue` must be delivered, not suppressed."""
+
+    events = [
+        (
+            "message",
+            {
+                "id": "real-prompt-3",
+                "content": "@peer-agent Thinking through this API issue",
+                "author": {"id": "user-1", "name": "alex", "type": "user"},
+                "mentions": ["peer-agent"],
+            },
+        ),
+    ]
+    _, _, delivered = _run_sse_loop_with_events(events, monkeypatch=monkeypatch)
+    assert len(delivered) == 1
+    assert "Thinking through this API issue" in delivered[0].prompt
+
+
+def test_channel_delivers_message_updated_final(monkeypatch):
+    """When hermes streams a final payload via message_updated we deliver it."""
+
+    placeholder = {
+        "id": "hermes-1",
+        "content": "Working…",
+        "author": {"id": "agent-2", "name": "frontend_sentinel", "type": "agent"},
+        "mentions": ["peer-agent"],
+        "metadata": {
+            "streaming_reply": {"enabled": True, "final": False, "runtime": "hermes_sdk"},
+        },
+    }
+    final_update = {
+        "id": "hermes-1",
+        "content": "@peer-agent here is the real reply",
+        "author": {"id": "agent-2", "name": "frontend_sentinel", "type": "agent"},
+        "mentions": ["peer-agent"],
+        "metadata": {
+            "streaming_reply": {"enabled": True, "final": True, "runtime": "hermes_sdk"},
+        },
+    }
+    events = [("message", placeholder), ("message_updated", final_update)]
+    _, _, delivered = _run_sse_loop_with_events(events, monkeypatch=monkeypatch)
+    assert [e.message_id for e in delivered] == ["hermes-1"]
+    assert delivered[0].prompt == "here is the real reply"
+
+
+def test_channel_skips_message_updated_for_already_delivered(monkeypatch):
+    """Once a final payload is delivered, subsequent updates for that id do not re-wake."""
+
+    payload = {
+        "id": "msg-dup",
+        "content": "@peer-agent please review",
+        "author": {"id": "user-1", "name": "alex", "type": "user"},
+        "mentions": ["peer-agent"],
+    }
+    events = [("message", payload), ("message_updated", payload)]
+    _, _, delivered = _run_sse_loop_with_events(events, monkeypatch=monkeypatch)
+    assert [e.message_id for e in delivered] == ["msg-dup"]
 
 
 def test_channel_processing_status_can_be_disabled():
@@ -212,9 +461,9 @@ def test_channel_get_messages_returns_pending_mentions():
             message_id="incoming-123",
             parent_id=None,
             conversation_id=None,
-            author="madtank",
+            author="alex",
             prompt="please check this",
-            raw_content="@anvil please check this",
+            raw_content="@peer-agent please check this",
             created_at="2026-04-15T23:00:00Z",
             space_id="space-123",
         )
@@ -238,9 +487,9 @@ def test_channel_notification_metadata_matches_claude_channel_contract():
                 message_id="incoming-123",
                 parent_id=None,
                 conversation_id="conversation-ignored",
-                author="madtank",
+                author="alex",
                 prompt="please check this",
-                raw_content="@anvil please check this",
+                raw_content="@peer-agent please check this",
                 created_at=None,
                 space_id="space-123",
             )
@@ -289,11 +538,11 @@ def test_listener_treats_parent_reply_as_delivery_signal():
         "id": "reply-1",
         "content": "I looked at this",
         "parent_id": "agent-message-1",
-        "author": {"id": "other-agent", "name": "orion", "type": "agent"},
+        "author": {"id": "other-agent", "name": "demo-agent", "type": "agent"},
         "mentions": [],
     }
 
-    assert _should_respond(data, "anvil", "agent-123", reply_anchor_ids=anchors) is True
+    assert _should_respond(data, "peer-agent", "agent-123", reply_anchor_ids=anchors) is True
 
 
 def test_listener_treats_conversation_reply_as_delivery_signal():
@@ -302,23 +551,23 @@ def test_listener_treats_conversation_reply_as_delivery_signal():
         "id": "reply-1",
         "content": "I looked at this",
         "conversation_id": "agent-message-1",
-        "author": {"id": "other-agent", "name": "orion", "type": "agent"},
+        "author": {"id": "other-agent", "name": "demo-agent", "type": "agent"},
         "mentions": [],
     }
 
-    assert _should_respond(data, "anvil", "agent-123", reply_anchor_ids=anchors) is True
+    assert _should_respond(data, "peer-agent", "agent-123", reply_anchor_ids=anchors) is True
 
 
 def test_listener_tracks_self_authored_messages_without_responding():
     anchors: set[str] = set()
     data = {
         "id": "agent-message-1",
-        "content": "@orion please check this",
-        "author": {"id": "agent-123", "name": "anvil", "type": "agent"},
-        "mentions": ["orion"],
+        "content": "@demo-agent please check this",
+        "author": {"id": "agent-123", "name": "peer-agent", "type": "agent"},
+        "mentions": ["demo-agent"],
     }
 
-    assert _is_self_authored(data, "anvil", "agent-123") is True
+    assert _is_self_authored(data, "peer-agent", "agent-123") is True
     _remember_reply_anchor(anchors, data["id"])
-    assert _should_respond(data, "anvil", "agent-123", reply_anchor_ids=anchors) is False
+    assert _should_respond(data, "peer-agent", "agent-123", reply_anchor_ids=anchors) is False
     assert anchors == {"agent-message-1"}
