@@ -8,8 +8,8 @@ Collapses the 15-step manual flow documented in
         --description "Playful ax-cli helper" \\
         --model codex:gpt-5.4 \\
         --audience both \\
-        --save-to /home/ax-agent/agents/axolotl \\
-        --profile next-axolotl
+        --save-to ~/agents/axolotl \\
+        --profile axolotl
 
 What it does, in order:
 
