@@ -16,6 +16,7 @@ from .commands import (
     context,
     credentials,
     events,
+    gateway,
     handoff,
     keys,
     listen,
@@ -42,6 +43,7 @@ app.add_typer(reminders.app, name="reminders")
 app.add_typer(tasks.app, name="tasks")
 app.add_typer(events.app, name="events")
 app.add_typer(listen.app, name="listen")
+app.add_typer(gateway.app, name="gateway")
 app.add_typer(context.app, name="context")
 app.add_typer(watch.app, name="watch")
 app.add_typer(upload.app, name="upload")

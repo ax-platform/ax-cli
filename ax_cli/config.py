@@ -400,6 +400,9 @@ def diagnose_auth_config(*, env_name: str | None = None, explicit_space_id: str 
     selected_user_env = normalized_env or _resolve_user_env()
     user_cfg = _load_user_config(selected_user_env)
     user_path = _user_config_path(selected_user_env)
+    explicit_cfg_env = os.environ.get("AX_CONFIG_FILE")
+    explicit_cfg_path = Path(explicit_cfg_env).expanduser() if explicit_cfg_env else None
+    explicit_cfg = _load_runtime_config_file(explicit_cfg_env)
 
     local_dir = _local_config_dir()
     local_path = (local_dir / "config.toml") if local_dir else None
@@ -533,6 +536,32 @@ def diagnose_auth_config(*, env_name: str | None = None, explicit_space_id: str 
                     effective["principal_type"] = "agent"
                     field_sources["principal_type"] = "local_config"
 
+    if explicit_cfg_path:
+        sources.append(
+            _source_record(
+                "runtime_config",
+                path=explicit_cfg_path,
+                exists=explicit_cfg_path.exists(),
+                used=bool(explicit_cfg),
+                keys=list(explicit_cfg.keys()) if explicit_cfg else None,
+            )
+        )
+        if explicit_cfg:
+            runtime_source = f"runtime_config:{explicit_cfg_path}"
+            apply_cfg(explicit_cfg, runtime_source)
+            if "principal_type" not in explicit_cfg and _has_agent_identity(explicit_cfg):
+                effective["principal_type"] = "agent"
+                field_sources["principal_type"] = runtime_source
+    else:
+        sources.append(
+            _source_record(
+                "runtime_config",
+                path=None,
+                exists=False,
+                used=False,
+            )
+        )
+
     used_env_keys: list[str] = []
     if not normalized_env:
         env_overrides = {
@@ -591,6 +620,7 @@ def diagnose_auth_config(*, env_name: str | None = None, explicit_space_id: str 
         "ok": not problems,
         "selected_env": normalized_env or selected_user_env,
         "selected_profile": selected_profile_name,
+        "runtime_config": str(explicit_cfg_path) if explicit_cfg_path else None,
         "effective": {
             "auth_source": field_sources.get("token"),
             "token_kind": token_kind,

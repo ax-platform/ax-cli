@@ -538,7 +538,7 @@ def test_listener_treats_parent_reply_as_delivery_signal():
         "id": "reply-1",
         "content": "I looked at this",
         "parent_id": "agent-message-1",
-        "author": {"id": "other-agent", "name": "demo-agent", "type": "agent"},
+        "author": {"id": "user-1", "name": "Jacob", "type": "user"},
         "mentions": [],
     }
 
@@ -551,11 +551,50 @@ def test_listener_treats_conversation_reply_as_delivery_signal():
         "id": "reply-1",
         "content": "I looked at this",
         "conversation_id": "agent-message-1",
-        "author": {"id": "other-agent", "name": "demo-agent", "type": "agent"},
+        "author": {"id": "user-1", "name": "Jacob", "type": "user"},
         "mentions": [],
     }
 
     assert _should_respond(data, "peer-agent", "agent-123", reply_anchor_ids=anchors) is True
+
+
+def test_listener_does_not_auto_reply_to_other_agent_thread_reply_without_mention():
+    anchors = {"agent-message-1"}
+    data = {
+        "id": "reply-1",
+        "content": "I looked at this",
+        "parent_id": "agent-message-1",
+        "author": {"id": "other-agent", "name": "demo-agent", "type": "agent"},
+        "mentions": [],
+    }
+
+    assert _should_respond(data, "peer-agent", "agent-123", reply_anchor_ids=anchors) is False
+
+
+def test_listener_still_replies_to_other_agent_thread_reply_when_explicitly_mentioned():
+    anchors = {"agent-message-1"}
+    data = {
+        "id": "reply-1",
+        "content": "@peer-agent I looked at this",
+        "parent_id": "agent-message-1",
+        "author": {"id": "other-agent", "name": "demo-agent", "type": "agent"},
+        "mentions": ["peer-agent"],
+    }
+
+    assert _should_respond(data, "peer-agent", "agent-123", reply_anchor_ids=anchors) is True
+
+
+def test_listener_ignores_thread_parent_mentions_from_other_agents():
+    anchors = {"agent-message-1"}
+    data = {
+        "id": "reply-1",
+        "content": "continuing the thread",
+        "parent_id": "agent-message-1",
+        "sender_type": "agent",
+        "mentions": [{"agent_name": "peer-agent", "source": "thread_parent"}],
+    }
+
+    assert _should_respond(data, "peer-agent", "agent-123", reply_anchor_ids=anchors) is False
 
 
 def test_listener_tracks_self_authored_messages_without_responding():

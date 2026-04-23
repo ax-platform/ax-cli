@@ -436,6 +436,14 @@ class AxClient:
         *,
         agent_name: str | None = None,
         space_id: str | None = None,
+        activity: str | None = None,
+        tool_name: str | None = None,
+        progress: dict | None = None,
+        detail: dict | None = None,
+        reason: str | None = None,
+        error_message: str | None = None,
+        retry_after_seconds: int | None = None,
+        parent_message_id: str | None = None,
     ) -> dict:
         """POST /api/v1/agents/processing-status.
 
@@ -446,10 +454,77 @@ class AxClient:
         body: dict = {"message_id": message_id, "status": status}
         if agent_name:
             body["agent_name"] = agent_name
+        optional_fields = {
+            "activity": activity,
+            "tool_name": tool_name,
+            "progress": progress,
+            "detail": detail,
+            "reason": reason,
+            "error_message": error_message,
+            "retry_after_seconds": retry_after_seconds,
+            "parent_message_id": parent_message_id,
+        }
+        for key, value in optional_fields.items():
+            if value is not None:
+                body[key] = value
         headers = self._with_agent(self.agent_id)
         if space_id:
             headers["X-Space-Id"] = space_id
         r = self._http.post("/api/v1/agents/processing-status", json=body, headers=headers)
+        r.raise_for_status()
+        return self._parse_json(r)
+
+    def record_tool_call(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        space_id: str | None = None,
+        tool_action: str | None = None,
+        resource_uri: str | None = None,
+        arguments_hash: str | None = None,
+        kind: str | None = None,
+        arguments: dict | None = None,
+        initial_data: dict | None = None,
+        status: str = "success",
+        duration_ms: int | None = None,
+        agent_name: str | None = None,
+        agent_id: str | None = None,
+        message_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> dict:
+        """POST /api/v1/tool-calls.
+
+        Records a tool-call audit event from an authenticated agent runtime.
+        The backend stores it durably and fans out progress/tool-call SSE so
+        the operator UI can show richer in-flight activity.
+        """
+        body: dict = {
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+            "status": status,
+        }
+        optional_fields = {
+            "space_id": space_id,
+            "tool_action": tool_action,
+            "resource_uri": resource_uri,
+            "arguments_hash": arguments_hash,
+            "kind": kind,
+            "arguments": arguments,
+            "initial_data": initial_data,
+            "duration_ms": duration_ms,
+            "agent_name": agent_name,
+            "agent_id": agent_id,
+            "message_id": message_id,
+            "correlation_id": correlation_id,
+        }
+        for key, value in optional_fields.items():
+            if value is not None:
+                body[key] = value
+        headers = self._with_agent(agent_id)
+        if space_id:
+            headers["X-Space-Id"] = space_id
+        r = self._http.post("/api/v1/tool-calls", json=body, headers=headers)
         r.raise_for_status()
         return self._parse_json(r)
 

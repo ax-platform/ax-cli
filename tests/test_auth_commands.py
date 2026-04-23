@@ -232,6 +232,7 @@ def test_auth_doctor_json_outputs_diagnostics(monkeypatch):
             "ok": True,
             "selected_env": env_name,
             "selected_profile": None,
+            "runtime_config": "/tmp/codex/.ax/config.toml",
             "effective": {
                 "auth_source": "user_login:dev",
                 "token_kind": "user_pat",
@@ -267,3 +268,29 @@ def test_auth_doctor_json_outputs_diagnostics(monkeypatch):
     assert payload["details"] == []
     assert payload["effective"]["auth_source"] == "user_login:dev"
     assert payload["effective"]["space_id"] == "space-1"
+
+
+def test_auth_whoami_reports_runtime_config(monkeypatch, tmp_path):
+    runtime_config = tmp_path / "runtime-config.toml"
+    runtime_config.write_text("")
+    monkeypatch.setenv("AX_CONFIG_FILE", str(runtime_config))
+
+    class FakeClient:
+        def whoami(self):
+            return {
+                "id": "user-1",
+                "bound_agent": {
+                    "default_space_id": "space-1",
+                },
+            }
+
+    monkeypatch.setattr(auth, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(auth, "resolve_agent_name", lambda *, client: "codex")
+    monkeypatch.setattr(auth, "_local_config_dir", lambda: None)
+
+    result = runner.invoke(app, ["auth", "whoami", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["runtime_config"] == str(runtime_config)
+    assert payload["resolved_agent"] == "codex"

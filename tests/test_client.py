@@ -217,6 +217,123 @@ def test_mark_all_messages_read_calls_backend_endpoint():
     assert client._http.post.call_args.args[0] == "/api/v1/messages/mark-all-read"
 
 
+def test_record_tool_call_posts_audit_payload():
+    client = AxClient("https://example.com", "legacy-token", agent_id="agent-123", agent_name="codex")
+    response = httpx.Response(
+        202,
+        json={"ok": True, "tool_call_id": "tool-1"},
+        request=httpx.Request("POST", "https://example.com/api/v1/tool-calls"),
+    )
+    client._http.post = MagicMock(return_value=response)
+
+    result = client.record_tool_call(
+        tool_name="shell",
+        tool_call_id="tool-1",
+        space_id="space-123",
+        tool_action="wc -c README.md",
+        arguments={"command": "wc -c README.md"},
+        initial_data={"output": "28358 README.md"},
+        status="success",
+        message_id="msg-1",
+        correlation_id="msg-1",
+    )
+
+    assert result["tool_call_id"] == "tool-1"
+    assert client._http.post.call_args.args[0] == "/api/v1/tool-calls"
+    assert client._http.post.call_args.kwargs["json"] == {
+        "tool_name": "shell",
+        "tool_call_id": "tool-1",
+        "status": "success",
+        "space_id": "space-123",
+        "tool_action": "wc -c README.md",
+        "arguments": {"command": "wc -c README.md"},
+        "initial_data": {"output": "28358 README.md"},
+        "message_id": "msg-1",
+        "correlation_id": "msg-1",
+    }
+
+
+def test_set_agent_processing_status_includes_optional_fields():
+    client = AxClient("https://example.com", "legacy-token", agent_id="agent-123", agent_name="codex")
+    response = httpx.Response(
+        200,
+        json={"ok": True, "event": "agent_processing", "status": "processing"},
+        request=httpx.Request("POST", "https://example.com/api/v1/agents/processing-status"),
+    )
+    client._http.post = MagicMock(return_value=response)
+
+    result = client.set_agent_processing_status(
+        "msg-1",
+        "processing",
+        agent_name="codex",
+        space_id="space-123",
+        activity="Running command",
+        tool_name="shell",
+        progress={"current": 1, "total": 3, "unit": "steps"},
+        detail={"command": "pwd"},
+        reason="gateway_runtime",
+        error_message=None,
+        retry_after_seconds=5,
+        parent_message_id="parent-1",
+    )
+
+    assert result["status"] == "processing"
+    assert client._http.post.call_args.args[0] == "/api/v1/agents/processing-status"
+    assert client._http.post.call_args.kwargs["json"] == {
+        "message_id": "msg-1",
+        "status": "processing",
+        "agent_name": "codex",
+        "activity": "Running command",
+        "tool_name": "shell",
+        "progress": {"current": 1, "total": 3, "unit": "steps"},
+        "detail": {"command": "pwd"},
+        "reason": "gateway_runtime",
+        "retry_after_seconds": 5,
+        "parent_message_id": "parent-1",
+    }
+
+
+def test_set_agent_processing_status_posts_rich_payload():
+    client = AxClient("https://example.com", "legacy-token", agent_id="agent-123", agent_name="codex")
+    response = httpx.Response(
+        202,
+        json={"ok": True},
+        request=httpx.Request("POST", "https://example.com/api/v1/agents/processing-status"),
+    )
+    client._http.post = MagicMock(return_value=response)
+
+    result = client.set_agent_processing_status(
+        "msg-1",
+        "tool_call",
+        agent_name="codex",
+        space_id="space-123",
+        activity="Running tests",
+        tool_name="shell",
+        progress={"current": 1, "total": 3, "unit": "steps"},
+        detail={"command": "pytest tests/test_gateway_commands.py"},
+        reason="tool started",
+        error_message="",
+        retry_after_seconds=5,
+        parent_message_id="parent-1",
+    )
+
+    assert result["ok"] is True
+    assert client._http.post.call_args.args[0] == "/api/v1/agents/processing-status"
+    assert client._http.post.call_args.kwargs["json"] == {
+        "message_id": "msg-1",
+        "status": "tool_call",
+        "agent_name": "codex",
+        "activity": "Running tests",
+        "tool_name": "shell",
+        "progress": {"current": 1, "total": 3, "unit": "steps"},
+        "detail": {"command": "pytest tests/test_gateway_commands.py"},
+        "reason": "tool started",
+        "error_message": "",
+        "retry_after_seconds": 5,
+        "parent_message_id": "parent-1",
+    }
+
+
 def test_list_tasks_passes_explicit_space_id():
     client = AxClient("https://example.com", "legacy-token")
     response = httpx.Response(

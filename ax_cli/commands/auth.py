@@ -1,5 +1,6 @@
 """ax auth — identity and token management."""
 
+import os
 from pathlib import Path
 
 import httpx
@@ -192,6 +193,8 @@ def doctor(
         console.print(f"  space_id         = {effective.get('space_id')} ({effective.get('space_source')})")
         console.print(f"  agent_name       = {effective.get('agent_name')} ({effective.get('agent_name_source')})")
         console.print(f"  agent_id         = {effective.get('agent_id')} ({effective.get('agent_id_source')})")
+        if data.get("runtime_config"):
+            console.print(f"  runtime_config   = {data['runtime_config']}")
         if data.get("selected_env"):
             console.print(f"  selected_env     = {data['selected_env']}")
         if data.get("selected_profile"):
@@ -235,6 +238,9 @@ def whoami(as_json: bool = JSON_OPTION):
     local = _local_config_dir()
     if local and (local / "config.toml").exists():
         data["local_config"] = str(local / "config.toml")
+    runtime_config = os.environ.get("AX_CONFIG_FILE")
+    if runtime_config:
+        data["runtime_config"] = runtime_config
 
     if as_json:
         print_json(data)

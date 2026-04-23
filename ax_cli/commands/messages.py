@@ -34,12 +34,63 @@ def _processing_status_from_event(message_id: str, event_type: str | None, data:
     status = str(data.get("status") or "").strip()
     if not status:
         return None
-    return {
+    event = {
         "message_id": event_message_id,
         "status": status,
         "agent_id": data.get("agent_id"),
         "agent_name": data.get("agent_name"),
     }
+    for field in (
+        "activity",
+        "tool_name",
+        "progress",
+        "detail",
+        "reason",
+        "error_message",
+        "retry_after_seconds",
+        "parent_message_id",
+    ):
+        if data.get(field) is not None:
+            event[field] = data.get(field)
+    return event
+
+
+def _processing_status_text(status_event: dict, *, wait_label: str = "reply") -> str:
+    """Render tooling-side delivery/progress in human-friendly language."""
+    status = str(status_event.get("status") or "").strip().lower()
+    agent_name = str(status_event.get("agent_name") or wait_label).strip().lstrip("@")
+    target = f"@{agent_name}" if agent_name else wait_label
+    activity = str(status_event.get("activity") or "").strip()
+    tool_name = str(status_event.get("tool_name") or "").strip()
+
+    if status == "accepted":
+        base = f"tooling: {target} acknowledged the message"
+    elif status in {"started", "claimed", "forwarded"}:
+        base = f"tooling: {target} picked up the message"
+    elif status in {"queued", "queued locally"}:
+        base = f"tooling: {target} queued the message"
+    elif status in {"working", "processing"}:
+        base = f"tooling: {target} is working"
+    elif status == "thinking":
+        base = f"tooling: {target} is thinking"
+    elif status in {"tool_use", "tool_call"}:
+        base = f"tooling: {target} is using tools"
+    elif status == "tool_complete":
+        base = f"tooling: {target} finished a tool step"
+    elif status == "streaming":
+        base = f"tooling: {target} is streaming a reply"
+    elif status == "completed":
+        base = f"tooling: {target} finished processing"
+    elif status == "error":
+        base = f"tooling: {target} hit an error"
+    else:
+        base = f"tooling: {target} status={status}"
+
+    if activity:
+        return f"{base} — {activity}"
+    if tool_name:
+        return f"{base} — {tool_name}"
+    return base
 
 
 class _ProcessingStatusWatcher:
@@ -52,6 +103,8 @@ class _ProcessingStatusWatcher:
         self.message_id: str | None = None
         self.events: list[dict] = []
         self._queue: queue.Queue[dict] = queue.Queue()
+        self._pending: list[dict] = []
+        self._lock = threading.Lock()
         self._ready = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -64,7 +117,12 @@ class _ProcessingStatusWatcher:
         return self._ready.wait(timeout)
 
     def set_message_id(self, message_id: str) -> None:
-        self.message_id = message_id
+        with self._lock:
+            self.message_id = message_id
+            queued = [event for event in self._pending if event.get("message_id") == message_id]
+            self._pending = [event for event in self._pending if event.get("message_id") != message_id]
+        for event in queued:
+            self._queue.put(event)
 
     def close(self) -> None:
         self._stop.set()
@@ -79,6 +137,17 @@ class _ProcessingStatusWatcher:
             self.events.append(item)
             drained.append(item)
 
+    def _accept_status_event(self, status_event: dict) -> None:
+        with self._lock:
+            message_id = self.message_id
+            if not message_id:
+                self._pending.append(status_event)
+                if len(self._pending) > 100:
+                    self._pending = self._pending[-100:]
+                return
+        if status_event.get("message_id") == message_id:
+            self._queue.put(status_event)
+
     def _run(self) -> None:
         while not self._stop.is_set() and time.time() < self.deadline:
             try:
@@ -90,12 +159,14 @@ class _ProcessingStatusWatcher:
                     for event_type, data in _iter_sse(response):
                         if self._stop.is_set() or time.time() >= self.deadline:
                             return
-                        message_id = self.message_id
-                        if not message_id:
+                        if event_type != "agent_processing" or not isinstance(data, dict):
                             continue
-                        status = _processing_status_from_event(message_id, event_type, data)
+                        event_message_id = str(data.get("message_id") or data.get("source_message_id") or "")
+                        if not event_message_id:
+                            continue
+                        status = _processing_status_from_event(event_message_id, event_type, data)
                         if status:
-                            self._queue.put(status)
+                            self._accept_status_event(status)
             except httpx.ReadTimeout:
                 continue
             except (httpx.HTTPError, RuntimeError, AttributeError):
@@ -146,7 +217,7 @@ def _wait_for_reply_polling(
 ) -> dict | None:
     """Poll for a reply as a fallback when SSE is unavailable."""
     last_remaining = None
-    announced_processing: set[tuple[str | None, str]] = set()
+    announced_processing: set[tuple[str | None, str, str, str]] = set()
 
     while time.time() < deadline:
         remaining = int(deadline - time.time())
@@ -155,10 +226,15 @@ def _wait_for_reply_polling(
             for status_event in processing_watcher.drain():
                 status = str(status_event.get("status") or "")
                 agent_name = status_event.get("agent_name") or wait_label
-                key = (status_event.get("agent_id"), status)
+                key = (
+                    status_event.get("agent_id"),
+                    status,
+                    str(status_event.get("activity") or ""),
+                    str(status_event.get("tool_name") or ""),
+                )
                 if status and key not in announced_processing:
                     console.print(" " * 60, end="\r")
-                    console.print(f"  [cyan]@{str(agent_name).lstrip('@')} is {status}[/cyan]")
+                    console.print(f"  [cyan]{_processing_status_text(status_event, wait_label=agent_name)}[/cyan]")
                     announced_processing.add(key)
 
         try:
@@ -241,6 +317,46 @@ def _target_mention(to: str) -> str:
 
 def _starts_with_mention(content: str, mention: str) -> bool:
     return content.lstrip().lower().startswith(mention.lower())
+
+
+def _sender_label(message: dict) -> str | None:
+    display_name = str(message.get("display_name") or "").strip()
+    sender_type = str(message.get("sender_type") or "").strip()
+    if display_name:
+        if sender_type == "agent":
+            return f"@{display_name.lstrip('@')}"
+        return display_name
+    if sender_type:
+        return sender_type
+    return None
+
+
+def _gateway_reply_note(message: dict) -> str | None:
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("control_plane") != "gateway":
+        return None
+    gateway = metadata.get("gateway")
+    if not isinstance(gateway, dict):
+        return None
+
+    parts = ["via Gateway"]
+    gateway_id = str(gateway.get("gateway_id") or "").strip()
+    if gateway_id:
+        parts[0] = f"{parts[0]} {gateway_id[:8]}"
+
+    agent_name = str(gateway.get("agent_name") or "").strip()
+    if agent_name:
+        parts.append(f"agent=@{agent_name.lstrip('@')}")
+
+    runtime_type = str(gateway.get("runtime_type") or "").strip()
+    if runtime_type:
+        parts.append(f"runtime={runtime_type}")
+
+    transport = str(gateway.get("transport") or "").strip()
+    if transport:
+        parts.append(f"transport={transport}")
+
+    return " · ".join(parts)
 
 
 def _attachment_ref(
@@ -498,10 +614,18 @@ def send(
         if as_json:
             print_json(data)
         else:
-            console.print(f"[green]Sent.[/green] id={msg_id}")
+            sent_line = f"[green]Sent.[/green] id={msg_id}"
+            sender = _sender_label(msg)
+            if sender:
+                sent_line += f" as {sender}"
+            console.print(sent_line)
         return
 
-    console.print(f"[green]Sent.[/green] id={msg_id}")
+    sent_line = f"[green]Sent.[/green] id={msg_id}"
+    sender = _sender_label(msg)
+    if sender:
+        sent_line += f" as {sender}"
+    console.print(sent_line)
     wait_label = _target_mention("aX") if ask_ax else (_target_mention(to) if to else "reply")
     reply = _wait_for_reply(
         client,
@@ -519,6 +643,9 @@ def send(
             print_json({"sent": data, "reply": reply, "processing_statuses": processing_statuses})
         else:
             console.print(f"\n[bold cyan]aX:[/bold cyan] {reply.get('content', '')}")
+            gateway_note = _gateway_reply_note(reply)
+            if gateway_note:
+                console.print(f"[dim]{gateway_note}[/dim]")
     else:
         if as_json:
             print_json(

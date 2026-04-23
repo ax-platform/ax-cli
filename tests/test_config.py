@@ -356,6 +356,46 @@ class TestAuthDoctorDiagnostics:
         assert diagnostic["effective"]["host"] == "env.paxai.app"
         assert diagnostic["effective"]["principal_intent"] == "agent"
 
+    def test_explicit_runtime_config_reports_runtime_source(self, tmp_path, monkeypatch):
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        monkeypatch.setenv("AX_CONFIG_DIR", str(global_dir))
+
+        local_ax = tmp_path / ".ax"
+        local_ax.mkdir()
+        (local_ax / "config.toml").write_text(
+            'base_url = "https://next.paxai.app"\n'
+            'agent_name = "night_owl"\n'
+            'agent_id = "agent-night-owl"\n'
+            'space_id = "night-space"\n'
+        )
+        runtime_dir = tmp_path / "runtime"
+        runtime_dir.mkdir()
+        token_file = runtime_dir / "codex.pat"
+        token_file.write_text("axp_a_codex.secret")
+        runtime_config = runtime_dir / "config.toml"
+        runtime_config.write_text(
+            f'token_file = "{token_file.name}"\n'
+            'base_url = "https://paxai.app"\n'
+            'agent_name = "codex"\n'
+            'agent_id = "agent-codex"\n'
+            'space_id = "codex-space"\n'
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_CONFIG_FILE", str(runtime_config))
+
+        diagnostic = diagnose_auth_config()
+
+        assert diagnostic["ok"] is True
+        assert diagnostic["runtime_config"] == str(runtime_config)
+        assert diagnostic["effective"]["auth_source"] == f"runtime_config:{runtime_config}"
+        assert diagnostic["effective"]["base_url_source"] == f"runtime_config:{runtime_config}"
+        assert diagnostic["effective"]["agent_name"] == "codex"
+        assert diagnostic["effective"]["space_id"] == "codex-space"
+        runtime_source = next(source for source in diagnostic["sources"] if source["name"] == "runtime_config")
+        assert runtime_source["used"] is True
+        assert runtime_source["path"] == str(runtime_config)
+
     def test_unsafe_local_config_reports_ignored_reason_and_uses_profile(self, tmp_path, monkeypatch):
         global_dir = tmp_path / "global"
         global_dir.mkdir()
