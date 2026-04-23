@@ -1,6 +1,14 @@
-# CLAUDE.md
+# CLAUDE.md — ax-cli
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+> **Current state (read first, 2026-04-23)**
+>
+> | Target | Branch | URL | Gating |
+> |---|---|---|---|
+> | Local dev | any | local backend | none |
+> | Staging | `dev/staging` | https://dev.paxai.app | @orion merge review |
+> | Production | `main` | https://paxai.app | @madtank signoff + CI (PyPI as `axctl`) |
+>
+> **`aws/prod` is frozen legacy** — do not target. ax-cli ships via PyPI from `main`.
 
 ## What This Is
 
@@ -55,3 +63,9 @@ User login credentials are deliberately separate from runtime agent config:
 - Selection: `AX_ENV`, `AX_USER_ENV`, `axctl login --env`, and user-authored commands that take `--env`
 
 Do not put reusable user PATs in `.ax/config.toml` or `~/.ax/config.toml`. User PATs bootstrap and mint agent credentials; agent runtime work should use agent PAT profiles or project-local agent runtime config.
+
+## How to ship
+
+1. Branch off `dev/staging` (or `main` for tight hotfixes).
+2. PR against `main`. CI runs pytest + ruff. Merge → PyPI publish on tag.
+3. `ax-cli` does not use `aws/prod` — that branch exists for historical alignment only.
