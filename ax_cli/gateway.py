@@ -1389,12 +1389,12 @@ def _normalize_allowed_spaces_payload(payload: object) -> list[dict[str, Any]]:
 
 
 def _fetch_allowed_spaces_for_entry(entry: dict[str, Any]) -> list[dict[str, Any]] | None:
-    token_file = Path(str(entry.get("token_file") or "")).expanduser()
     base_url = _normalized_base_url(entry.get("base_url"))
-    if not token_file.exists() or not base_url:
+    if not base_url:
         return None
-    token = token_file.read_text().strip()
-    if not token:
+    try:
+        token = load_gateway_managed_agent_token(entry)
+    except ValueError:
         return None
     client = AxClient(
         base_url=base_url,
@@ -2189,10 +2189,30 @@ def annotate_runtime_health(
 
 
 def gateway_dir() -> Path:
-    path = _global_config_dir() / "gateway"
+    explicit = str(os.environ.get("AX_GATEWAY_DIR") or "").strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+    else:
+        root = _global_config_dir() / "gateway"
+        env_name = gateway_environment()
+        path = root if env_name is None else root / "envs" / env_name
     path.mkdir(parents=True, exist_ok=True)
     path.chmod(0o700)
     return path
+
+
+def gateway_environment() -> str | None:
+    raw = (
+        str(os.environ.get("AX_GATEWAY_ENV") or "").strip()
+        or str(os.environ.get("AX_USER_ENV") or "").strip()
+        or str(os.environ.get("AX_ENV") or "").strip()
+    )
+    if not raw:
+        return None
+    normalized = re.sub(r"[^a-z0-9_.-]+", "-", raw.lower()).strip(".-")
+    if not normalized or normalized in {"default", "user"}:
+        return None
+    return normalized
 
 
 def gateway_agents_dir() -> Path:
@@ -2239,6 +2259,24 @@ def agent_dir(name: str) -> Path:
 
 def agent_token_path(name: str) -> Path:
     return agent_dir(name) / "token"
+
+
+def load_gateway_managed_agent_token(entry: dict[str, Any]) -> str:
+    """Read a Gateway-managed runtime token and reject bootstrap credentials."""
+    token_file = Path(str(entry.get("token_file") or "")).expanduser()
+    if not token_file.exists():
+        raise ValueError(f"Gateway-managed token file is missing: {token_file}")
+    token = token_file.read_text().strip()
+    if not token:
+        raise ValueError(f"Gateway-managed token file is empty: {token_file}")
+    if token.startswith("axp_u_"):
+        raise ValueError(
+            "Gateway-managed agents require an agent-bound token. "
+            f"Refusing to use a user bootstrap PAT from {token_file}."
+        )
+    if not str(entry.get("agent_id") or "").strip():
+        raise ValueError("Gateway-managed agents require a bound agent_id before runtime use.")
+    return token
 
 
 def agent_pending_queue_path(name: str) -> Path:
@@ -2394,6 +2432,8 @@ def daemon_status() -> dict[str, Any]:
     return {
         "pid": pid,
         "running": running,
+        "gateway_dir": str(gateway_dir()),
+        "gateway_environment": gateway_environment(),
         "registry_path": str(registry_path()),
         "session_path": str(session_path()),
         "registry": registry,
@@ -2896,8 +2936,7 @@ def _build_hermes_sentinel_cmd(entry: dict[str, Any]) -> list[str]:
 
 def _build_hermes_sentinel_env(entry: dict[str, Any]) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in ENV_DENYLIST}
-    token_file = Path(str(entry.get("token_file") or "")).expanduser()
-    token = token_file.read_text().strip() if token_file.exists() else ""
+    token = load_gateway_managed_agent_token(entry)
     workdir = _hermes_sentinel_workdir(entry)
     agents_dir = _agents_dir_for_entry(entry)
     hermes_repo = str(entry.get("hermes_repo_path") or "").strip() or "/home/ax-agent/shared/repos/hermes-agent"
@@ -3149,7 +3188,7 @@ class ManagedAgentRuntime:
         self.logger(f"{self.name}: {message}")
 
     def _token(self) -> str:
-        return self.token_file.read_text().strip()
+        return load_gateway_managed_agent_token(self.entry)
 
     def _new_client(self):
         return self.client_factory(
@@ -3313,7 +3352,6 @@ class ManagedAgentRuntime:
     def _start_hermes_sentinel_process(self, *, runtime_instance_id: str) -> None:
         workdir = _hermes_sentinel_workdir(self.entry)
         script = _hermes_sentinel_script(self.entry)
-        token_file = Path(str(self.entry.get("token_file") or "")).expanduser()
         if not script.exists():
             error = f"Hermes sentinel script not found: {script}"
             self._update_state(
@@ -3321,8 +3359,10 @@ class ManagedAgentRuntime:
             )
             record_gateway_activity("runtime_error", entry=self.entry, error=error)
             return
-        if not token_file.exists() or not token_file.read_text().strip():
-            error = f"Gateway-managed token file is missing or empty: {token_file}"
+        try:
+            load_gateway_managed_agent_token(self.entry)
+        except ValueError as exc:
+            error = str(exc)
             self._update_state(
                 effective_state="error", current_status="error", current_activity=error, last_error=error
             )

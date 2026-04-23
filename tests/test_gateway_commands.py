@@ -175,6 +175,28 @@ def test_gateway_login_saves_gateway_session(monkeypatch, tmp_path):
     assert recent[-1]["username"] == "madtank"
 
 
+def test_gateway_state_dir_isolated_by_environment(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("AX_GATEWAY_ENV", "dev/staging")
+
+    assert gateway_core.gateway_environment() == "dev-staging"
+    assert gateway_core.gateway_dir() == config_dir / "gateway" / "envs" / "dev-staging"
+    assert gateway_core.session_path() == config_dir / "gateway" / "envs" / "dev-staging" / "session.json"
+
+
+def test_gateway_state_dir_allows_explicit_override(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    custom_dir = tmp_path / "custom-gateway"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("AX_GATEWAY_ENV", "prod")
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(custom_dir))
+
+    assert gateway_core.gateway_environment() == "prod"
+    assert gateway_core.gateway_dir() == custom_dir
+    assert gateway_core.registry_path() == custom_dir / "registry.json"
+
+
 def test_gateway_run_refuses_second_live_daemon(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
@@ -427,7 +449,9 @@ def test_gateway_start_rolls_back_daemon_when_ui_start_fails(monkeypatch, tmp_pa
     monkeypatch.setattr(gateway_cmd, "active_gateway_pid", lambda: state["daemon_pid"])
     monkeypatch.setattr(gateway_cmd, "active_gateway_ui_pid", lambda: state["ui_pid"])
     monkeypatch.setattr(gateway_cmd, "_tail_log_lines", lambda path, lines=12: "address already in use")
-    monkeypatch.setattr(gateway_cmd, "_terminate_pids", lambda pids, timeout=3.0: (terminated.append(list(pids)) or (list(pids), [])))
+    monkeypatch.setattr(
+        gateway_cmd, "_terminate_pids", lambda pids, timeout=3.0: terminated.append(list(pids)) or (list(pids), [])
+    )
     monkeypatch.setattr(gateway_core, "clear_gateway_pid", lambda pid=None: cleared.append(pid))
 
     result = runner.invoke(app, ["gateway", "start", "--no-open"])
@@ -709,7 +733,9 @@ def test_gateway_approvals_approve_updates_binding(monkeypatch, tmp_path):
     attestation = gateway_core.evaluate_runtime_attestation(registry, drifted)
     gateway_core.save_gateway_registry(registry)
 
-    result = runner.invoke(app, ["gateway", "approvals", "approve", attestation["approval_id"], "--scope", "gateway", "--json"])
+    result = runner.invoke(
+        app, ["gateway", "approvals", "approve", attestation["approval_id"], "--scope", "gateway", "--json"]
+    )
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
@@ -766,6 +792,51 @@ def test_sanitize_exec_env_strips_ax_credentials(monkeypatch):
     assert env["AX_MENTION_CONTENT"] == "hello"
     assert env["AX_GATEWAY_AGENT_NAME"] == "echo-bot"
     assert env["OPENAI_API_KEY"] == "keep-me"
+
+
+def test_gateway_managed_token_loader_rejects_user_bootstrap_pat(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_u_user.secret")
+
+    with pytest.raises(ValueError, match="agent-bound token"):
+        gateway_core.load_gateway_managed_agent_token(
+            {
+                "name": "echo-bot",
+                "agent_id": "agent-1",
+                "token_file": str(token_file),
+            }
+        )
+
+
+def test_gateway_managed_token_loader_requires_bound_agent_id(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+
+    with pytest.raises(ValueError, match="bound agent_id"):
+        gateway_core.load_gateway_managed_agent_token(
+            {
+                "name": "echo-bot",
+                "token_file": str(token_file),
+            }
+        )
+
+
+def test_hermes_sentinel_env_rejects_user_bootstrap_pat(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_u_user.secret")
+
+    with pytest.raises(ValueError, match="agent-bound token"):
+        gateway_core._build_hermes_sentinel_env(
+            {
+                "name": "dev_sentinel",
+                "agent_id": "agent-1",
+                "space_id": "space-1",
+                "base_url": "https://paxai.app",
+                "runtime_type": "hermes_sentinel",
+                "token_file": str(token_file),
+                "workdir": str(tmp_path / "dev_sentinel"),
+            }
+        )
 
 
 def test_managed_echo_runtime_processes_message(tmp_path, monkeypatch):
@@ -1182,7 +1253,9 @@ def test_passive_runtime_snapshot_rehydrates_manual_queue_updates(tmp_path, monk
 
 
 def test_annotate_runtime_health_marks_stale_after_missed_heartbeat():
-    old_seen = (datetime.now(timezone.utc) - timedelta(seconds=gateway_core.RUNTIME_STALE_AFTER_SECONDS + 5)).isoformat()
+    old_seen = (
+        datetime.now(timezone.utc) - timedelta(seconds=gateway_core.RUNTIME_STALE_AFTER_SECONDS + 5)
+    ).isoformat()
 
     snapshot = gateway_core.annotate_runtime_health(
         {
@@ -1226,7 +1299,9 @@ def test_annotate_runtime_health_derives_identity_space_snapshot(monkeypatch, tm
             "install_id": "inst-identity-1",
         }
     ]
-    gateway_core.ensure_gateway_identity_binding(registry, registry["agents"][0], session=gateway_core.load_gateway_session())
+    gateway_core.ensure_gateway_identity_binding(
+        registry, registry["agents"][0], session=gateway_core.load_gateway_session()
+    )
 
     snapshot = gateway_core.annotate_runtime_health(registry["agents"][0], registry=registry)
 
@@ -1469,7 +1544,11 @@ def test_ollama_setup_status_recommends_recent_local_chat_model(monkeypatch):
                     {
                         "name": "nemotron-3-nano:latest",
                         "modified_at": "2025-12-16T14:03:52.946489046-08:00",
-                        "details": {"family": "nemotron_h_moe", "families": ["nemotron_h_moe"], "parameter_size": "31.6B"},
+                        "details": {
+                            "family": "nemotron_h_moe",
+                            "families": ["nemotron_h_moe"],
+                            "parameter_size": "31.6B",
+                        },
                     },
                     {
                         "name": "gemma4:latest",
@@ -1891,7 +1970,10 @@ def test_gateway_ui_handler_supports_agent_mutations(monkeypatch, tmp_path):
             assert tested_payload["target_agent"] == "ui-bot"
             assert tested_payload["author"] == "agent"
             assert tested_payload["sender_agent"].startswith("switchboard-")
-            assert tested_payload["content"] == "@ui-bot Reply with exactly: Gateway test OK. Then mention which local model answered."
+            assert (
+                tested_payload["content"]
+                == "@ui-bot Reply with exactly: Gateway test OK. Then mention which local model answered."
+            )
 
             doctored = client.post("/api/agents/ui-bot/doctor", json={})
             assert doctored.status_code == 201
@@ -2156,6 +2238,45 @@ def test_gateway_agents_send_uses_managed_identity(monkeypatch, tmp_path):
     assert recent[-1]["event"] == "manual_message_sent"
 
 
+def test_gateway_agents_send_rejects_user_bootstrap_pat(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "codex",
+        }
+    )
+    token_file = tmp_path / "sender.token"
+    token_file.write_text("axp_u_user.secret")
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "sender-bot",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "inbox",
+            "desired_state": "running",
+            "effective_state": "running",
+            "token_file": str(token_file),
+            "transport": "gateway",
+            "credential_source": "gateway",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    result = runner.invoke(app, ["gateway", "agents", "send", "sender-bot", "hello there", "--to", "codex"])
+
+    assert result.exit_code == 1, result.output
+    assert "agent-bound token" in result.output
+    assert "user" in result.output
+    assert "bootstrap PAT" in result.output
+
+
 def test_gateway_agents_send_acknowledges_pending_inbox_message(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
@@ -2263,7 +2384,9 @@ def test_gateway_agents_send_blocks_identity_mismatch(monkeypatch, tmp_path):
             "install_id": "inst-sender-1",
         }
     ]
-    gateway_core.ensure_gateway_identity_binding(registry, registry["agents"][0], session=gateway_core.load_gateway_session())
+    gateway_core.ensure_gateway_identity_binding(
+        registry, registry["agents"][0], session=gateway_core.load_gateway_session()
+    )
     registry["identity_bindings"][0]["acting_identity"]["agent_name"] = "night_owl"
     gateway_core.save_gateway_registry(registry)
     monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
@@ -2431,7 +2554,9 @@ def test_gateway_status_payload_surfaces_alerts(monkeypatch, tmp_path):
             "runtime_type": "exec",
             "desired_state": "running",
             "effective_state": "running",
-            "last_seen_at": (datetime.now(timezone.utc) - timedelta(seconds=gateway_core.RUNTIME_STALE_AFTER_SECONDS + 5)).isoformat(),
+            "last_seen_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=gateway_core.RUNTIME_STALE_AFTER_SECONDS + 5)
+            ).isoformat(),
             "backlog_depth": 2,
             "last_error": None,
             "token_file": "/tmp/stale-token",

@@ -22,6 +22,12 @@ Gateway keeps those pieces, but moves operator management into one place:
 - Show liveness, queue state, activity, and tool signals.
 - Provide a single CLI/UI for dev, staging, and production operators.
 
+Use separate Gateway state per environment. `AX_GATEWAY_ENV=dev/staging` stores
+state under `~/.ax/gateway/envs/dev-staging`, while `AX_GATEWAY_ENV=prod`
+stores a separate registry, session, PID file, UI state, queues, and agent token
+files. `AX_GATEWAY_DIR=/path/to/gateway-state` is available when a deployment
+needs an explicit state root.
+
 ## Current PR88 State
 
 PR88 has enough Gateway plumbing to register agents, mint tokens, show status,
@@ -79,6 +85,10 @@ Gateway should supervise the long-running listener process. The listener still
 owns the Hermes session, runtime plugin, message queue, and tool callbacks. The
 Gateway owns the credentials, process lifecycle, binding verification, and
 operator status.
+
+Runtime token files must contain an agent-bound credential for the managed
+agent. Gateway rejects user bootstrap PATs before sends or runtime launch so a
+copied user token cannot become an agent runtime identity.
 
 Do not treat the one-shot `examples/hermes_sentinel/hermes_bridge.py` demo as
 the production sentinel pattern. It is useful for proving that a Gateway command

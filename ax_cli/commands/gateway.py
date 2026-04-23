@@ -55,10 +55,12 @@ from ..gateway import (
     evaluate_runtime_attestation,
     find_agent_entry,
     gateway_dir,
+    gateway_environment,
     get_gateway_approval,
     hermes_setup_status,
     infer_asset_descriptor,
     list_gateway_approvals,
+    load_gateway_managed_agent_token,
     load_gateway_registry,
     load_gateway_session,
     load_recent_gateway_activity,
@@ -172,13 +174,10 @@ def _load_managed_agent_or_exit(name: str) -> dict:
 
 
 def _load_managed_agent_client(entry: dict) -> AxClient:
-    token_file = Path(str(entry.get("token_file") or "")).expanduser()
-    if not token_file.exists():
-        err_console.print(f"[red]Managed agent token is missing:[/red] {token_file}")
-        raise typer.Exit(1)
-    token = token_file.read_text().strip()
-    if not token:
-        err_console.print(f"[red]Managed agent token file is empty:[/red] {token_file}")
+    try:
+        token = load_gateway_managed_agent_token(entry)
+    except ValueError as exc:
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     return AxClient(
         base_url=str(entry.get("base_url") or ""),
@@ -650,6 +649,7 @@ def _status_payload(*, activity_limit: int = 10) -> dict:
         gateway["pid"] = None
     payload = {
         "gateway_dir": str(gateway_dir()),
+        "gateway_environment": gateway_environment(),
         "connected": bool(session),
         "base_url": session.get("base_url") if session else None,
         "space_id": session.get("space_id") if session else None,
@@ -1401,7 +1401,8 @@ def _render_gateway_overview(payload: dict) -> Panel:
     )
     grid.add_row("User", str(payload.get("user") or "-"), "Base URL", str(payload.get("base_url") or "-"))
     space_label = str(payload.get("space_name") or payload.get("space_id") or "-")
-    grid.add_row("Space", space_label, "PID", str(payload["daemon"].get("pid") or "-"))
+    grid.add_row("Space", space_label, "Environment", str(payload.get("gateway_environment") or "default"))
+    grid.add_row("PID", str(payload["daemon"].get("pid") or "-"), "State Dir", str(payload.get("gateway_dir") or "-"))
     grid.add_row("UI", str(ui.get("url") or "-"), "UI PID", str(ui.get("pid") or "-"))
     grid.add_row(
         "Session",
