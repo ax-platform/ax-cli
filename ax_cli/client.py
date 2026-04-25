@@ -402,6 +402,36 @@ class AxClient:
 
     # --- Messages ---
 
+    def send_heartbeat(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: str | None = None,
+        note: str | None = None,
+        cadence_seconds: int | None = None,
+    ) -> dict:
+        """POST /api/v1/agents/heartbeat — refresh agent presence in Redis.
+
+        Backend currently treats this as a presence ping (no body required).
+        ``status`` / ``note`` / ``cadence_seconds`` are forward-compatible —
+        sent in the body so backend can adopt them when the richer heartbeat
+        protocol lands. Backend extras are ignored gracefully.
+        """
+        body: dict = {}
+        if status is not None:
+            body["status"] = status
+        if note is not None:
+            body["note"] = note
+        if cadence_seconds is not None:
+            body["cadence_seconds"] = cadence_seconds
+        r = self._http.post(
+            "/api/v1/agents/heartbeat",
+            json=body,
+            headers=self._with_agent(agent_id),
+        )
+        r.raise_for_status()
+        return self._parse_json(r)
+
     def send_message(
         self,
         space_id: str,

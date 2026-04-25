@@ -18,6 +18,7 @@ from .commands import (
     events,
     gateway,
     handoff,
+    heartbeat,
     keys,
     listen,
     messages,
@@ -40,6 +41,7 @@ app.add_typer(apps.app, name="apps")
 app.add_typer(messages.app, name="messages")
 app.add_typer(alerts.app, name="alerts")
 app.add_typer(reminders.app, name="reminders")
+app.add_typer(heartbeat.app, name="heartbeat")
 app.add_typer(tasks.app, name="tasks")
 app.add_typer(events.app, name="events")
 app.add_typer(listen.app, name="listen")
