@@ -212,12 +212,21 @@ def add(
     first_at = _validate_timestamp(first_at, flag="--first-at")
     next_fire = _parse_iso(first_at) if first_at else _now() + _dt.timedelta(minutes=first_in)
 
-    client = get_client()
-    try:
-        resolved_space = resolve_space_id(client, explicit=space_id)
-    except Exception as exc:
-        typer.echo(f"Error: Space ID not resolvable: {exc}. Pass --space-id or configure default.", err=True)
-        raise typer.Exit(2)
+    # Offline-first: if --space-id is provided, skip the network round-trip
+    # entirely. Otherwise resolve via the configured client.
+    if space_id:
+        resolved_space = space_id
+    else:
+        try:
+            client = get_client()
+            resolved_space = resolve_space_id(client, explicit=None)
+        except Exception as exc:
+            typer.echo(
+                f"Error: Space ID not resolvable: {exc}. Pass --space-id to add offline, "
+                "or configure a default via `ax profile`.",
+                err=True,
+            )
+            raise typer.Exit(2)
 
     path = _policy_file(policy_file)
     store = _load_store(path)
@@ -441,13 +450,47 @@ def _fire_policy(
         }
 
     # mode == "auto"
-    result = client.send_message(
-        str(policy.get("space_id")),
-        payload["content"],
-        channel=payload["channel"],
-        metadata=payload["metadata"],
-        message_type="reminder",
-    )
+    try:
+        result = client.send_message(
+            str(policy.get("space_id")),
+            payload["content"],
+            channel=payload["channel"],
+            metadata=payload["metadata"],
+            message_type="reminder",
+        )
+    except (httpx.ConnectError, httpx.ReadError) as exc:
+        # Offline-first: backend unreachable. Auto-degrade to draft so the
+        # fire is not lost. Operator dispatches via `ax reminders drafts send`
+        # once connectivity returns.
+        if drafts is None:
+            return {
+                "policy_id": policy.get("id"),
+                "error": f"network: {exc}",
+            }
+        draft = {
+            "id": _short_draft_id(),
+            "policy_id": policy.get("id"),
+            "fire_key": policy.get("_current_fire_key"),
+            "created_at": payload["fired_at"],
+            "target": payload["target"],
+            "target_resolved_from": payload["target_resolved_from"],
+            "content": payload["content"],
+            "metadata": payload["metadata"],
+            "channel": payload["channel"],
+            "space_id": str(policy.get("space_id") or ""),
+            "status": "pending",
+            "auto_degraded": True,
+            "auto_degrade_reason": str(exc),
+        }
+        drafts.append(draft)
+        return {
+            "policy_id": policy.get("id"),
+            "draft_id": draft["id"],
+            "drafted": True,
+            "auto_degraded": True,
+            "target": payload["target"],
+            "fired_at": payload["fired_at"],
+        }
     message = result.get("message", result) if isinstance(result, dict) else {}
     return {
         "policy_id": policy.get("id"),
@@ -622,6 +665,104 @@ def run(
                         f"message={item.get('message_id')} target={item.get('target')}"
                     )
         time.sleep(interval)
+
+
+# ---- Status: online/offline + queue snapshot ------------------------------
+
+
+def _probe_online(timeout: float = 2.0) -> tuple[bool, str | None]:
+    """Cheap online probe. Returns (is_online, reason_if_offline)."""
+    try:
+        client = get_client()
+    except Exception as exc:
+        return False, f"client unavailable: {exc}"
+    base = getattr(client, "_base_url", None) or getattr(client, "base_url", None)
+    if not base:
+        return False, "no base_url configured"
+    try:
+        # Most ax backends respond on /health quickly. Use a short timeout.
+        resp = httpx.get(f"{str(base).rstrip('/')}/health", timeout=timeout)
+        if resp.status_code < 500:
+            return True, None
+        return False, f"backend status {resp.status_code}"
+    except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+        return False, f"network: {exc}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+@app.command("status")
+def status(
+    policy_file: Optional[str] = typer.Option(None, "--file", help="Reminder policy JSON file"),
+    skip_probe: bool = typer.Option(False, "--skip-probe", help="Skip online probe (faster, offline assumed)"),
+    as_json: bool = JSON_OPTION,
+) -> None:
+    """Show online/offline status, queue depth, and pending drafts count.
+
+    Helps an operator answer "can my reminders fire now, and what's queued
+    for me to review?" — the offline-first contract surface.
+    """
+    path = _policy_file(policy_file)
+    store = _load_store(path)
+
+    policies = [p for p in store.get("policies", []) if isinstance(p, dict)]
+    enabled_policies = [p for p in policies if p.get("enabled", True)]
+    drafts = [d for d in store.get("drafts", []) if isinstance(d, dict)]
+    pending_drafts = [d for d in drafts if d.get("status") == "pending"]
+    auto_degraded = [d for d in pending_drafts if d.get("auto_degraded") is True]
+
+    # Find next-due policy (in priority queue order, ignoring whether it's currently due)
+    sorted_enabled = sorted(enabled_policies, key=_policy_sort_key)
+    next_due = sorted_enabled[0] if sorted_enabled else None
+
+    if skip_probe:
+        is_online, offline_reason = False, "probe skipped"
+    else:
+        is_online, offline_reason = _probe_online()
+
+    snapshot = {
+        "online": is_online,
+        "offline_reason": offline_reason,
+        "file": str(path),
+        "policies_total": len(policies),
+        "policies_enabled": len(enabled_policies),
+        "policies_paused_or_disabled": len(policies) - len(enabled_policies),
+        "drafts_pending": len(pending_drafts),
+        "drafts_auto_degraded": len(auto_degraded),
+        "next_due": (
+            {
+                "id": next_due.get("id"),
+                "priority": int(next_due.get("priority", _DEFAULT_PRIORITY)),
+                "mode": str(next_due.get("mode", "auto")),
+                "target": next_due.get("target") or "(task default)",
+                "next_fire_at": next_due.get("next_fire_at"),
+            }
+            if next_due
+            else None
+        ),
+    }
+
+    if as_json:
+        print_json(snapshot)
+        return
+
+    state_label = "[bold green]ONLINE[/bold green]" if is_online else "[bold yellow]OFFLINE[/bold yellow]"
+    console.print(f"State: {state_label}")
+    if not is_online and offline_reason:
+        console.print(f"  reason: {offline_reason}")
+    console.print(f"Store: {path}")
+    console.print(f"Policies: {len(enabled_policies)} enabled / {len(policies)} total")
+    console.print(
+        f"Drafts: {len(pending_drafts)} pending" + (f" ({len(auto_degraded)} auto-degraded)" if auto_degraded else "")
+    )
+    if next_due:
+        console.print(
+            f"Next: {next_due.get('id')} priority={int(next_due.get('priority', _DEFAULT_PRIORITY))} "
+            f"mode={next_due.get('mode', 'auto')} target={next_due.get('target') or '(task)'} "
+            f"fires_at={next_due.get('next_fire_at')}"
+        )
+    else:
+        console.print("Next: (no enabled policies)")
 
 
 # ---- Operator commands: pause / resume / cancel / update -------------------

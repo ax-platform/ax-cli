@@ -1,9 +1,12 @@
 # TASK-LOOP-001: Task-Driven Loops with Priority Queue + HITL Drafts
 
-**Status:** v1 — CLI-first implementation landing in this PR
+**Status:** v1.1 — CLI-first implementation; v1 (priority + draft mode) landed in PR #98, v1.1 (offline-first) lands in this PR
 **Owner:** @orion
 **Date:** 2026-04-25
-**Source directive:** @madtank 2026-04-25 03:46 UTC ("frequency and priority… queue a priority for each assignment, moved around like a song playing"); @madtank 2026-04-25 04:00 UTC ("loop should support a draft/review state where the HITL user can inspect and explicitly send")
+**Source directives:**
+- @madtank 2026-04-25 03:46 UTC — "frequency and priority… queue a priority for each assignment, moved around like a song playing"
+- @madtank 2026-04-25 04:00 UTC — "loop should support a draft/review state where the HITL user can inspect and explicitly send"
+- @madtank 2026-04-25 04:10 UTC (via @ChatGPT and @backend_sentinel) — "CLI should support offline-first mode where agents can talk/work locally without assuming platform reachability… make delivery vs activation explicit, make offline/connected status obvious"
 
 ## Why this exists
 
@@ -15,19 +18,26 @@ Reminders (`ax reminders`) already provided 80% of the spine: task-tied policies
 
 ## Scope
 
-In:
+### v1 (PR #98)
 - Per-policy `priority` field, queue ordered by priority
 - `mode` field: `auto` / `draft` / `manual`
 - Draft store with HITL review/edit/send/cancel
 - Operator commands: `pause`, `resume`, `cancel`, `update`
 - Pytest smokes covering all three modes
 
-Out (follow-up):
+### v1.1 (this PR — offline-first)
+- `ax reminders add --space-id X` works fully offline (no `get_client` call)
+- `auto` mode auto-degrades to `draft` on network errors (`auto_degraded: true` flag on the draft, with `auto_degrade_reason`)
+- `ax reminders status` command surfaces online/offline + queue depth + pending drafts (with auto-degraded count broken out separately)
+- Pytest smokes for all three offline-first behaviors
+
+### Out (follow-up)
 - Backend persistence of loop state (currently local JSON)
 - Cross-machine queue sync (single-machine for now)
 - `ax tasks loop` semantic alias group (deferred — `ax reminders` is the implementation; the alias is naming polish)
 - Platform-side scheduler integration (TASKS-LIFECYCLE-001 territory)
 - Stop conditions beyond `max_fires` and "source task is terminal" (e.g. done-event hooks)
+- Aligning vocabulary with backend_sentinel's AGENT-TRIGGER-SEMANTICS-001 frame once it lands
 
 ## Data model — local store at `~/.ax/reminders.json` (version 2)
 
@@ -95,30 +105,35 @@ Drafted fires DO advance `fired_count` and `next_fire_at`. The HITL send/cancel 
 ## CLI surface
 
 ```
-# Existing (now with --priority and --mode)
-ax reminders add <task-id> [--priority N] [--mode auto|draft|manual] [--cadence-minutes N] [--max-fires N] [--target X]
+# v1: priority + mode
+ax reminders add <task-id> [--priority N] [--mode auto|draft|manual] [--cadence-minutes N] [--max-fires N] [--target X] [--space-id X]
 ax reminders list
 ax reminders run --once
 ax reminders run --watch --interval 30
 ax reminders disable <id>           # legacy, kept
 
-# New operator commands
+# v1: operator commands
 ax reminders pause <id>
 ax reminders resume <id>
 ax reminders cancel <id>
 ax reminders update <id> [--priority N] [--cadence-minutes N] [--max-fires N] [--mode X] [--reason ...] [--target X]
 
-# New drafts subcommand group
+# v1: drafts subcommand group
 ax reminders drafts list
 ax reminders drafts show <draft-id>
 ax reminders drafts edit <draft-id> [--body "..."] [--target X]
 ax reminders drafts send <draft-id>
 ax reminders drafts cancel <draft-id>
+
+# v1.1: offline-first surface
+ax reminders status [--skip-probe]                       # online/offline + queue + drafts snapshot
+ax reminders add ... --space-id X                        # fully offline (no backend call for space resolution)
+# auto mode: auto-degrades to draft on network errors (auto_degraded: true on the draft)
 ```
 
 ## Acceptance smokes
 
-All in `tests/test_task_loop_modes.py` — 11 pytest cases:
+### v1 (PR #98, `tests/test_task_loop_modes.py` — 11 cases)
 
 1. `add` accepts `--priority` and `--mode` and stores them on the policy
 2. `add` rejects priority outside 0-100
@@ -132,7 +147,14 @@ All in `tests/test_task_loop_modes.py` — 11 pytest cases:
 10. `pause` / `resume` cycle round-trips correctly
 11. `update --priority` re-orders the queue
 
-Existing reminder tests (8) continue to pass — backwards compatible (version 1 store loads as version 2 with empty drafts array; new fields have sensible defaults).
+### v1.1 (this PR, `tests/test_task_loop_offline.py` — 4 cases)
+
+12. `add --space-id X` works without calling `get_client` or `resolve_space_id` (fully offline)
+13. `auto` mode with `httpx.ConnectError` falls back to draft with `auto_degraded: true`, `auto_degrade_reason` populated
+14. `status --skip-probe --json` reports queue depth, pending drafts, auto-degraded count, next-due policy
+15. `status` works with empty store (no policies, `next_due: null`)
+
+Existing reminder tests (8) and v1 task-loop tests (11) continue to pass — backwards compatible (version 1 store loads as version 2 with empty drafts array; new fields have sensible defaults).
 
 ## Why this is a small spec
 
