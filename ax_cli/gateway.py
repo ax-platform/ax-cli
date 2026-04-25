@@ -3601,6 +3601,7 @@ class ManagedAgentRuntime:
         parent_message_id: str | None = None,
     ) -> None:
         if not self._send_client:
+            self._log(f"processing-status drop (no send_client): msg={message_id} status={status}")
             return
         try:
             self._send_client.set_agent_processing_status(
@@ -3617,8 +3618,8 @@ class ManagedAgentRuntime:
                 retry_after_seconds=retry_after_seconds,
                 parent_message_id=parent_message_id,
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"processing-status post failed: msg={message_id} status={status} err={exc}")
 
     @staticmethod
     def _processing_status_metadata(event: dict[str, Any]) -> dict[str, Any]:
