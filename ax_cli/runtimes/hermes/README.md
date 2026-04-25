@@ -62,17 +62,34 @@ done
 
 Then commit + PR. Update the line counts table in this README to reflect the new state.
 
-## Acceptance smoke
+## End-user setup (the only steps a fresh user has to run)
+
+The vendored sentinel is bundled with ax-cli, but Hermes-the-agent's own runtime dependencies (openai SDK, anthropic SDK, etc.) live in the `NousResearch/hermes-agent` repo. Set those up once:
 
 ```bash
-# After this branch merges and night_owl rewires _hermes_sentinel_script:
-ax gateway agents add demo-hermes --template hermes
-ax gateway agents test demo-hermes
-# expect: agent launches via bundled sentinel.py, replies via Hermes
+git clone https://github.com/NousResearch/hermes-agent ~/hermes-agent
+cd ~/hermes-agent
+python3 -m venv .venv
+.venv/bin/pip install -e .
+```
+
+The gateway auto-detects `~/hermes-agent` (or `$HERMES_REPO_PATH`) and uses its `.venv/bin/python3` when launching the sentinel.
+
+## Acceptance smoke (verified 2026-04-25 on macOS)
+
+```bash
+ax gateway agents add demo-hermes --template hermes --space-id <space>
+# Wait ~10s for Hermes to load on first run.
+curl -sS -X POST -d '{"content":"Reply with: Hermes online"}' \
+  -H 'Content-Type: application/json' \
+  http://127.0.0.1:8765/api/agents/demo-hermes/test
+# Expected: hermes_sdk runtime invokes Codex backend, replies in ~5–20s
+# Verified: 13 char reply in 17s round-trip via openai-codex@gpt-5.5
 ```
 
 ## Next steps
 
-- [ ] Rewire `_hermes_sentinel_script` in `ax_cli/commands/gateway.py` to default to the bundled path with operator override (night_owl, post-merge).
-- [ ] AUTOSETUP-001 spec update: `hermes` template no longer needs to clone NousResearch/hermes-agent for the sentinel — only for Hermes-the-agent's prompt assets if those are loaded at runtime. Verify with night_owl's round-trip CLI smoke.
+- [x] Rewire `_hermes_sentinel_script` — done in `ax_cli/commands/gateway.py` (override-then-bundle order).
+- [ ] AUTOSETUP-001 spec update: hermes-agent clone is still needed for the runtime SDK install (above), but the sentinel itself is bundled. The "fix command" should reflect a `git clone + venv + pip install -e` step, not just `export HERMES_REPO_PATH`.
+- [ ] Activity bubbles: gateway logs `Disabling agent_processing signals after 401 from /auth/internal/agent-status` — that's the GATEWAY-ACTIVITY-VISIBILITY-001 silent-swallow fix landing as designed (it's now visible).
 - [ ] End-to-end CLI test on a fresh `pip install ax-cli` install path (Monday demo dry-run).

@@ -2894,10 +2894,25 @@ def _agents_dir_for_entry(entry: dict[str, Any]) -> Path:
 
 
 def _hermes_sentinel_script(entry: dict[str, Any]) -> Path:
+    """Resolve the Hermes sentinel script path.
+
+    Order:
+        1. Explicit operator override on the agent entry (`sentinel_script` /
+           `hermes_sentinel_script`).
+        2. Live-host operator copy at `_agents_dir_for_entry(entry) /
+           "claude_agent_v2.py"` if it exists (preserves the EC2 dev-fleet
+           workflow without requiring ax-cli reinstalls).
+        3. Bundled vendored sentinel that ships with ax-cli (`pip install`
+           users get this automatically — no external clone required).
+    """
     configured = str(entry.get("sentinel_script") or entry.get("hermes_sentinel_script") or "").strip()
     if configured:
         return Path(configured).expanduser()
-    return _agents_dir_for_entry(entry) / "claude_agent_v2.py"
+    operator_copy = _agents_dir_for_entry(entry) / "claude_agent_v2.py"
+    if operator_copy.exists():
+        return operator_copy
+    bundled = Path(__file__).resolve().parent / "runtimes" / "hermes" / "sentinel.py"
+    return bundled
 
 
 def _hermes_sentinel_python(entry: dict[str, Any]) -> str:
