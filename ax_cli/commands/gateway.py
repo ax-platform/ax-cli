@@ -568,6 +568,8 @@ def _send_from_managed_agent(
     if not content.strip():
         raise ValueError("Message content is required.")
     entry = _load_managed_agent_or_exit(name)
+    if str(entry.get("desired_state") or "").strip().lower() == "stopped":
+        raise ValueError(f"@{name} is stopped. Start it before it can send.")
     snapshot = _identity_space_send_guard(entry)
     client = _load_managed_agent_client(entry)
     space_id = str(snapshot.get("active_space_id") or entry.get("space_id") or "")
@@ -851,18 +853,28 @@ def _agent_templates_payload() -> dict:
     templates = [_annotate_template_taxonomy(item) for item in agent_template_list()]
     ollama_status = ollama_setup_status()
     for item in templates:
-        if str(item.get("id") or "").strip().lower() != "ollama":
-            continue
-        defaults = dict(item.get("defaults") or {})
-        recommended_model = str(ollama_status.get("recommended_model") or "").strip() or None
-        if recommended_model and not str(defaults.get("ollama_model") or "").strip():
-            defaults["ollama_model"] = recommended_model
-        item["defaults"] = defaults
-        item["ollama_server_reachable"] = bool(ollama_status.get("server_reachable"))
-        item["ollama_available_models"] = list(ollama_status.get("available_models") or [])
-        item["ollama_local_models"] = list(ollama_status.get("local_models") or [])
-        item["ollama_recommended_model"] = recommended_model
-        item["ollama_summary"] = str(ollama_status.get("summary") or "")
+        template_id = str(item.get("id") or "").strip().lower()
+        if template_id == "ollama":
+            defaults = dict(item.get("defaults") or {})
+            recommended_model = str(ollama_status.get("recommended_model") or "").strip() or None
+            if recommended_model and not str(defaults.get("ollama_model") or "").strip():
+                defaults["ollama_model"] = recommended_model
+            item["defaults"] = defaults
+            item["ollama_server_reachable"] = bool(ollama_status.get("server_reachable"))
+            item["ollama_available_models"] = list(ollama_status.get("available_models") or [])
+            item["ollama_local_models"] = list(ollama_status.get("local_models") or [])
+            item["ollama_recommended_model"] = recommended_model
+            item["ollama_summary"] = str(ollama_status.get("summary") or "")
+        elif template_id == "hermes":
+            hermes_status = hermes_setup_status({"template_id": "hermes"})
+            item["hermes_ready"] = bool(hermes_status.get("ready"))
+            item["hermes_resolved_path"] = hermes_status.get("resolved_path")
+            item["hermes_expected_path"] = hermes_status.get("expected_path")
+            item["hermes_summary"] = str(hermes_status.get("summary") or "")
+            item["hermes_detail"] = str(hermes_status.get("detail") or hermes_status.get("summary") or "")
+            # We don't ship a canonical clone URL — operators may use a private
+            # fork. Surface the env var the gateway honors instead.
+            item["hermes_fix_command"] = "export HERMES_REPO_PATH=/path/to/your/hermes-agent"
     return {"templates": templates, "count": len(templates)}
 
 
@@ -924,6 +936,8 @@ def _send_gateway_test_to_managed_agent(
     sender_agent: str | None = None,
 ) -> dict:
     entry = _load_managed_agent_or_exit(name)
+    if str(entry.get("desired_state") or "").strip().lower() == "stopped":
+        raise ValueError(f"@{name} is stopped. Start it before sending a test.")
     space_id = str(entry.get("space_id") or "")
     if not space_id:
         raise ValueError(f"Managed agent is missing a space id: @{name}")
@@ -1564,6 +1578,108 @@ def _render_gateway_dashboard(payload: dict) -> Group:
             _render_activity_table(payload.get("recent_activity", [])), title="Recent Activity", border_style="magenta"
         ),
     )
+
+
+def _spaces_payload() -> dict:
+    client = _load_gateway_user_client()
+    raw = client.list_spaces()
+    items = raw.get("spaces", raw) if isinstance(raw, dict) else raw
+    spaces: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        space_id = str(item.get("id") or item.get("space_id") or "").strip()
+        if not space_id:
+            continue
+        spaces.append(
+            {
+                "id": space_id,
+                "name": str(item.get("name") or item.get("space_name") or space_id),
+                "slug": str(item.get("slug") or "").strip() or None,
+            }
+        )
+    session = load_gateway_session() or {}
+    return {
+        "spaces": spaces,
+        "active_space_id": str(session.get("space_id") or "").strip() or None,
+        "active_space_name": str(session.get("space_name") or "").strip() or None,
+    }
+
+
+def _move_managed_agent_space(name: str, new_space_id: str) -> dict:
+    name = name.strip()
+    new_space_id = new_space_id.strip()
+    if not name:
+        raise ValueError("Managed agent name is required.")
+    if not new_space_id:
+        raise ValueError("Target space_id is required.")
+    registry = load_gateway_registry()
+    entry = find_agent_entry(registry, name)
+    if not entry:
+        raise LookupError(f"Managed agent not found: {name}")
+    if bool(entry.get("pinned")):
+        raise ValueError(f"@{name} is pinned to its current space. Unlock it before moving.")
+    if str(entry.get("space_id") or "").strip() == new_space_id:
+        return annotate_runtime_health(entry, registry=registry)
+    client = _load_gateway_user_client()
+    try:
+        client.update_agent(name, space_id=new_space_id)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Backend rejected move: {exc}") from exc
+    # Re-read the canonical record from backend — gateway local registry is a view,
+    # never the source of truth.
+    backend_space_id = new_space_id
+    backend_allowed_spaces: list[str] | None = None
+    try:
+        record = client.get_agent(name)
+        canonical = str(record.get("space_id") or record.get("default_space_id") or "").strip()
+        if canonical:
+            backend_space_id = canonical
+        allowed = record.get("allowed_spaces")
+        if isinstance(allowed, list):
+            backend_allowed_spaces = [str(s) for s in allowed if s]
+    except Exception:  # noqa: BLE001
+        # Resync best-effort; the PUT already succeeded.
+        pass
+    previous_space_id = str(entry.get("space_id") or "").strip() or None
+    entry["space_id"] = backend_space_id
+    if backend_allowed_spaces is not None:
+        entry["allowed_spaces"] = backend_allowed_spaces
+    save_gateway_registry(registry)
+    record_gateway_activity(
+        "managed_agent_moved_space",
+        entry=entry,
+        new_space_id=backend_space_id,
+        requested_space_id=new_space_id,
+        previous_space_id=previous_space_id,
+    )
+    if backend_space_id != new_space_id:
+        # Backend coerced the move (likely allowed_spaces enforcement). Surface to operator
+        # logs so backend_sentinel can pick it up if it indicates a quarantine gap.
+        record_gateway_activity(
+            "managed_agent_move_coerced",
+            entry=entry,
+            requested_space_id=new_space_id,
+            applied_space_id=backend_space_id,
+        )
+    return annotate_runtime_health(entry, registry=registry)
+
+
+def _set_managed_agent_pin(name: str, pinned: bool) -> dict:
+    name = name.strip()
+    if not name:
+        raise ValueError("Managed agent name is required.")
+    registry = load_gateway_registry()
+    entry = find_agent_entry(registry, name)
+    if not entry:
+        raise LookupError(f"Managed agent not found: {name}")
+    entry["pinned"] = bool(pinned)
+    save_gateway_registry(registry)
+    record_gateway_activity(
+        "managed_agent_pinned" if pinned else "managed_agent_unpinned",
+        entry=entry,
+    )
+    return annotate_runtime_health(entry, registry=registry)
 
 
 def _render_gateway_ui_page(*, refresh_ms: int) -> str:
@@ -2969,6 +3085,15 @@ def _render_gateway_ui_page(*, refresh_ms: int) -> str:
     return template.replace("__REFRESH_MS__", str(refresh_ms))
 
 
+_DEMO_HTML_PATH = Path(__file__).resolve().parent.parent / "static" / "demo.html"
+
+
+def _render_gateway_demo_page(*, refresh_ms: int) -> str:
+    body = _DEMO_HTML_PATH.read_text(encoding="utf-8")
+    inject = f"<script>window.__GATEWAY_DEMO_REFRESH_MS__ = {int(refresh_ms)};</script></head>"
+    return body.replace("</head>", inject, 1)
+
+
 class _GatewayUiServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -3018,7 +3143,13 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             if parsed.path == "/":
+                _write_html_response(self, _render_gateway_demo_page(refresh_ms=refresh_ms))
+                return
+            if parsed.path == "/operator":
                 _write_html_response(self, _render_gateway_ui_page(refresh_ms=refresh_ms))
+                return
+            if parsed.path == "/demo":
+                _write_html_response(self, _render_gateway_demo_page(refresh_ms=refresh_ms))
                 return
             if parsed.path == "/healthz":
                 _write_json_response(self, {"ok": True})
@@ -3031,6 +3162,22 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                 return
             if parsed.path == "/api/templates":
                 _write_json_response(self, _agent_templates_payload())
+                return
+            if parsed.path == "/api/spaces":
+                try:
+                    _write_json_response(self, _spaces_payload())
+                except typer.Exit:
+                    _write_json_response(
+                        self,
+                        {"error": "Gateway is not logged in.", "spaces": [], "active_space_id": None},
+                        status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _write_json_response(
+                        self,
+                        {"error": str(exc), "spaces": [], "active_space_id": None},
+                        status=HTTPStatus.BAD_GATEWAY,
+                    )
                 return
             if parsed.path.startswith("/api/agents/"):
                 name = unquote(parsed.path.removeprefix("/api/agents/")).strip()
@@ -3096,6 +3243,19 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                         sender_agent=str(body.get("sender_agent") or "").strip() or None,
                     )
                     _write_json_response(self, payload, status=HTTPStatus.CREATED)
+                    return
+                if parsed.path.endswith("/move") and parsed.path.startswith("/api/agents/"):
+                    name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/move")).strip()
+                    payload = _move_managed_agent_space(
+                        name,
+                        str(body.get("space_id") or "").strip(),
+                    )
+                    _write_json_response(self, payload)
+                    return
+                if parsed.path.endswith("/pin") and parsed.path.startswith("/api/agents/"):
+                    name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/pin")).strip()
+                    payload = _set_managed_agent_pin(name, bool(body.get("pinned", True)))
+                    _write_json_response(self, payload)
                     return
                 if parsed.path.endswith("/doctor") and parsed.path.startswith("/api/agents/"):
                     name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/doctor")).strip()

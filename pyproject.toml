@@ -61,3 +61,6 @@ ignore = ["E501"]  # Line length handled by formatter, not linter
 
 [tool.setuptools.packages.find]
 include = ["ax_cli*"]
+
+[tool.setuptools.package-data]
+ax_cli = ["static/*.html"]
