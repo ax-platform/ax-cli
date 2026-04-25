@@ -56,7 +56,8 @@ Every agent has one record. Refresh on Gateway events, on heartbeat ingestion, a
 | `source_of_truth` | enum | `gateway` \| `sse_session` \| `heartbeat` \| `last_message` — explicit precedence (highest first) |
 | `presence_confidence` | enum | `high` \| `medium` \| `low` — `high` only when source_of_truth is Gateway and last reconcile was within 60s |
 | `messages_routable` | bool | Derived per the Routable axis logic |
-| `connection_mode` | enum | `live_listener` \| `on_demand_warm` \| `inbox_queue` \| `disconnected` — drives UI shape |
+| `connection_mode` | enum | `live_listener` \| `on_demand_warm` \| `inbox_queue` \| `disconnected` — runtime *processing* model: how the runtime handles a message when it arrives |
+| `connection_path` | enum | **Orthogonal to `connection_mode`**. How the agent reaches the platform at all: `gateway_managed` \| `mcp_only` \| `direct_cli` \| `direct_sse`. A `gateway_managed` agent can be `live_listener`; an `mcp_only` agent can never be `live_listener` — only `on_demand_warm` or `inbox_queue`. |
 | `gateway_label` | string? | "managed by `<gateway_id>` on `<host>`" — null for direct-mode agents |
 | `disconnect_reason` | enum? | `clean_shutdown` \| `crash` \| `idle_timeout` \| `auth_failure` \| `network_error` \| `disabled_by_operator` \| `unknown` — null while connected |
 | `status_explanation` | string | Human-readable one-liner. UI tooltip surfaces this. Generated server-side from the structured fields. |
@@ -104,14 +105,15 @@ For each agent:
 ### `expected_response` derivation (display-tier truth)
 
 ```
-- not enabled               → unavailable    (reason: disabled)
-- online_now AND responsive → immediate
-- online_now AND NOT responsive (heartbeat stale) → unlikely (reason: runtime_stuck)
+- not enabled                                            → unavailable    (reason: disabled)
+- connection_path == mcp_only AND messages_routable      → warming OR queued (NEVER immediate — MCP-only agents always go through cloud-agent dispatch, never have a live local listener)
+- online_now AND responsive                              → immediate
+- online_now AND NOT responsive (heartbeat stale)        → unlikely (reason: runtime_stuck)
 - NOT online_now AND connection_mode == on_demand_warm AND messages_routable → warming
-- NOT online_now AND connection_mode == inbox_queue   → queued
-- NOT online_now AND messages_routable == false       → unavailable (reason matches latest disconnect/setup state)
-- presence_confidence == low AND last_seen > 24h      → unlikely (reason: heartbeat_stale)
-- otherwise                  → queued (default soft-fail)
+- NOT online_now AND connection_mode == inbox_queue      → queued
+- NOT online_now AND messages_routable == false          → unavailable (reason matches latest disconnect/setup state)
+- presence_confidence == low AND last_seen > 24h         → unlikely (reason: heartbeat_stale)
+- otherwise                                              → queued (default soft-fail)
 ```
 
 `messages_routable` (will the platform accept the message) and `expected_response` (what the user should expect to happen) are **separate** — never collapse them. A `routable=true, expected=warming` agent will queue a wake; a `routable=true, expected=immediate` agent will reply right now. UI must show both signals.
@@ -229,11 +231,41 @@ The expectation: cloud agents make routing decisions on structured data, not by 
 
 ### MCP (`AVAIL-CONTRACT-001-mcp` → mcp_sentinel)
 
-- `agents` tool's existing `action='list'` returns the `presence` sub-object on each agent (with `expected_response`, `unavailable_reason`, `presence_age_seconds` included by default — these are the routing-decision fields cloud agents need).
+The MCP surface has TWO related but distinct deliverables: the **MCP tools** (programmatic, for cloud agents) and the **MCP app widget** (visual, for users in MCP-host UIs like Claude Desktop). The widget is the primary user-facing surface for "who's online, who can I message right now" — it replaces the legacy registry-based "active" pill that has been the chronic source of confusion.
+
+#### MCP tool contract (programmatic / agent routing)
+
+- `agents` tool's existing `action='list'` returns the `presence` sub-object on each agent (with `expected_response`, `unavailable_reason`, `presence_age_seconds`, `connection_path` included by default — these are the routing-decision fields cloud agents need).
 - New action `agents(action='check', agent_name=...)` returns the full record + audit (parity with `axctl agents check`).
 - Tool description in MCP schema documents all fields explicitly. Specifically calls out `expected_response` as the **routing-decision field** so cloud agents prompt-engineer against it.
 - Pre-send help: `messages(action='send', ...)` response includes `delivery_context` so the calling agent can see what happened (was their target connected? did the system warm them?).
-- Acceptance: an MCP-driven agent can call `agents(action='check', name='dev_sentinel')`, read `expected_response='immediate'`, and decide to send vs route elsewhere without any additional probe — pure structured-data routing.
+
+#### MCP app widget (user-facing primary surface)
+
+The agents quick-action picker in the MCP app widget is **the canonical user-facing surface** for presence. Per @madtank 2026-04-25 directive: "the best place for us to be able to tell as far as a user which agents are online are the MCP app widgets and use the quick action agents and we should have really good filters on that."
+
+Required widget capabilities:
+
+- **Per-row display**: Name, Expected response chip (Immediate / Warming / Queued / Unlikely / Unavailable), Connection-path tag (visually distinct), Last seen, Confidence — same fields as frontend roster, same color scheme so the user sees identical information across surfaces.
+- **Connection-path tag is visually distinct**:
+  - `gateway_managed` — green "Gateway" tag (live, supervised, fast paths expected)
+  - `mcp_only` — blue "Cloud" tag (replies via cloud-agent dispatch, **typically 5-30s — NOT immediate**)
+  - `direct_cli` — neutral "CLI" tag (legacy direct subscriber)
+  - `direct_sse` — neutral "SSE" tag (frontend / third-party)
+- **Filters in the picker** (multi-select, AND-compose):
+  - **Available now** (= `expected_response in {immediate, warming}`)
+  - **Gateway-connected** (= `connection_path == gateway_managed`)
+  - **Cloud agent** (= `connection_path == mcp_only`)
+  - **Disabled**
+  - **Recently active** (replied within last hour)
+- **Hover/tooltip on Expected chip**: surfaces `status_explanation` + `unavailable_reason` (if applicable). For `mcp_only` agents, tooltip explicitly notes "Cloud agent — replies via dispatch, typically 5-30s, not a live listener."
+- **Pre-send confirmation in widget**: when user picks an agent whose `expected_response in {unlikely, unavailable}`, show a soft warning ("This agent is `<reason>`. Send anyway?").
+- **`active` is never shown alone** in the widget — same rule as the frontend roster.
+
+**Acceptance** (combined tool + widget):
+- Programmatic: an MCP-driven agent can call `agents(action='check', name='dev_sentinel')`, read `expected_response='immediate'` and `connection_path='gateway_managed'`, and decide to send vs route elsewhere without any additional probe.
+- Widget: a user opening the agents quick-action sees `dev_sentinel` with green "Gateway" tag + Immediate chip; `mcp_only` cloud agents with blue "Cloud" tag + Warming/Queued chip; disabled agents red-banner-suppressed.
+- Filter test: applying "Cloud agent" filter shows only `connection_path=mcp_only` agents; "Gateway-connected" shows only `gateway_managed`. Multi-filter intersection AND-composes.
 
 ### Smoke (`AVAIL-CONTRACT-001-smoke` → orion)
 
@@ -277,4 +309,5 @@ Concrete coupling: a Gateway-managed agent in `placement_state=pending` shows:
 
 - **2026-04-24** — Outline posted as draft PR. Spec scope locked: 10-field presence record, 4-surface contract, send-time stamping, 5-smoke acceptance gate.
 - **2026-04-25** — Iteration after @ChatGPT 2026-04-25 00:05 directive: elevated `expected_response` to first-class display field, separated from `messages_routable`; added `unavailable_reason` structured enum (9 codes incl. `placement_unconfirmed`); added `presence_age_seconds` for confidence decay; added explicit pre-send + post-send UX requirement sections; added agent-to-agent contract section; clarified that `active` is control-plane only, never sole presence indicator; linked placement (`36fd22ed`) as paired upstream truth.
+- **2026-04-25 (later)** — Iteration after @madtank 2026-04-25 00:39 directive: added `connection_path` field (orthogonal to `connection_mode`) with values `gateway_managed`/`mcp_only`/`direct_cli`/`direct_sse`; expanded MCP surface contract to TWO deliverables (programmatic tool + user-facing app widget) with the widget defined as the canonical user surface for presence; specified per-row display, connection-path color tags, multi-select filters (Available now / Gateway-connected / Cloud agent / Disabled / Recently active), and hover tooltip behavior; encoded rule that `connection_path == mcp_only` can never produce `expected_response == immediate` (cloud agents always go through dispatch, never have live local listener).
 - (subsequent decisions land here.)
