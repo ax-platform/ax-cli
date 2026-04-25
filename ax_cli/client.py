@@ -711,6 +711,35 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
+    def list_agents_availability(
+        self,
+        *,
+        space_id: str | None = None,
+        connection_path: str | None = None,
+        badge_state: str | None = None,
+        filter_: str | None = None,
+    ) -> dict | list:
+        """GET /api/v1/agents/availability — bulk resolved DTO list.
+
+        Per AVAIL-CONTRACT-001 spec: optimized for picker/widget rendering.
+        Each row is the resolved ``agent_state`` envelope. Optional query
+        filters: ``connection_path=gateway_managed|mcp_only|...``,
+        ``badge_state=live|routable_delayed|...``, ``filter=available_now|
+        gateway_connected|cloud_agent|disabled|recently_active``.
+        """
+        params: dict[str, str] = {}
+        if space_id:
+            params["space_id"] = space_id
+        if connection_path:
+            params["connection_path"] = connection_path
+        if badge_state:
+            params["badge_state"] = badge_state
+        if filter_:
+            params["filter"] = filter_
+        r = self._http.get("/api/v1/agents/availability", params=params or None)
+        r.raise_for_status()
+        return self._parse_json(r)
+
     def get_agent_presence(self, agent_id_or_name: str, *, space_id: str | None = None) -> dict:
         """GET single-agent availability record.
 

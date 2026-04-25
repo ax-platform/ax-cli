@@ -222,24 +222,133 @@ def _discover_agent_row(agent: dict[str, Any], probe: dict[str, Any] | None = No
 def list_agents(
     space_id: str = typer.Option(None, "--space-id", help="Override default space"),
     limit: int = typer.Option(500, "--limit", help="Max agents to return"),
+    availability: bool = typer.Option(
+        False, "--availability", help="Include resolved AVAIL-CONTRACT v4 fields per row"
+    ),
+    filter_: str = typer.Option(
+        None,
+        "--filter",
+        help="Filter (with --availability): available_now | gateway_connected | cloud_agent | disabled | recently_active",
+    ),
     as_json: bool = JSON_OPTION,
 ):
-    """List agents in the current space."""
+    """List agents in the current space.
+
+    With ``--availability``, calls ``/api/v1/agents/availability`` (the
+    AVAIL-CONTRACT-001 bulk endpoint) and renders the resolved ``agent_state``
+    DTO per row: badge_state, badge_label, connection_path, expected_response,
+    confidence, last_seen. Falls back gracefully to the legacy ``/agents`` shape
+    if ``/availability`` returns 404.
+    """
     client = get_client()
     sid = resolve_space_id(client, explicit=space_id)
-    try:
-        data = client.list_agents(space_id=sid, limit=limit)
-    except httpx.HTTPStatusError as e:
-        handle_error(e)
-    agents = data if isinstance(data, list) else data.get("agents", [])
+
+    if availability:
+        try:
+            data = client.list_agents_availability(space_id=sid, filter_=filter_)
+            agents = _normalize_availability_rows(data)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                handle_error(e)
+            # Fallback: backend hasn't shipped /availability yet.
+            try:
+                fallback = client.list_agents(space_id=sid, limit=limit)
+            except httpx.HTTPStatusError as e2:
+                handle_error(e2)
+            agents = fallback if isinstance(fallback, list) else fallback.get("agents", [])
+            for row in agents:
+                row.setdefault("_legacy", True)
+    else:
+        if filter_:
+            raise typer.BadParameter("--filter requires --availability")
+        try:
+            data = client.list_agents(space_id=sid, limit=limit)
+        except httpx.HTTPStatusError as e:
+            handle_error(e)
+        agents = data if isinstance(data, list) else data.get("agents", [])
+
     if as_json:
         print_json(agents)
+        return
+
+    if availability:
+        rows = []
+        for a in agents:
+            rows.append(
+                {
+                    "name": a.get("name") or a.get("agent_name") or "",
+                    "badge": a.get("badge_label") or _legacy_badge(a),
+                    "path": _short_path(a.get("connection_path")),
+                    "expected": a.get("expected_response") or "—",
+                    "confidence": a.get("confidence") or a.get("presence_confidence") or "—",
+                    "last_seen": a.get("last_seen_at") or a.get("last_seen") or a.get("last_active") or "—",
+                }
+            )
+        print_table(
+            ["Name", "Badge", "Path", "Expected", "Confidence", "Last seen"],
+            rows,
+            keys=["name", "badge", "path", "expected", "confidence", "last_seen"],
+        )
     else:
         print_table(
             ["ID", "Name", "Status"],
             agents,
             keys=["id", "name", "status"],
         )
+
+
+def _normalize_availability_rows(payload) -> list[dict]:
+    """Unwrap the availability bulk response into a list of flat rows.
+
+    The bulk endpoint returns either a list of agent_state envelopes or a
+    dict like ``{agents: [...], availability: [...]}`` per the spec — we
+    accept both shapes and unwrap each item's ``agent_state`` sub-object
+    if present so downstream rendering sees the v4 fields at top level.
+    """
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        items = payload.get("agents") or payload.get("availability") or payload.get("items") or []
+    else:
+        return []
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "agent_state" in item:
+            row = dict(item.get("agent_state") or {})
+            if "raw_presence" in item:
+                row["_raw_presence"] = item["raw_presence"]
+            if "control" in item:
+                row["_control"] = item["control"]
+        else:
+            row = dict(item)
+        rows.append(row)
+    return rows
+
+
+def _short_path(connection_path: str | None) -> str:
+    """Map connection_path enum to compact column label."""
+    return {
+        "gateway_managed": "Gateway",
+        "mcp_only": "Cloud",
+        "direct_cli": "CLI",
+        "direct_sse": "SSE",
+        "unknown": "—",
+    }.get(connection_path or "", "—")
+
+
+def _legacy_badge(row: dict) -> str:
+    """Synthesize a coarse badge label when the backend hasn't shipped v4 fields yet."""
+    if row.get("_legacy"):
+        # Pure legacy /agents response — no presence info at all on the row.
+        return row.get("status") or "—"
+    presence = (row.get("presence") or "").lower()
+    if presence == "online":
+        return "Live"
+    if presence == "offline":
+        return "Offline"
+    return presence or "—"
 
 
 @app.command("ping")
