@@ -711,6 +711,64 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
+    def get_agent_presence(self, agent_id_or_name: str, *, space_id: str | None = None) -> dict:
+        """GET single-agent availability record.
+
+        Tries the AVAIL-CONTRACT-001 ``/state`` endpoint first (returns an
+        envelope ``{agent_state, raw_presence, control}``). Falls back to
+        the legacy ``/presence`` endpoint (basic flat shape) on 404.
+
+        Returns a flat dict — when ``/state`` succeeds, the ``agent_state``
+        sub-object is unwrapped so callers see the resolved DTO directly,
+        with envelope siblings (``raw_presence``, ``control``) preserved
+        alongside for diagnostic access.
+
+        Accepts either an agent UUID directly (single round trip) or a name
+        which is resolved via the agents list first.
+        """
+        identifier = agent_id_or_name
+        # Resolve name → id if we got a name (the /state endpoint accepts both,
+        # but the /presence fallback only takes UUIDs).
+        if not (len(identifier) == 36 and identifier.count("-") == 4):
+            agents = self.list_agents()
+            items = agents if isinstance(agents, list) else agents.get("agents", [])
+            match = None
+            for a in items:
+                if isinstance(a, dict) and a.get("name") == agent_id_or_name:
+                    match = a
+                    break
+            if not match:
+                raise RuntimeError(f"agent not found: {agent_id_or_name}")
+            agent_id = match.get("id") or match.get("agent_id")
+            if not agent_id:
+                raise RuntimeError(f"agent has no id field: {agent_id_or_name}")
+            identifier = agent_id
+
+        params = {"space_id": space_id} if space_id else None
+
+        # Try /state first (AVAIL-CONTRACT-001). If 404, fall back to /presence.
+        try:
+            r = self._http.get(f"/api/v1/agents/{identifier}/state", params=params)
+            r.raise_for_status()
+            envelope = self._parse_json(r)
+            # Unwrap the envelope so the resolved DTO is at the top level.
+            if isinstance(envelope, dict) and "agent_state" in envelope:
+                resolved = dict(envelope.get("agent_state") or {})
+                # Preserve envelope siblings under reserved keys for diagnostics.
+                if "raw_presence" in envelope:
+                    resolved["_raw_presence"] = envelope["raw_presence"]
+                if "control" in envelope:
+                    resolved["_control"] = envelope["control"]
+                return resolved
+            return envelope
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            # /state not available yet — fall back to /presence.
+        r = self._http.get(f"/api/v1/agents/{identifier}/presence", params=params)
+        r.raise_for_status()
+        return self._parse_json(r)
+
     def create_agent(self, name: str, **kwargs) -> dict:
         """POST /api/v1/agents — create a new agent."""
         body: dict = {"name": name}

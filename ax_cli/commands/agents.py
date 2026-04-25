@@ -579,6 +579,105 @@ def status(as_json: bool = JSON_OPTION):
             console.print(f"  {indicator}  {a['name']:<20s}  {agent_type:<12s}  last_active={last}")
 
 
+@app.command("check")
+def check(
+    name_or_id: str = typer.Argument(..., help="Agent name or UUID"),
+    as_json: bool = JSON_OPTION,
+):
+    """Check single-agent presence + AVAIL-CONTRACT availability.
+
+    Forward-compat consumer of the AVAIL-CONTRACT-001 resolved DTO. Today
+    the backend returns a basic presence shape (``presence``, ``responsive``,
+    ``last_active``); when backend ships the rich ``agent_state`` DTO with
+    ``expected_response`` / ``badge_state`` / ``connection_path`` /
+    ``pre_send_warning``, the same CLI command renders the new fields
+    transparently — no flag flip needed.
+    """
+    client = get_client()
+    try:
+        record = client.get_agent_presence(name_or_id)
+    except httpx.HTTPStatusError as exc:
+        handle_error(exc)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if as_json:
+        print_json(record)
+        return
+
+    name = record.get("name") or name_or_id
+    presence = record.get("presence", "unknown")
+    responsive = record.get("responsive")
+    last_active = record.get("last_active") or "—"
+    agent_type = record.get("agent_type") or "—"
+
+    # Forward-compat AVAIL-CONTRACT v4 fields (rendered when backend provides them)
+    expected_response = record.get("expected_response")
+    badge_state = record.get("badge_state")
+    badge_label = record.get("badge_label")
+    connection_path = record.get("connection_path")
+    confidence = record.get("confidence") or record.get("presence_confidence")
+    unavailable_reason = record.get("unavailable_reason")
+    status_explanation = record.get("status_explanation")
+    pre_send_warning = record.get("pre_send_warning")
+
+    # Banner: prefer rich badge if available, else fall back to basic presence.
+    if badge_label:
+        color = (
+            "green"
+            if badge_state == "live"
+            else (
+                "yellow"
+                if badge_state == "routable_delayed"
+                else (
+                    "blue"
+                    if badge_state == "queued_only"
+                    else ("red" if badge_state in ("blocked", "offline") else "dim")
+                )
+            )
+        )
+        console.print(f"[bold {color}]{badge_label}[/bold {color}]  @{name}")
+    elif presence == "online":
+        console.print(f"[bold green]ONLINE[/bold green]  @{name}")
+    else:
+        console.print(f"[bold dim]OFFLINE[/bold dim]  @{name}")
+
+    rows = [{"field": "name", "value": name}]
+    rows.append({"field": "presence", "value": presence})
+    if responsive is not None:
+        rows.append({"field": "responsive", "value": str(responsive)})
+    rows.append({"field": "last_active", "value": last_active})
+    rows.append({"field": "agent_type", "value": agent_type})
+
+    # Forward-compat fields (only render when present)
+    for field, value in (
+        ("expected_response", expected_response),
+        ("badge_state", badge_state),
+        ("connection_path", connection_path),
+        ("confidence", confidence),
+        ("unavailable_reason", unavailable_reason),
+    ):
+        if value is not None:
+            rows.append({"field": field, "value": str(value)})
+
+    print_table(["Field", "Value"], rows, keys=["field", "value"])
+
+    if status_explanation:
+        console.print()
+        console.print(f"[dim]{status_explanation}[/dim]")
+
+    if pre_send_warning and isinstance(pre_send_warning, dict):
+        severity = pre_send_warning.get("severity", "info")
+        title = pre_send_warning.get("title", "")
+        body = pre_send_warning.get("body", "")
+        color = {"error": "red", "warning": "yellow", "info": "cyan"}.get(severity, "dim")
+        console.print()
+        console.print(f"[bold {color}]{title}[/bold {color}]")
+        if body:
+            console.print(body)
+
+
 @app.command("tools")
 def tools(
     agent_id: str = typer.Argument(..., help="Agent ID"),
