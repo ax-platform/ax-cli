@@ -85,8 +85,12 @@ from ..output import JSON_OPTION, console, err_console, print_json, print_table
 app = typer.Typer(name="gateway", help="Run the local Gateway control plane", no_args_is_help=True)
 agents_app = typer.Typer(name="agents", help="Manage Gateway-controlled agents", no_args_is_help=True)
 approvals_app = typer.Typer(name="approvals", help="Review and decide Gateway approval requests", no_args_is_help=True)
+runtime_app = typer.Typer(
+    name="runtime", help="Install and inspect runtime templates (Hermes, etc.)", no_args_is_help=True
+)
 app.add_typer(agents_app, name="agents")
 app.add_typer(approvals_app, name="approvals")
+app.add_typer(runtime_app, name="runtime")
 
 _STATE_STYLES = {
     "running": "green",
@@ -845,6 +849,176 @@ def _annotate_template_taxonomy(definition: dict) -> dict:
         }
     )
     return enriched
+
+
+# ── Runtime install (GATEWAY-RUNTIME-AUTOSETUP-001) ────────────────────────
+#
+# Hardcoded allowlist of runtimes the gateway can install on the operator's
+# behalf. Per the spec security section: clone URL is NEVER taken from the
+# request body — it comes from this dict by template_id. Adding a new runtime
+# requires a code-reviewable PR. Targets must resolve under Path.home() (with
+# realpath() so symlinks can't escape the home tree). pip install runs inside
+# a venv at <target>/.venv, never against the system Python.
+
+_RUNTIME_INSTALL_RECIPES: dict[str, dict] = {
+    "hermes": {
+        "clone_url": "https://github.com/NousResearch/hermes-agent",
+        "target_relative": "hermes-agent",
+        "verify_template_id": "hermes",
+        "install_steps": ("clone", "venv", "pip_install", "verify"),
+    },
+}
+
+
+def _resolve_install_target(template_id: str, override: str | None = None) -> Path:
+    recipe = _RUNTIME_INSTALL_RECIPES.get(template_id)
+    if recipe is None:
+        raise ValueError(f"unknown runtime template: {template_id!r}")
+    if override:
+        candidate = Path(override).expanduser().resolve()
+    else:
+        candidate = (Path.home() / recipe["target_relative"]).resolve()
+    home_resolved = Path.home().resolve()
+    try:
+        candidate.relative_to(home_resolved)
+    except ValueError as exc:
+        raise ValueError(f"refusing to install outside home tree: {candidate} (home={home_resolved})") from exc
+    return candidate
+
+
+def _install_runtime_payload(
+    template_id,
+    *,
+    target_override=None,
+    operator_session=None,
+):
+    """Run the install recipe for ``template_id`` and return a structured result.
+
+    Per AUTOSETUP-001 §"Security model":
+    - Operator-only auth: caller MUST pass an ``operator_session`` (truthy).
+      The HTTP route checks via ``load_gateway_session()`` before calling.
+    - Hardcoded allowlist: ``template_id`` must be in ``_RUNTIME_INSTALL_RECIPES``.
+    - User-writable target only: enforced via ``_resolve_install_target``
+      (uses ``realpath`` to close the symlink trap).
+    - No system Python: pip runs inside ``<target>/.venv``.
+    - Cleanup on failure: any partial directory we created is removed.
+
+    Returns a dict of shape ``{ready, summary, target, steps}`` where ``steps``
+    is a chronological list of ``{step, status, detail}`` records (synchronous
+    today; SSE streaming variant is a follow-up).
+    """
+    if not operator_session:
+        raise PermissionError("install requires an active gateway operator session")
+    template_id = str(template_id or "").strip().lower()
+    recipe = _RUNTIME_INSTALL_RECIPES.get(template_id)
+    if recipe is None:
+        raise ValueError(f"unknown runtime template: {template_id!r}")
+
+    target = _resolve_install_target(template_id, override=target_override)
+    steps: list[dict[str, str]] = []
+    we_created_target = False
+
+    def _log(step: str, status: str, detail: str = "") -> None:
+        steps.append({"step": step, "status": status, "detail": detail})
+
+    def _cleanup() -> None:
+        if we_created_target and target.exists():
+            try:
+                import shutil
+
+                shutil.rmtree(target)
+                _log("cleanup", "ok", f"removed partial install at {target}")
+            except Exception as exc:  # noqa: BLE001
+                _log("cleanup", "warn", f"could not remove {target}: {exc}")
+
+    # Step: clone
+    if "clone" in recipe["install_steps"]:
+        clone_url = recipe["clone_url"]
+        if target.exists():
+            _log("clone", "skipped", f"target already exists at {target}")
+        else:
+            _log("clone", "running", f"cloning {clone_url} → {target}")
+            we_created_target = True
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", clone_url, str(target)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                _log("clone", "ok", f"cloned to {target}")
+            except subprocess.CalledProcessError as exc:
+                _cleanup()
+                _log("clone", "error", f"git clone failed: {exc.stderr[:300]}")
+                return {"ready": False, "summary": "clone failed", "target": str(target), "steps": steps}
+            except subprocess.TimeoutExpired:
+                _cleanup()
+                _log("clone", "error", "git clone timed out after 600s")
+                return {"ready": False, "summary": "clone timed out", "target": str(target), "steps": steps}
+
+    # Step: venv
+    venv_dir = target / ".venv"
+    if "venv" in recipe["install_steps"]:
+        if venv_dir.exists():
+            _log("venv", "skipped", f"venv already at {venv_dir}")
+        else:
+            _log("venv", "running", f"creating venv at {venv_dir}")
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "venv", str(venv_dir)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                _log("venv", "ok", str(venv_dir))
+            except subprocess.CalledProcessError as exc:
+                _cleanup()
+                _log("venv", "error", f"venv create failed: {exc.stderr[:300]}")
+                return {"ready": False, "summary": "venv create failed", "target": str(target), "steps": steps}
+
+    # Step: pip install
+    if "pip_install" in recipe["install_steps"]:
+        venv_pip = venv_dir / "bin" / "pip"
+        if not venv_pip.exists():
+            _log("pip_install", "skipped", f"no pip at {venv_pip}")
+        elif not (target / "pyproject.toml").exists() and not (target / "setup.py").exists():
+            _log("pip_install", "skipped", "no pyproject.toml or setup.py at target")
+        else:
+            _log("pip_install", "running", f"installing {target} into venv")
+            try:
+                subprocess.run(
+                    [str(venv_pip), "install", "-e", str(target)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                _log("pip_install", "ok", "")
+            except subprocess.CalledProcessError as exc:
+                # Don't cleanup — the clone is valuable even if pip failed
+                _log("pip_install", "warn", f"pip install -e failed (non-fatal): {exc.stderr[:300]}")
+
+    # Step: verify (re-run setup_status check)
+    if "verify" in recipe["install_steps"]:
+        verify_template = recipe.get("verify_template_id", template_id)
+        try:
+            from ..gateway import hermes_setup_status
+
+            status = hermes_setup_status({"template_id": verify_template})
+            ready = bool(status.get("ready"))
+            _log("verify", "ok" if ready else "error", str(status.get("summary") or ""))
+        except Exception as exc:  # noqa: BLE001
+            _log("verify", "error", f"verify failed: {exc}")
+            return {"ready": False, "summary": "verify failed", "target": str(target), "steps": steps}
+
+    return {
+        "ready": True,
+        "summary": f"{template_id} installed at {target}",
+        "target": str(target),
+        "steps": steps,
+    }
 
 
 def _agent_templates_payload() -> dict:
@@ -3050,6 +3224,43 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
             parsed = urlparse(self.path)
             try:
                 body = _read_json_request(self)
+                if parsed.path.startswith("/api/templates/") and parsed.path.endswith("/install"):
+                    template_id = (
+                        unquote(parsed.path.removeprefix("/api/templates/").removesuffix("/install")).strip().lower()
+                    )
+                    if template_id not in _RUNTIME_INSTALL_RECIPES:
+                        _write_json_response(
+                            self,
+                            {"error": f"runtime not on install allowlist: {template_id!r}"},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    operator_session = load_gateway_session()
+                    if not operator_session:
+                        _write_json_response(
+                            self,
+                            {
+                                "error": "install requires an active gateway operator session — run `ax gateway login` first"
+                            },
+                            status=HTTPStatus.FORBIDDEN,
+                        )
+                        return
+                    target_override = str(body.get("target") or "").strip() or None
+                    try:
+                        payload = _install_runtime_payload(
+                            template_id,
+                            target_override=target_override,
+                            operator_session=operator_session,
+                        )
+                    except PermissionError as exc:
+                        _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+                        return
+                    except ValueError as exc:
+                        _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    status_code = HTTPStatus.OK if payload.get("ready") else HTTPStatus.UNPROCESSABLE_ENTITY
+                    _write_json_response(self, payload, status=status_code)
+                    return
                 if parsed.path == "/api/agents":
                     payload = _register_managed_agent(
                         name=str(body.get("name") or "").strip(),
@@ -3457,6 +3668,86 @@ def status(as_json: bool = JSON_OPTION):
             payload["recent_activity"],
             keys=["ts", "event", "agent_name", "message_id", "reply_preview"],
         )
+
+
+@runtime_app.command("install")
+def runtime_install(
+    template_id: str = typer.Argument(..., help="Runtime template id (today: only 'hermes')"),
+    target: str = typer.Option(None, "--target", help="Override install target (must resolve under your home tree)"),
+    as_json: bool = JSON_OPTION,
+):
+    """Install a runtime template's prerequisites (clone + venv + pip install + verify).
+
+    Today only ``hermes`` is on the install allowlist (clones from
+    https://github.com/NousResearch/hermes-agent into ~/hermes-agent and
+    installs into a venv at ~/hermes-agent/.venv). Other templates require
+    a code-reviewable PR to extend the allowlist per AUTOSETUP-001 §Security.
+
+    Requires an active gateway operator session — run ``ax gateway login`` first.
+
+        ax gateway runtime install hermes
+        ax gateway runtime install hermes --target /opt/work/hermes-agent
+    """
+    operator_session = load_gateway_session()
+    if not operator_session:
+        err_console.print("[red]No active gateway session.[/red] Run `ax gateway login` first.")
+        raise typer.Exit(1)
+    try:
+        payload = _install_runtime_payload(template_id, target_override=target, operator_session=operator_session)
+    except (ValueError, PermissionError) as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    if as_json:
+        print_json(payload)
+        return
+    err_console.print(f"[bold]ax gateway runtime install {template_id}[/bold]")
+    err_console.print(f"  target = {payload.get('target')}")
+    for step in payload.get("steps", []):
+        marker = {
+            "ok": "[green]✓[/green]",
+            "skipped": "[dim]·[/dim]",
+            "running": "[cyan]…[/cyan]",
+            "warn": "[yellow]![/yellow]",
+            "error": "[red]✗[/red]",
+        }.get(step.get("status", ""), "?")
+        detail = (step.get("detail") or "")[:160]
+        err_console.print(f"  {marker} {step.get('step')}: {detail}")
+    state = "[green]ready[/green]" if payload.get("ready") else "[red]not ready[/red]"
+    err_console.print(f"  state = {state}")
+    if not payload.get("ready"):
+        raise typer.Exit(1)
+
+
+@runtime_app.command("status")
+def runtime_status(
+    template_id: str = typer.Argument(..., help="Runtime template id (today: only 'hermes')"),
+    as_json: bool = JSON_OPTION,
+):
+    """Report whether a runtime template is ready (preflight check).
+
+    Calls the same preflight backing the wizard's ``hermes_ready`` flag.
+    Useful as an automation gate: ``ax gateway runtime status hermes`` exits
+    non-zero when not ready.
+    """
+    if template_id.strip().lower() not in _RUNTIME_INSTALL_RECIPES:
+        err_console.print(f"[red]unknown runtime template:[/red] {template_id!r}")
+        raise typer.Exit(1)
+    from ..gateway import hermes_setup_status
+
+    status = hermes_setup_status({"template_id": template_id.strip().lower()})
+    if as_json:
+        print_json(status)
+        return
+    state = "[green]ready[/green]" if status.get("ready") else "[red]not ready[/red]"
+    err_console.print(f"[bold]{template_id}[/bold] {state}")
+    if status.get("resolved_path"):
+        err_console.print(f"  resolved_path = {status['resolved_path']}")
+    if status.get("expected_path"):
+        err_console.print(f"  expected_path = {status['expected_path']}")
+    if status.get("summary"):
+        err_console.print(f"  summary = {status['summary']}")
+    if not status.get("ready"):
+        raise typer.Exit(1)
 
 
 @app.command("runtime-types")
