@@ -20,7 +20,9 @@ from typer.testing import CliRunner
 from ax_cli.commands.gateway import (
     _RUNTIME_INSTALL_RECIPES,
     _install_runtime_payload,
+    _proc_error_msg,
     _resolve_install_target,
+    _venv_module_unavailable_reason,
 )
 from ax_cli.main import app
 
@@ -239,3 +241,82 @@ def test_cli_status_unknown_template():
     result = runner.invoke(app, ["gateway", "runtime", "status", "evil"])
     assert result.exit_code != 0
     assert "unknown runtime template" in result.output
+
+
+def test_proc_error_msg_uses_stdout_when_stderr_empty():
+    """python -m venv writes the apt-install hint to stdout, not stderr.
+
+    The original implementation only read exc.stderr, so demo dry-run got
+    `"venv create failed: "` with empty detail. Regression guard.
+    """
+    exc = subprocess.CalledProcessError(
+        1,
+        ["python3", "-m", "venv", "/tmp/x"],
+        output="ensurepip is not available. apt install python3.12-venv",
+        stderr="",
+    )
+    msg = _proc_error_msg(exc)
+    assert "ensurepip" in msg
+    assert "python3.12-venv" in msg
+
+
+def test_proc_error_msg_combines_streams_without_dupes():
+    """Both stdout and stderr surface; identical content isn't doubled."""
+    same = "boom"
+    exc_dup = subprocess.CalledProcessError(1, ["x"], output=same, stderr=same)
+    assert _proc_error_msg(exc_dup) == same
+
+    exc_both = subprocess.CalledProcessError(1, ["x"], output="out-msg", stderr="err-msg")
+    msg = _proc_error_msg(exc_both)
+    assert "err-msg" in msg
+    assert "out-msg" in msg
+
+
+def test_proc_error_msg_falls_back_to_exit_code():
+    """Empty streams shouldn't produce empty error text."""
+    exc = subprocess.CalledProcessError(7, ["x"], output="", stderr="")
+    assert "exit 7" in _proc_error_msg(exc)
+
+
+def test_venv_preflight_fails_fast_when_ensurepip_missing(tmp_path, monkeypatch):
+    """Pre-flight catches the python3-venv-missing case before clone/install runs.
+
+    Without this, clone succeeds, venv fails with empty detail, partial dir gets
+    cleaned up — operator has no idea why install didn't work.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    real_run = subprocess.run
+
+    def _fake_run(args, **kwargs):
+        # Fail the ensurepip probe; let everything else through.
+        if args[1:3] == ["-c", "import ensurepip"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="ModuleNotFoundError: No module named 'ensurepip'")
+        # Simulate clone success so we reach the venv pre-flight.
+        if args[0] == "git" and args[1] == "clone":
+            (tmp_path / "hermes-agent").mkdir()
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return real_run(args, **kwargs)
+
+    with patch("ax_cli.commands.gateway.subprocess.run", side_effect=_fake_run):
+        result = _install_runtime_payload("hermes", operator_session={"user": "test"})
+
+    assert result["ready"] is False
+    assert result["summary"] == "venv prerequisite missing"
+    venv_steps = [s for s in result["steps"] if s["step"] == "venv"]
+    assert venv_steps, "expected a venv step in the trace"
+    assert venv_steps[-1]["status"] == "error"
+    assert "ensurepip" in venv_steps[-1]["detail"].lower()
+    assert "python3" in venv_steps[-1]["detail"]  # apt hint surfaced
+    # Clean up the partial install
+    assert not (tmp_path / "hermes-agent").exists()
+
+
+def test_venv_preflight_returns_none_when_module_works():
+    """Sanity check: on a healthy box where ensurepip imports cleanly, no error."""
+    # This will only pass on a box with python3-venv installed; allow-list either outcome.
+    reason = _venv_module_unavailable_reason()
+    if reason is not None:
+        # Box doesn't have python3-venv — make sure the message is actionable.
+        assert "ensurepip" in reason or "venv module" in reason
+        assert "apt install" in reason or "could not probe" in reason

@@ -886,6 +886,50 @@ def _resolve_install_target(template_id: str, override: str | None = None) -> Pa
     return candidate
 
 
+def _proc_error_msg(exc: subprocess.CalledProcessError) -> str:
+    """Best-effort error string from a subprocess failure.
+
+    `python -m venv` writes its "ensurepip not available, apt install python3-venv"
+    hint to stdout, not stderr. Reading only `exc.stderr` swallowed the actionable
+    error in the AUTOSETUP demo dry-run. Use both streams; fall back to exit code.
+    """
+    stderr = (exc.stderr or "").strip()
+    stdout = (exc.stdout or "").strip()
+    parts: list[str] = []
+    if stderr:
+        parts.append(stderr)
+    if stdout and stdout != stderr:
+        parts.append(stdout)
+    if not parts:
+        parts.append(f"exit {exc.returncode}")
+    return " | ".join(parts)[:500]
+
+
+def _venv_module_unavailable_reason() -> str | None:
+    """Return an actionable error string if stdlib venv can't create environments.
+
+    On Debian/Ubuntu, `python3 -m venv` fails when the `python3-venv` package
+    is missing — but the failure mode is "exits 1, prints hint to stdout" which
+    is easy to miss. Probe `ensurepip` directly so we can fail fast with a clean
+    message before running git clone.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", "import ensurepip"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return f"could not probe Python venv module: {exc}"
+    if result.returncode != 0:
+        return (
+            "stdlib venv unavailable (ensurepip missing). "
+            "On Debian/Ubuntu: `apt install python3.12-venv` (or matching python3-venv for your interpreter)."
+        )
+    return None
+
+
 def _install_runtime_payload(
     template_id,
     *,
@@ -950,7 +994,7 @@ def _install_runtime_payload(
                 _log("clone", "ok", f"cloned to {target}")
             except subprocess.CalledProcessError as exc:
                 _cleanup()
-                _log("clone", "error", f"git clone failed: {exc.stderr[:300]}")
+                _log("clone", "error", f"git clone failed: {_proc_error_msg(exc)}")
                 return {"ready": False, "summary": "clone failed", "target": str(target), "steps": steps}
             except subprocess.TimeoutExpired:
                 _cleanup()
@@ -963,6 +1007,11 @@ def _install_runtime_payload(
         if venv_dir.exists():
             _log("venv", "skipped", f"venv already at {venv_dir}")
         else:
+            preflight = _venv_module_unavailable_reason()
+            if preflight:
+                _cleanup()
+                _log("venv", "error", preflight)
+                return {"ready": False, "summary": "venv prerequisite missing", "target": str(target), "steps": steps}
             _log("venv", "running", f"creating venv at {venv_dir}")
             try:
                 subprocess.run(
@@ -975,7 +1024,7 @@ def _install_runtime_payload(
                 _log("venv", "ok", str(venv_dir))
             except subprocess.CalledProcessError as exc:
                 _cleanup()
-                _log("venv", "error", f"venv create failed: {exc.stderr[:300]}")
+                _log("venv", "error", f"venv create failed: {_proc_error_msg(exc)}")
                 return {"ready": False, "summary": "venv create failed", "target": str(target), "steps": steps}
 
     # Step: pip install
@@ -998,7 +1047,7 @@ def _install_runtime_payload(
                 _log("pip_install", "ok", "")
             except subprocess.CalledProcessError as exc:
                 # Don't cleanup — the clone is valuable even if pip failed
-                _log("pip_install", "warn", f"pip install -e failed (non-fatal): {exc.stderr[:300]}")
+                _log("pip_install", "warn", f"pip install -e failed (non-fatal): {_proc_error_msg(exc)}")
 
     # Step: verify (re-run setup_status check)
     if "verify" in recipe["install_steps"]:
