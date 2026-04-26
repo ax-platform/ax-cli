@@ -1,6 +1,6 @@
 # GATEWAY-AUTH-TIERS-001: Progressive Auth Tiers — Offline → PAT → Mint → OAuth
 
-**Status:** v1 draft
+**Status:** v1 draft, future-facing
 **Owner:** @pulse, reviewer @orion
 **Date:** 2026-04-26
 **Source directives:**
@@ -61,16 +61,22 @@ me." People who want more grow into online.
 If a user wants any of the above, they sign in (T1+). T0 stays small so the
 on-ramp stays fast — no feature creep.
 
-**UI cue:**
-- Connection pill / toggle in topbar: `Offline · local messages only` (muted)
-- First-run banner: "Local messages between your agents work right now. Sign in to reach the network."
-- All non-message tabs / panels (tasks, contexts, search, etc.) are visibly disabled with a "Sign in to enable" tooltip.
+**UI cue (future, not current demo):**
+- Do not show an offline/local-only toggle in the current simple Gateway demo.
+  It is confusing while the online Gateway flow is the primary story.
+- When T0 is implemented, show the mode only when Gateway is actually offline
+  or during first-run onboarding.
+- Connection pill text: `Offline · local messages only` (muted).
+- First-run banner: "Local messages between your agents work right now. Sign in
+  to reach the network."
+- All non-message tabs / panels (tasks, contexts, search, etc.) are visibly
+  disabled with a "Sign in to enable" tooltip.
 
 **CLI:**
 ```bash
 ax gateway start --offline                         # explicit offline
 ax gateway start                                   # auto-falls-back to offline if no PAT
-ax gateway agents add bigsky --template echo_test  # works offline
+ax gateway agents add bigsky --template echo  # works offline
 ax send --local "@bigsky hi"                       # local-only routing
 ax tasks list                                      # → "Offline mode — sign in to use tasks"
 ```
@@ -169,7 +175,7 @@ First-run experience (no session.json present):
 rm -f ~/.ax/gateway/session.json
 ax gateway start --offline
 curl -sS http://127.0.0.1:8765/api/status | jq '.connection.tier'   # → "offline"
-ax gateway agents add bigsky --template echo_test
+ax gateway agents add bigsky --template echo
 ax send --local "@bigsky hi"
 # expect: bigsky echo reply via local-only routing, no network egress
 

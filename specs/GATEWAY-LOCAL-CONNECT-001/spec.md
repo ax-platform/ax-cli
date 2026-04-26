@@ -35,6 +35,27 @@ Pass-through agents are deliberately not live listeners. They have a mailbox, th
 - Routing every aX API surface through gateway (start with messages + tasks + context, expand later).
 - Gateway-as-MCP-server mode (covered by GATEWAY-AGENT-TOOLBELT-001).
 
+## Relationship to the registry
+
+Local Connect is the handshake layer for
+**GATEWAY-AGENT-REGISTRY-001**. The registry is the canonical source for:
+
+- the `agent_id` being used;
+- the approved local origin binding;
+- the trust-signature fields;
+- whether this local process may receive a session token;
+- which Gateway-managed agent credential is used for agent-authored actions.
+
+Older examples in this spec show the minimum fields a process can report. The
+canonical reconnect signature is the registry signature:
+
+```text
+agent_id + install_id + gateway_id + base_url + host_fingerprint + user + cwd + exe_path + template_id
+```
+
+`pid`, `parent_pid`, command arguments, and timestamps remain audit fields, not
+stable reconnect keys.
+
 ## Fingerprint shape
 
 ```json
@@ -49,12 +70,12 @@ Pass-through agents are deliberately not live listeners. They have a mailbox, th
 }
 ```
 
-The agent supplies these in the connect call. The gateway records the full set; the **trust signature** for re-connect matching is `(agent_name, exe_path, cwd, user)`. A change in any of those triggers a fresh approval. Other fields are recorded for audit but not part of the matching key.
-
-For pass-through mailbox agents, the canonical reconnect trust signature is
-defined in **GATEWAY-PASS-THROUGH-MAILBOX-001** and also includes Gateway/host
-and template context. `pid` and `parent_pid` are audit fields, not reconnect
-keys.
+The agent supplies these in the connect call. Gateway records the full set and
+normalizes it into the registry fingerprint described above. At minimum, a
+change in executable path, working directory, or OS user triggers a fresh
+approval. If the registry row already has `agent_id`, `install_id`,
+`gateway_id`, `base_url`, or `template_id`, those fields also participate in
+the trust signature.
 
 ## HMAC key + session-token persistence
 
@@ -81,10 +102,10 @@ drawer and the connection must still require operator approval.
 unknown_fingerprint → pending → approved | denied | revoked
 ```
 
-- **pending**: row appears in the simple gateway agent table as `Pass-through` with status `Needs approval`. Operator opens the row and clicks Approve / Deny.
+- **pending**: row appears in the simple gateway agent table as `Pass-through` with status `Needs approval`. Operator opens the row, reviews the fingerprint, and clicks Approve.
 - **approved**: gateway issues `session_token` (HMAC over `agent_name + fingerprint + nonce`, 24h expiry). Agent can call `/local/send` and mailbox/toolbelt endpoints.
 - **auto-approved**: same as approved, but skipped the user step. Logged distinctly.
-- **denied**: gateway records the rejection; agent must wait or change fingerprint to retry.
+- **denied**: v1 records this by removing the pending row or revoking the local trust entry. A first-class deny endpoint may be added later, but row removal is the demo rejection path.
 - **revoked**: token invalidated. Operator can also revoke a previously-approved fingerprint.
 
 ## API surface (gateway local server, 127.0.0.1 only)
@@ -99,15 +120,19 @@ POST /local/connect
 POST /local/send
   headers: X-Gateway-Session: <session_token>
   body: { space_id, content, parent_id?, ... }
-  → gateway relays to /api/v1/messages using its OWN credentials with
-    an `X-Acting-Agent-Id: <agent_id>` header. Locally-connected
-    agents do NOT supply a PAT in /local/connect — the gateway acts on
-    their behalf, scoped to whatever the approval-time validation
-    allowed. Activity events emitted as if it were a managed agent.
+  → Gateway resolves the session to one approved registry row, loads that
+    row's Gateway-managed agent credential, and sends to /api/v1/messages as
+    the agent principal. The bootstrap user credential must not author this
+    message and must not be converted into agent authorship with an
+    acting-agent header.
+
+Locally connected agents do not supply a PAT in `/local/connect`. They receive
+a local Gateway session after approval. Gateway then uses the managed
+agent credential for that registry row, scoped to the approved environment and
+space binding. Activity events are emitted as agent activity.
 
 GET /local/approvals          (operator UI)
 POST /local/approvals/{id}/approve
-POST /local/approvals/{id}/deny
 DELETE /local/sessions/{token}    (revoke)
 
 GET /local/sessions           (operator UI — what's currently connected)
@@ -193,9 +218,18 @@ ax gateway agents remove <name>                   # rejection path
 
 ## Pass-through ack endpoint (impl 2026-04-26)
 
-Pass-through agents reply to mailbox messages via their **own gateway-issued PAT**, calling aX directly. The gateway never sees the outbound reply traffic, so without an ack callback the local registry's `last_reply_at`, `processed_count`, and `backlog_depth` go stale and the simple-gateway drawer keeps showing "1 message awaiting check" forever.
+The preferred v1 reply path is `ax gateway local send`, which Gateway can
+reconcile automatically because it sees both the local session and the outbound
+agent-authored message.
 
-The agent MUST call `POST /api/agents/<name>/ack` after sending a reply:
+Some older or already-running agents may still reply with their own
+Gateway-issued agent PAT by calling aX directly. In that direct path, Gateway
+does not see outbound reply traffic, so without an ack callback the local
+registry's `last_reply_at`, `processed_count`, and `backlog_depth` go stale and
+the simple-gateway drawer keeps showing "1 message awaiting check" forever.
+
+Agents that use the direct path MUST call `POST /api/agents/<name>/ack` after
+sending a reply:
 
 ```
 POST /api/agents/<name>/ack

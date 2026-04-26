@@ -25,6 +25,12 @@ That's because Hermes' tool ecosystem is local-OS-flavored (bash, files, web fet
 
 A bash-running agent that can't see its own tasks or other agents is half-blind. This spec wires the aX toolbelt into every gateway-managed runtime so they can participate in the platform fully — not just reply to messages.
 
+For pass-through agents, the important product behavior is that the agent does
+not need to reason about user PATs, switchboard identities, or ad hoc MCP
+servers. Once Local Connect approves the workspace fingerprint, aX CLI tools
+should resolve that registered identity automatically and call through Gateway
+or a Gateway-managed agent credential.
+
 ## Scope
 
 **In:**
@@ -62,9 +68,26 @@ Every gateway-managed agent gets these unless explicitly excluded:
 
 ## Tool surface design
 
-Two compatible ways to expose the toolbelt:
+Three compatible ways to expose the toolbelt:
 
-### A. MCP-passthrough (preferred for Hermes / Claude Code)
+### A. CLI local identity resolution (preferred for pass-through agents)
+
+After `ax gateway local register` or `ax gateway local connect`, ordinary CLI
+commands should resolve the approved local registry identity:
+
+```bash
+ax messages list --unread
+ax tasks list
+ax context list
+ax send "@night_owl status?"
+```
+
+Resolution must verify `.ax/config.toml` plus the current fingerprint and then
+use the approved local session or Gateway-managed agent credential. If the
+fingerprint is pending, drifted, or ambiguous, the command blocks with a clear
+approval message. It must never silently fall back to the bootstrap user.
+
+### B. MCP-passthrough (preferred for Hermes / Claude Code)
 
 The gateway already has the `ax-channel` MCP server bundled in this repo (`/channel`). When the sentinel launches the runtime, it injects an MCP server config:
 
@@ -85,9 +108,11 @@ Token resolution per agent type:
 - **Gateway-launched runtime** (Hermes, Ollama bridge, etc.) → token file is the agent's own gateway-issued PAT at `~/.ax/gateway/agents/<name>/token`. The MCP server exchanges that PAT for an `agent_access` JWT before each business call.
 - **Locally-connected agent** (via GATEWAY-LOCAL-CONNECT-001) → the session_token from the connect handshake. The MCP server treats `axgw_s_*` session tokens as a separate auth shape and validates them against the gateway's HMAC secret before each business call. (This requires `ax-channel` to gain a session-token verifier — small adapter change.)
 
-Hermes / Claude Code / Codex all already speak MCP, so option A lights up the toolbelt with zero per-runtime adapter code beyond the MCP server's auth shapes.
+Hermes / Claude Code / Codex all already speak MCP, so option B lights up the
+toolbelt with zero per-runtime adapter code beyond the MCP server's auth shapes
+when an MCP host is the right integration point.
 
-### B. Direct-call helpers (for runtimes that don't speak MCP)
+### C. Direct-call helpers (for runtimes that don't speak MCP)
 
 Some runtimes (e.g. `openai_sdk`, raw exec scripts) don't have an MCP host. For those, the sentinel exposes a Python module on the launched subprocess's `PYTHONPATH`:
 
@@ -160,7 +185,7 @@ ax gateway agents update toolbelt-demo --toolbelt-deny tasks.assign
 
 ## Open questions
 
-- The MCP-passthrough path (option A) needs the `ax-channel` MCP server to accept an agent-bound token, not a user PAT. Confirm with backend_sentinel that `axp_a_` PATs can authenticate via the MCP server's exchange path.
+- The MCP-passthrough path (option B) needs the `ax-channel` MCP server to accept an agent-bound token, not a user PAT. Confirm with backend_sentinel that `axp_a_` PATs can authenticate via the MCP server's exchange path.
 - For raw `exec` runtimes, do we want to bundle `ax_toolbelt` as a sibling to `ax_cli.runtimes.hermes` or expose it via `ax_cli.toolbelt`? The latter is cleaner for `pip install ax-cli` consumers.
 - Should denials be silent (tool not visible to the agent) or surfaced as "denied" errors when called? Surfacing seems more honest but may confuse weak runtimes. Default: silent for `allow`, surfaced for `deny`.
 - Cross-cuts with GATEWAY-LOCAL-CONNECT-001 — agents that connect via local socket also need the same toolbelt. The session_token issued by Local Connect should be valid for both `/local/send` and the toolbelt's MCP/REST relays.

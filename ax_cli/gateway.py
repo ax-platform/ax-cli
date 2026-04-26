@@ -9,14 +9,17 @@ introducing a second backend.
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
+import hmac
 import json
 import os
 import platform
 import queue
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -49,6 +52,7 @@ DEFAULT_HANDLER_TIMEOUT_SECONDS = 900
 MIN_HANDLER_TIMEOUT_SECONDS = 1
 SSE_IDLE_TIMEOUT_SECONDS = 45.0
 RUNTIME_STALE_AFTER_SECONDS = 75.0
+LOCAL_SESSION_TTL_SECONDS = 24 * 60 * 60
 GATEWAY_EVENT_PREFIX = "AX_GATEWAY_EVENT "
 DEFAULT_OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 ENV_DENYLIST = {
@@ -100,6 +104,7 @@ _CONTROLLED_ASSET_CLASSES = {
 _CONTROLLED_INTAKE_MODELS = {
     "live_listener",
     "launch_on_send",
+    "polling_mailbox",
     "queue_accept",
     "queue_drain",
     "scheduled_run",
@@ -108,15 +113,25 @@ _CONTROLLED_INTAKE_MODELS = {
 }
 _CONTROLLED_TRIGGER_SOURCES = {
     "direct_message",
+    "mailbox_poll",
+    "manual_check",
     "queued_job",
     "scheduled_invocation",
     "external_alert",
     "manual_trigger",
     "tool_call",
 }
-_CONTROLLED_RETURN_PATHS = {"inline_reply", "sender_inbox", "summary_post", "task_update", "event_log", "silent"}
+_CONTROLLED_RETURN_PATHS = {
+    "inline_reply",
+    "manual_reply",
+    "sender_inbox",
+    "summary_post",
+    "task_update",
+    "event_log",
+    "silent",
+}
 _CONTROLLED_TELEMETRY_SHAPES = {"rich", "basic", "heartbeat_only", "opaque"}
-_CONTROLLED_WORKER_MODELS = {"queue_drain"}
+_CONTROLLED_WORKER_MODELS = {"agent_check_in", "queue_drain"}
 _CONTROLLED_ATTESTATION_STATES = {"verified", "drifted", "unknown", "blocked"}
 _CONTROLLED_APPROVAL_STATES = {"not_required", "pending", "approved", "rejected"}
 _CONTROLLED_IDENTITY_STATUSES = {
@@ -295,6 +310,12 @@ def _template_operator_defaults(template_id: str | None, runtime_type: object) -
             "reply_mode": "interactive",
             "telemetry_level": "basic",
         },
+        "pass_through": {
+            "placement": "mailbox",
+            "activation": "attach_only",
+            "reply_mode": "background",
+            "telemetry_level": "basic",
+        },
         "inbox": {
             "placement": "mailbox",
             "activation": "queue_worker",
@@ -418,6 +439,21 @@ def _template_asset_defaults(template_id: str | None, runtime_type: object) -> d
             "capabilities": ["reply"],
             "constraints": ["requires-attached-session"],
         },
+        "pass_through": {
+            "asset_class": "interactive_agent",
+            "intake_model": "polling_mailbox",
+            "trigger_sources": ["mailbox_poll", "manual_check"],
+            "return_paths": ["manual_reply", "summary_post"],
+            "telemetry_shape": "basic",
+            "worker_model": "agent_check_in",
+            "addressable": True,
+            "messageable": True,
+            "schedulable": False,
+            "externally_triggered": False,
+            "tags": ["local", "mailbox", "polling", "approval-required"],
+            "capabilities": ["poll_mailbox", "reply"],
+            "constraints": ["requires-approval"],
+        },
         "inbox": {
             "asset_class": "background_worker",
             "intake_model": "queue_accept",
@@ -481,6 +517,8 @@ def _asset_type_label(*, asset_class: str, intake_model: str, worker_model: str 
             return "Live Listener"
         if intake_model == "launch_on_send":
             return "On-Demand Agent"
+        if intake_model == "polling_mailbox":
+            return "Pass-through Agent"
     if asset_class == "background_worker":
         if intake_model == "queue_accept" or worker_model == "queue_drain":
             return "Inbox Worker"
@@ -498,6 +536,7 @@ def _output_label(return_paths: list[str]) -> str:
     primary = return_paths[0] if return_paths else "inline_reply"
     return {
         "inline_reply": "Reply",
+        "manual_reply": "Manual Reply",
         "sender_inbox": "Inbox",
         "summary_post": "Summary",
         "task_update": "Task",
@@ -1080,6 +1119,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(raw: str) -> bytes:
+    padding = "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode((raw + padding).encode("ascii"))
+
+
 def _gateway_id_from_registry(registry: dict[str, Any]) -> str:
     gateway = registry.setdefault("gateway", {})
     gateway_id = str(gateway.get("gateway_id") or "").strip()
@@ -1088,6 +1136,77 @@ def _gateway_id_from_registry(registry: dict[str, Any]) -> str:
     gateway_id = str(uuid.uuid4())
     gateway["gateway_id"] = gateway_id
     return gateway_id
+
+
+def local_secret_path() -> Path:
+    return gateway_dir() / "local_secret.bin"
+
+
+def load_local_secret() -> bytes:
+    path = local_secret_path()
+    if path.exists():
+        return path.read_bytes()
+    secret = os.urandom(32)
+    path.write_bytes(secret)
+    path.chmod(0o600)
+    return secret
+
+
+def _local_session_signature(payload: str, secret: bytes) -> str:
+    digest = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).digest()
+    return _b64url_encode(digest)
+
+
+def issue_local_session(
+    registry: dict[str, Any],
+    entry: dict[str, Any],
+    *,
+    fingerprint: dict[str, Any] | None = None,
+    ttl_seconds: int = LOCAL_SESSION_TTL_SECONDS,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    expires_at = datetime.fromtimestamp(now.timestamp() + ttl_seconds, tz=timezone.utc).isoformat()
+    session = {
+        "session_id": str(uuid.uuid4()),
+        "agent_name": str(entry.get("name") or ""),
+        "agent_id": str(entry.get("agent_id") or ""),
+        "asset_id": _asset_id_for_entry(entry),
+        "gateway_id": _gateway_id_from_registry(registry),
+        "fingerprint_signature": _payload_hash(fingerprint or entry.get("local_fingerprint") or {}),
+        "issued_at": now.isoformat(),
+        "expires_at": expires_at,
+    }
+    payload = _b64url_encode(json.dumps(session, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    signature = _local_session_signature(payload, load_local_secret())
+    token = f"axgw_s_{payload}.{signature}"
+    registry.setdefault("local_sessions", [])
+    registry["local_sessions"].append({**session, "status": "active"})
+    return {"session_token": token, "session": session}
+
+
+def verify_local_session_token(registry: dict[str, Any], token: str) -> dict[str, Any]:
+    raw = str(token or "").strip()
+    if not raw.startswith("axgw_s_") or "." not in raw:
+        raise ValueError("Invalid Gateway local session token.")
+    payload, signature = raw.removeprefix("axgw_s_").split(".", 1)
+    expected = _local_session_signature(payload, load_local_secret())
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError("Invalid Gateway local session token.")
+    try:
+        session = json.loads(_b64url_decode(payload).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("Invalid Gateway local session payload.") from exc
+    expires_at = _parse_iso8601(session.get("expires_at"))
+    if expires_at is None or expires_at < datetime.now(timezone.utc):
+        raise ValueError("Gateway local session expired.")
+    session_id = str(session.get("session_id") or "")
+    stored = next(
+        (item for item in registry.get("local_sessions", []) if str(item.get("session_id") or "") == session_id),
+        None,
+    )
+    if stored and str(stored.get("status") or "active") != "active":
+        raise ValueError("Gateway local session is no longer active.")
+    return session
 
 
 def _asset_id_for_entry(entry: dict[str, Any]) -> str:
@@ -1129,9 +1248,85 @@ def _payload_hash(payload: dict[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
 def _host_fingerprint() -> str:
     host = platform.node() or "unknown-host"
     return f"host:{hashlib.sha256(host.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _safe_file_sha256(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        if path.exists() and path.is_file():
+            return _file_sha256(path)
+    except OSError:
+        return None
+    return None
+
+
+def _without_none(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if value is not None and value != ""}
+
+
+def _command_executable_path(command: str | None) -> str | None:
+    raw = str(command or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return None
+    idx = 0
+    if parts and parts[0] == "env":
+        idx = 1
+        while idx < len(parts) and "=" in parts[idx] and not parts[idx].startswith("-"):
+            idx += 1
+    if idx >= len(parts):
+        return None
+    executable = parts[idx]
+    resolved = shutil.which(executable) if not Path(executable).is_absolute() else executable
+    return str(Path(resolved).expanduser().resolve()) if resolved else executable
+
+
+def _runtime_origin_fingerprint(entry: dict[str, Any]) -> dict[str, Any]:
+    command = str(entry.get("exec_command") or "").strip() or None
+    executable_path = _command_executable_path(command)
+    workdir = str(entry.get("workdir") or "").strip() or None
+    runtime_type = str(entry.get("runtime_type") or "").strip() or None
+    template_id = str(entry.get("template_id") or "").strip() or None
+    hermes_tools_shim = Path(__file__).resolve().parent / "runtimes" / "hermes" / "tools" / "__init__.py"
+    payload = _without_none(
+        {
+            "schema": "gateway.runtime_fingerprint.v1",
+            "agent_name": str(entry.get("name") or "").strip() or None,
+            "runtime_type": runtime_type,
+            "template_id": template_id,
+            "host_fingerprint": _host_fingerprint(),
+            "platform": platform.platform(),
+            "user": os.environ.get("USER") or os.environ.get("LOGNAME"),
+            "workdir": str(Path(workdir).expanduser()) if workdir else None,
+            "command": command,
+            "executable_path": executable_path,
+            "executable_sha256": _safe_file_sha256(Path(executable_path)) if executable_path else None,
+            "hermes_repo_path": str(entry.get("hermes_repo_path") or "").strip() or None,
+            "hermes_python": _hermes_sentinel_python(entry) if runtime_type == "hermes_sentinel" else None,
+            "gateway_repo_root": str(_gateway_repo_root()) if runtime_type == "hermes_sentinel" else None,
+            "hermes_tools_shim": str(hermes_tools_shim) if runtime_type == "hermes_sentinel" else None,
+            "hermes_tools_shim_sha256": _safe_file_sha256(hermes_tools_shim)
+            if runtime_type == "hermes_sentinel"
+            else None,
+        }
+    )
+    payload["runtime_fingerprint_hash"] = _payload_hash(payload)
+    return payload
 
 
 def _normalized_base_url(value: object) -> str:
@@ -1238,6 +1433,7 @@ def _binding_candidate_for_entry(entry: dict[str, Any], registry: dict[str, Any]
     asset_id = _asset_id_for_entry(entry)
     install_id = str(entry.get("install_id") or "").strip() or str(uuid.uuid4())
     launch_spec = _launch_spec_for_entry(entry)
+    runtime_fingerprint = _runtime_origin_fingerprint(entry)
     workdir = str(entry.get("workdir") or "").strip() or None
     path = str(Path(workdir).expanduser()) if workdir else None
     candidate = {
@@ -1248,6 +1444,8 @@ def _binding_candidate_for_entry(entry: dict[str, Any], registry: dict[str, Any]
         "path": path,
         "launch_spec": launch_spec,
         "launch_spec_hash": _payload_hash(launch_spec),
+        "runtime_fingerprint": runtime_fingerprint,
+        "runtime_fingerprint_hash": runtime_fingerprint.get("runtime_fingerprint_hash"),
         "created_from": str(
             entry.get("created_from") or ("ax_template" if entry.get("template_id") else "custom_bridge")
         ),
@@ -1877,6 +2075,11 @@ def ensure_local_asset_binding(
         path=binding.get("path"),
     )
     return binding
+
+
+def _entry_requires_operator_approval(entry: dict[str, Any]) -> bool:
+    template_id = str(entry.get("template_id") or "").strip().lower()
+    return bool(entry.get("requires_approval")) or template_id in {"pass_through"}
 
 
 def _create_binding_approval(
@@ -2828,6 +3031,39 @@ def _post_placement_ack(
     return 200 <= response.status_code < 300
 
 
+def find_agent_entry_by_ref(registry: dict[str, Any], ref: str) -> dict[str, Any] | None:
+    """Find an agent by registry row number, name, or stable id prefix."""
+    raw = str(ref or "").strip()
+    if not raw:
+        return None
+    normalized = raw.lower().lstrip("#").strip()
+    agents = [entry for entry in registry.get("agents", []) if isinstance(entry, dict)]
+    if normalized.isdigit():
+        idx = int(normalized) - 1
+        if 0 <= idx < len(agents):
+            return agents[idx]
+    for entry in agents:
+        if str(entry.get("name") or "").lower() == normalized:
+            return entry
+    id_fields = ("install_id", "agent_id", "asset_id", "runtime_instance_id", "approval_id")
+    exact_matches = [
+        entry for entry in agents for field in id_fields if str(entry.get(field) or "").lower() == normalized
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(normalized) >= 6:
+        prefix_matches = []
+        for entry in agents:
+            for field in id_fields:
+                value = str(entry.get(field) or "").lower()
+                if value and value.startswith(normalized):
+                    prefix_matches.append(entry)
+                    break
+        if len(prefix_matches) == 1:
+            return prefix_matches[0]
+    return None
+
+
 def upsert_agent_entry(registry: dict[str, Any], agent: dict[str, Any]) -> dict[str, Any]:
     agents = registry.setdefault("agents", [])
     for idx, existing in enumerate(agents):
@@ -2850,10 +3086,26 @@ def remove_agent_entry(registry: dict[str, Any], name: str) -> dict[str, Any] | 
 
 def sanitize_exec_env(prompt: str, entry: dict[str, Any]) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in ENV_DENYLIST}
-    env["AX_GATEWAY_AGENT_ID"] = str(entry.get("agent_id") or "")
-    env["AX_GATEWAY_AGENT_NAME"] = str(entry.get("name") or "")
+    agent_id = str(entry.get("agent_id") or "")
+    agent_name = str(entry.get("name") or "")
+    env["AX_GATEWAY_AGENT_ID"] = agent_id
+    env["AX_GATEWAY_AGENT_NAME"] = agent_name
+    env["AX_AGENT_ID"] = agent_id
+    env["AX_AGENT_NAME"] = agent_name
     env["AX_GATEWAY_RUNTIME_TYPE"] = str(entry.get("runtime_type") or "")
     env["AX_MENTION_CONTENT"] = prompt
+    token_file = str(entry.get("token_file") or "").strip()
+    if token_file:
+        # Validate the bound credential without placing the secret in the child
+        # process environment. Bridges read AX_TOKEN_FILE when they need to call aX.
+        load_gateway_managed_agent_token(entry)
+        env["AX_TOKEN_FILE"] = token_file
+    base_url = str(entry.get("base_url") or "").strip()
+    if base_url:
+        env["AX_BASE_URL"] = base_url
+    space_id = str(entry.get("space_id") or "").strip()
+    if space_id:
+        env["AX_SPACE_ID"] = space_id
     ollama_model = str(entry.get("ollama_model") or "").strip()
     if ollama_model:
         env["OLLAMA_MODEL"] = ollama_model
@@ -3448,6 +3700,7 @@ class ManagedAgentRuntime:
         stored = find_agent_entry(registry, self.name) or {}
         pending_items = load_agent_pending_messages(self.name)
         backlog_depth = len(pending_items)
+        last_pending = pending_items[-1] if pending_items else {}
         merged = dict(snapshot)
         for key in (
             "processed_count",
@@ -3459,6 +3712,10 @@ class ManagedAgentRuntime:
         ):
             if key in stored:
                 merged[key] = stored.get(key)
+        if backlog_depth > 0:
+            merged["last_work_received_at"] = (
+                last_pending.get("queued_at") or last_pending.get("created_at") or snapshot.get("last_work_received_at")
+            )
         merged["backlog_depth"] = backlog_depth
         merged["current_status"] = "queued" if backlog_depth > 0 else None
         merged["current_activity"] = (
@@ -3659,7 +3916,19 @@ class ManagedAgentRuntime:
         """Read sentinel stdout line-by-line, parse AX_GATEWAY_EVENT lines and
         forward them to the activity stream. All other lines tee to the
         existing log file unchanged so operator visibility stays the same.
+
+        Also writes gateway-side activity events (record_gateway_activity) so
+        the simple-gateway drawer surfaces the same lifecycle the listener-loop
+        path produces:
+          - first sight of a message_id  → message_received
+          - status=accepted              → message_claimed
+          - status=completed             → reply_sent (clears the "Working" pill)
+          - status=error                 → runtime_error
+        Without these, supervised-subprocess runtimes (Hermes) would have an
+        activity feed that never clears past "Working" and never shows messages
+        delivered via the agent's own SSE listener (e.g. user-authored DMs).
         """
+        seen_message_ids: set[str] = set()
         try:
             stdout = process.stdout
             if stdout is None:
@@ -3686,7 +3955,7 @@ class ManagedAgentRuntime:
                 # Mirror the runtime worker's update + publish path so the row
                 # status pill and the aX UI bubble both reflect what the
                 # sentinel is currently doing.
-                updates: dict[str, Any] = {"current_status": status}
+                updates: dict[str, Any] = {"current_status": status, "last_seen_at": _now_iso()}
                 if activity is not None:
                     updates["current_activity"] = activity[:240]
                 if tool_name is not None:
@@ -3695,6 +3964,7 @@ class ManagedAgentRuntime:
                     updates["current_status"] = None
                     updates["current_activity"] = None
                     updates["current_tool"] = None
+                    updates["last_work_completed_at"] = _now_iso()
                 self._update_state(**updates)
                 self._publish_processing_status(
                     message_id,
@@ -3702,6 +3972,53 @@ class ManagedAgentRuntime:
                     activity=activity,
                     tool_name=tool_name,
                 )
+
+                # Drawer-visible lifecycle events. We synthesize them from the
+                # sentinel's status stream so the drawer feed matches the
+                # backend-side activity bubble.
+                if message_id not in seen_message_ids:
+                    seen_message_ids.add(message_id)
+                    record_gateway_activity(
+                        "message_received",
+                        entry=self.entry,
+                        message_id=message_id,
+                        preview=activity,
+                    )
+                    self._update_state(
+                        last_work_received_at=_now_iso(),
+                        last_received_message_id=message_id,
+                    )
+                if status == "accepted":
+                    record_gateway_activity(
+                        "message_claimed",
+                        entry=self.entry,
+                        message_id=message_id,
+                    )
+                elif status == "completed":
+                    record_gateway_activity(
+                        "reply_sent",
+                        entry=self.entry,
+                        message_id=message_id,
+                        reply_preview=activity,
+                    )
+                    self._bump("processed_count")
+                elif status == "error":
+                    record_gateway_activity(
+                        "runtime_error",
+                        entry=self.entry,
+                        message_id=message_id,
+                        error=str(event.get("error_message") or activity or "")[:400],
+                    )
+                elif tool_name and status == "processing":
+                    # Surface tool calls so operators can see what Hermes is
+                    # actually doing turn-by-turn (not just "thinking").
+                    record_gateway_activity(
+                        "runtime_activity",
+                        entry=self.entry,
+                        message_id=message_id,
+                        activity_message=f"{tool_name}: {activity}" if activity else tool_name,
+                        tool_name=tool_name,
+                    )
         except Exception as exc:
             self._log(f"sentinel stdout consumer error: {exc}")
         finally:
@@ -3776,9 +4093,19 @@ class ManagedAgentRuntime:
         retry_after_seconds: int | None = None,
         parent_message_id: str | None = None,
     ) -> None:
+        # Lazy-init send_client for runtimes that don't enter _listener_loop
+        # (e.g. hermes_sentinel and other supervised-subprocess runtimes).
+        # Without this, AX_GATEWAY_EVENT lines parsed from the sentinel's
+        # stdout would never reach the backend and the activity bubble
+        # stalls at "Working".
         if not self._send_client:
-            self._log(f"processing-status drop (no send_client): msg={message_id} status={status}")
-            return
+            try:
+                self._send_client = self._new_client()
+            except Exception as exc:  # noqa: BLE001
+                self._log(
+                    f"processing-status drop (send_client init failed): msg={message_id} status={status} err={exc}"
+                )
+                return
         try:
             self._send_client.set_agent_processing_status(
                 message_id,
@@ -3825,8 +4152,13 @@ class ManagedAgentRuntime:
         }
 
     def _record_tool_call(self, *, message_id: str, event: dict[str, Any]) -> None:
+        # Lazy-init for supervised-subprocess runtimes (see _publish_processing_status).
         if not self._send_client:
-            return
+            try:
+                self._send_client = self._new_client()
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"tool-call drop (send_client init failed): err={exc}")
+                return
         tool_name = str(event.get("tool_name") or event.get("tool") or "").strip()
         if not tool_name:
             return
@@ -4678,7 +5010,12 @@ class GatewayDaemon:
             existing_binding = (
                 find_binding(registry, install_id=str(entry.get("install_id") or "").strip()) if asset_id else None
             )
-            if not existing_binding and asset_id and not _bindings_for_asset(registry, asset_id):
+            if (
+                not existing_binding
+                and asset_id
+                and not _bindings_for_asset(registry, asset_id)
+                and not _entry_requires_operator_approval(entry)
+            ):
                 ensure_local_asset_binding(
                     registry,
                     entry,

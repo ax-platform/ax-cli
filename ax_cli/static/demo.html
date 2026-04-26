@@ -4,6 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Connect agents · ax gateway</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=connected-agents-3" />
+  <link rel="alternate icon" type="image/png" href="/favicon.png" />
   <style>
     :root {
       --bg-0: #07101a;
@@ -52,7 +54,7 @@
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 44px; flex-wrap: wrap; }
 
     .brand { display: flex; align-items: center; gap: 12px; font-family: var(--mono); font-size: 13px; letter-spacing: 0.04em; color: var(--muted); }
-    .brand-mark { width: 28px; height: 28px; border-radius: 8px; box-shadow: 0 6px 20px rgba(94, 234, 212, 0.35); display: inline-flex; align-items: center; justify-content: center; overflow: hidden; }
+    .brand-mark { width: 40px; height: 40px; border-radius: 13px; box-shadow: 0 12px 30px rgba(94, 234, 212, 0.28); display: inline-flex; align-items: center; justify-content: center; overflow: hidden; }
     .brand-mark svg { display: block; }
 
     .topbar-right { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
@@ -68,7 +70,6 @@
 
     .conn-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); font-family: var(--mono); font-size: 11px; color: var(--muted); }
     .conn-pill .dot { width: 8px; height: 8px; }
-
     .system-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); font-family: var(--mono); font-size: 11px; color: var(--muted); cursor: pointer; transition: border-color 120ms ease, color 120ms ease; }
     .system-toggle:hover { border-color: var(--line-strong); color: var(--text); }
     .system-toggle.on { border-color: rgba(94,234,212,0.4); color: var(--accent); background: rgba(94,234,212,0.08); }
@@ -114,30 +115,60 @@
 
     /* Agent list (rows) */
     .agent-list { border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(10px); overflow: hidden; }
-    .agent-grid-cols { display: grid; grid-template-columns: 14px minmax(140px, 1.3fr) auto 0.9fr 0.9fr 1.1fr 14px; gap: 14px; align-items: center; }
+    .agent-grid-cols { display: grid; grid-template-columns: 38px minmax(240px, 1.2fr) minmax(210px, 1fr) minmax(170px, 0.85fr) minmax(70px, auto); gap: 14px; align-items: center; }
     .agent-list-head { padding: 12px 20px; border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, 0.02); font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted-2); }
     .agent-row { padding: 16px 20px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer; transition: background 120ms ease; text-align: left; font: inherit; width: 100%; }
     .agent-row:last-child { border-bottom: 0; }
     .agent-row:hover { background: rgba(255, 255, 255, 0.03); }
+    .agent-row:focus-visible { outline: 2px solid rgba(94, 234, 212, 0.5); outline-offset: -2px; }
     .agent-row.active-row { background: rgba(94, 234, 212, 0.06); }
 
-    .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--muted-2); transition: background 200ms ease, box-shadow 200ms ease; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; justify-self: center; background: var(--muted-2); transition: background 200ms ease, box-shadow 200ms ease; }
     .dot.tone-ok { background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
     .dot.tone-warning { background: var(--amber); box-shadow: 0 0 0 4px var(--amber-soft); }
     .dot.tone-error { background: var(--red); box-shadow: 0 0 0 4px var(--red-soft); }
     .dot.tone-muted { background: var(--muted-2); }
+    .mailbox-indicator { display: inline-flex; align-items: center; gap: 5px; justify-self: start; min-width: 0; transform: translateX(-2px); }
+    .mailbox-icon { width: 34px; height: 26px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; position: relative; border: 1px solid rgba(125, 211, 252, 0.34); background: rgba(125, 211, 252, 0.09); color: #7dd3fc; flex: 0 0 34px; }
+    .mailbox-icon::before { content: ""; width: 16px; height: 11px; border: 2px solid currentColor; border-radius: 3px; box-sizing: border-box; }
+    .mailbox-icon::after { content: ""; position: absolute; width: 10px; height: 10px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-2px) rotate(-45deg); }
+    .mailbox-count { position: absolute; top: -9px; right: -9px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid rgba(250, 204, 21, 0.5); background: #2c260d; color: var(--amber); font: 800 10px/1 var(--mono); letter-spacing: 0; box-shadow: 0 0 0 2px var(--bg-1); box-sizing: border-box; }
+    .mailbox-badge { height: 24px; padding: 0 8px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid rgba(125, 211, 252, 0.3); background: rgba(125, 211, 252, 0.08); color: #7dd3fc; font: 700 11px/1 var(--mono); letter-spacing: 0.02em; white-space: nowrap; }
+    .mailbox-badge.task { border-color: rgba(196, 181, 253, 0.36); background: rgba(196, 181, 253, 0.1); color: #c4b5fd; }
 
+    .row-agent { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .type-mark { width: 34px; height: 34px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); color: var(--muted); }
+    .type-mark svg { width: 20px; height: 20px; display: block; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .type-mark.type-ollama { color: #4ade80; border-color: rgba(74, 222, 128, 0.32); background: rgba(74, 222, 128, 0.1); }
+    .type-mark.type-hermes { color: #7dd3fc; border-color: rgba(125, 211, 252, 0.34); background: rgba(125, 211, 252, 0.1); }
+    .type-mark.type-pass { color: #facc15; border-color: rgba(250, 204, 21, 0.34); background: rgba(250, 204, 21, 0.1); }
+    .type-mark.type-channel { color: #c4b5fd; border-color: rgba(196, 181, 253, 0.34); background: rgba(196, 181, 253, 0.1); }
+    .type-mark.type-inbox { color: #a5b4fc; border-color: rgba(165, 180, 252, 0.3); background: rgba(165, 180, 252, 0.09); }
+    .type-mark.type-echo { color: var(--accent); border-color: rgba(94, 234, 212, 0.3); background: rgba(94, 234, 212, 0.1); }
+    .row-agent-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
     .row-name { font-weight: 600; font-size: 16px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .row-status { font-size: 13px; font-weight: 500; }
-    .row-status.tone-ok { color: var(--green); }
-    .row-status.tone-warning { color: var(--amber); }
-    .row-status.tone-error { color: var(--red); }
-    .row-status.tone-muted { color: var(--muted); }
+    .row-type-label { color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-type-chip { justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .row-last-seen { color: var(--muted); font-size: 13px; font-family: var(--mono); letter-spacing: 0.02em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .row-last-seen.fresh { color: var(--accent); }
     .row-space { color: var(--text); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .row-space.muted { color: var(--muted); }
     .row-chev { color: var(--muted-2); font-size: 18px; line-height: 1; text-align: right; }
+    .row-action { display: flex; justify-content: flex-end; align-items: center; min-width: 0; }
+    .row-approve {
+      appearance: none;
+      border: 1px solid rgba(94, 234, 212, 0.45);
+      background: rgba(94, 234, 212, 0.12);
+      color: var(--accent);
+      border-radius: 999px;
+      padding: 7px 12px;
+      font: 600 12px/1 var(--sans);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+    }
+    .row-approve:hover:not(:disabled) { background: rgba(94, 234, 212, 0.2); border-color: rgba(125, 211, 252, 0.7); transform: translateY(-1px); }
+    .row-approve:disabled { opacity: 0.55; cursor: progress; transform: none; }
 
     .chip { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line); font-family: var(--mono); font-size: 11px; letter-spacing: 0.02em; color: var(--muted); }
     .chip.template { color: var(--accent); border-color: rgba(94, 234, 212, 0.3); background: var(--accent-soft); }
@@ -209,6 +240,11 @@
     .activity-event-title .thinking-dots { margin-left: 4px; }
     .activity-event-detail { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.45; word-break: break-word; }
     .activity-event-time { font-family: var(--mono); font-size: 10px; color: var(--muted-2); margin-top: 6px; letter-spacing: 0.05em; }
+    .activity-count { font-family: var(--mono); font-size: 10px; color: var(--accent); border: 1px solid rgba(94,234,212,0.25); background: rgba(94,234,212,0.08); padding: 2px 7px; border-radius: 999px; }
+    .activity-subevents { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+    .activity-subevent { display: grid; grid-template-columns: minmax(86px, auto) 1fr auto; gap: 8px; align-items: baseline; font-size: 11px; color: var(--muted); }
+    .activity-subevent strong { color: var(--text); font-weight: 500; }
+    .activity-subevent-time { font-family: var(--mono); color: var(--muted-2); white-space: nowrap; }
     .thinking-dots { display: inline-flex; gap: 3px; align-items: center; }
     .thinking-dots span { width: 4px; height: 4px; border-radius: 999px; background: var(--accent); animation: bounce 1.2s ease-in-out infinite; }
     .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -230,11 +266,16 @@
     .modal-body { padding: 16px 24px 24px; }
     .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 22px; border-top: 1px solid var(--line); margin-top: 8px; }
 
-    .template-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
+    .template-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 24px; }
+    .template-select { width: 100%; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); color: var(--text); font: 500 15px/1.2 var(--sans); outline: none; }
+    .template-select:focus { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.32); }
     .template-card { padding: 18px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: rgba(255, 255, 255, 0.02); cursor: pointer; transition: border-color 120ms ease, background 120ms ease; text-align: left; }
     .template-card:hover { border-color: var(--line-strong); background: rgba(255, 255, 255, 0.04); }
-    .template-card.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent) inset; }
-    .template-name { font-size: 16px; font-weight: 500; margin-bottom: 4px; }
+    .template-card.selected { border-color: var(--accent); background: rgba(94, 234, 212, 0.12); box-shadow: 0 0 0 1px var(--accent) inset; }
+    .template-card.summary { cursor: default; }
+    .template-card.summary:hover { border-color: var(--line); background: rgba(255, 255, 255, 0.02); }
+    .template-name { font-size: 16px; font-weight: 600; margin-bottom: 4px; color: var(--text); }
+    .template-card.selected .template-name { color: #f2fbff; }
     .template-tag { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
     .template-desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
 
@@ -255,22 +296,21 @@
     .toast.ok { border-color: rgba(74, 222, 128, 0.4); }
     .toast.err { border-color: rgba(251, 113, 133, 0.4); color: var(--red); }
 
-    /* Drop the Type chip first when the viewport gets tight — Space + Last seen always stay. */
     @media (max-width: 960px) {
-      .agent-grid-cols { grid-template-columns: 14px minmax(120px, 1.2fr) 0.8fr 0.9fr 1fr 14px; gap: 12px; }
-      .agent-list-head > :nth-child(3),
-      .agent-row > :nth-child(3) { display: none; }
+      .agent-grid-cols { grid-template-columns: 38px minmax(190px, 1.1fr) minmax(180px, 1fr) minmax(70px, auto); gap: 12px; }
+      .agent-list-head > :nth-child(4),
+      .agent-row > :nth-child(4) { display: none; }
     }
-    /* On very narrow screens, also drop the Status text — dot still conveys it. */
     @media (max-width: 720px) {
       .template-grid { grid-template-columns: 1fr; }
       .hero h1 { font-size: 44px; }
       .topbar { margin-bottom: 28px; }
-      .agent-grid-cols { grid-template-columns: 14px 1fr 1fr 1fr 14px; gap: 10px; }
-      .agent-list-head > :nth-child(3),
-      .agent-row > :nth-child(3),
+      .agent-grid-cols { grid-template-columns: 34px minmax(0, 1fr) minmax(128px, 0.8fr) minmax(70px, auto); gap: 10px; }
       .agent-list-head > :nth-child(4),
       .agent-row > :nth-child(4) { display: none; }
+      .type-mark { width: 30px; height: 30px; border-radius: 9px; }
+      .type-mark svg { width: 18px; height: 18px; }
+      .row-agent { gap: 9px; }
     }
   </style>
 </head>
@@ -279,20 +319,23 @@
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 28 28" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
+          <svg viewBox="0 0 40 40" width="40" height="40" xmlns="http://www.w3.org/2000/svg">
             <defs>
               <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
                 <stop offset="0%" stop-color="#5eead4"/>
                 <stop offset="100%" stop-color="#7dd3fc"/>
               </linearGradient>
             </defs>
-            <rect x="0" y="0" width="28" height="28" rx="7" fill="url(#brand-grad)"/>
-            <path d="M8 8 L20 20 M20 8 L8 20" stroke="#062018" stroke-width="2.4" stroke-linecap="round"/>
-            <circle cx="14" cy="14" r="2.4" fill="#062018"/>
-            <circle cx="8" cy="8" r="1.6" fill="#062018" opacity="0.7"/>
-            <circle cx="20" cy="8" r="1.6" fill="#062018" opacity="0.7"/>
-            <circle cx="8" cy="20" r="1.6" fill="#062018" opacity="0.7"/>
-            <circle cx="20" cy="20" r="1.6" fill="#062018" opacity="0.7"/>
+            <rect width="40" height="40" rx="13" fill="url(#brand-grad)"/>
+            <path d="M12 12 20 20 12 28M20 20h8" stroke="#062018" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+            <circle cx="12" cy="12" r="4.1" fill="#062018"/>
+            <circle cx="12" cy="28" r="4.1" fill="#062018"/>
+            <circle cx="28" cy="20" r="4.1" fill="#062018"/>
+            <circle cx="20" cy="20" r="5.2" fill="#062018"/>
+            <circle cx="12" cy="12" r="1.25" fill="#a7fff1"/>
+            <circle cx="12" cy="28" r="1.25" fill="#a7fff1"/>
+            <circle cx="28" cy="20" r="1.25" fill="#a7fff1"/>
+            <circle cx="20" cy="20" r="1.8" fill="#a7fff1"/>
           </svg>
         </div>
         <span>ax · gateway</span>
@@ -415,12 +458,15 @@
 
   <script>
     const refreshMs = window.__GATEWAY_DEMO_REFRESH_MS__ || 3000;
-    const FEATURED_TEMPLATE_IDS = ["ollama", "hermes", "echo_test"];
 
     const TEMPLATE_COPY = {
       ollama: { name: "Ollama", tag: "Local model", desc: "Run a local LLM on this machine. Pickup, liveness, and streaming activity." },
       hermes: { name: "Hermes", tag: "Coding agent", desc: "Persistent live listener with tool use, repo access, and session continuity." },
+      sentinel_cli: { name: "Sentinel CLI", tag: "Session agent", desc: "Long-lived Claude or Codex CLI runtime with session resume and tool activity." },
+      claude_code_channel: { name: "Claude Code Channel", tag: "MCP channel", desc: "Planned live Claude Code channel adapter for a supervised Gateway session." },
+      pass_through: { name: "Pass-through", tag: "Polling inbox", desc: "Mailbox identity for agents that check Gateway instead of listening live. Requires approval." },
       echo_test: { name: "Echo", tag: "Test runtime", desc: "Zero setup. Confirms your gateway can deliver and receive in real time." },
+      inbox: { name: "Passive Inbox", tag: "Advanced queue", desc: "Receives queued work without launching an answering runtime." },
     };
 
     const state = {
@@ -447,7 +493,6 @@
     try {
       state.showSystemAgents = window.localStorage.getItem("ax-demo-show-system") === "1";
     } catch (_) { /* ignore */ }
-
     function isSystemAgent(agent) {
       const name = String(agent.name || "");
       if (name.startsWith("switchboard-")) return true;
@@ -492,10 +537,95 @@
       return el;
     }
 
+    const TYPE_ICON_PATHS = {
+      ollama: [
+        '<rect x="5" y="5" width="14" height="14" rx="3"></rect>',
+        '<path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"></path>',
+        '<path d="M9 12h6"></path>',
+      ],
+      hermes: [
+        '<path d="M12 18v3"></path>',
+        '<path d="M8 21h8"></path>',
+        '<circle cx="12" cy="14" r="2"></circle>',
+        '<path d="M7 10a7 7 0 0 1 10 0"></path>',
+        '<path d="M4 7a11 11 0 0 1 16 0"></path>',
+      ],
+      pass: [
+        '<path d="M4 7h8a4 4 0 0 1 0 8H4"></path>',
+        '<path d="M12 15h8"></path>',
+        '<path d="M17 12l3 3-3 3"></path>',
+      ],
+      channel: [
+        '<path d="M8 9l-4 3 4 3"></path>',
+        '<path d="M16 9l4 3-4 3"></path>',
+        '<path d="M14 5l-4 14"></path>',
+      ],
+      sentinel: [
+        '<path d="M12 3v3"></path>',
+        '<path d="M5 12a7 7 0 0 1 14 0"></path>',
+        '<path d="M8 12a4 4 0 0 1 8 0"></path>',
+        '<path d="M12 12v8"></path>',
+        '<path d="M9 20h6"></path>',
+      ],
+      echo: [
+        '<path d="M17 2l4 4-4 4"></path>',
+        '<path d="M3 11V9a3 3 0 0 1 3-3h15"></path>',
+        '<path d="M7 22l-4-4 4-4"></path>',
+        '<path d="M21 13v2a3 3 0 0 1-3 3H3"></path>',
+      ],
+      inbox: [
+        '<rect x="4" y="4" width="16" height="16" rx="2"></rect>',
+        '<path d="M4 13h4l2 3h4l2-3h4"></path>',
+      ],
+      system: [
+        '<circle cx="12" cy="12" r="3"></circle>',
+        '<path d="M19.4 15a8 8 0 0 0 .1-2l2-1.5-2-3.5-2.4 1a7 7 0 0 0-1.7-1L15 5h-4l-.4 3a7 7 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7 7 0 0 0 1.7 1l.4 3h4l.4-3a7 7 0 0 0 1.7-1l2.4 1 2-3.5z"></path>',
+      ],
+      custom: [
+        '<rect x="4" y="4" width="16" height="16" rx="4"></rect>',
+        '<path d="M9 7h6"></path>',
+        '<path d="M9 12h6"></path>',
+        '<path d="M9 17h6"></path>',
+      ],
+    };
+
+    function typeIcon(name, label) {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("aria-hidden", "true");
+      svg.setAttribute("focusable", "false");
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = label || name || "Agent type";
+      svg.appendChild(title);
+      const paths = TYPE_ICON_PATHS[name] || TYPE_ICON_PATHS.custom;
+      for (const raw of paths) {
+        const template = document.createElement("template");
+        template.innerHTML = `<svg>${raw}</svg>`;
+        const node = template.content.firstChild.firstChild;
+        if (node) svg.appendChild(document.importNode(node, true));
+      }
+      return svg;
+    }
+
     function templateLabel(agent) {
       const id = String(agent.template_id || "").toLowerCase();
       if (TEMPLATE_COPY[id]) return TEMPLATE_COPY[id].name;
       return String(agent.template_label || agent.runtime_type || "Custom");
+    }
+
+    function agentTypeMeta(agent, sys) {
+      if (sys) return { icon: "system", label: "System", className: "type-inbox" };
+      const template = String(agent.template_id || "").toLowerCase();
+      const runtime = String(agent.runtime_type || "").toLowerCase();
+      const intake = String(agent.intake_model || "").toLowerCase();
+      if (template === "ollama") return { icon: "ollama", label: "Ollama", className: "type-ollama" };
+      if (template === "hermes" || runtime === "hermes_sentinel") return { icon: "hermes", label: "Hermes", className: "type-hermes" };
+      if (template === "pass_through" || agent.local_connection_mode === "pass_through") return { icon: "pass", label: "Pass-through", className: "type-pass" };
+      if (template === "claude_code_channel") return { icon: "channel", label: "Claude Code", className: "type-channel" };
+      if (template === "sentinel_cli") return { icon: "sentinel", label: "Sentinel CLI", className: "type-hermes" };
+      if (template === "echo_test" || runtime === "echo") return { icon: "echo", label: "Echo", className: "type-echo" };
+      if (template === "inbox" || intake === "queue_accept" || runtime === "inbox") return { icon: "inbox", label: "Inbox", className: "type-inbox" };
+      return { icon: "custom", label: templateLabel(agent), className: "type-custom" };
     }
 
     function spaceLabel(agent) {
@@ -511,12 +641,32 @@
       return id || "—";
     }
 
+    function countFrom(agent, keys) {
+      let max = 0;
+      for (const key of keys) {
+        const n = Number(agent[key] || 0);
+        if (Number.isFinite(n) && n > max) max = n;
+      }
+      return max;
+    }
+
+    function mailboxCounts(agent) {
+      return {
+        messages: countFrom(agent, ["backlog_depth", "queue_depth", "unread_count", "unread_message_count", "pending_message_count"]),
+        tasks: countFrom(agent, ["task_count", "open_task_count", "pending_task_count", "queued_task_count"]),
+      };
+    }
+
     function friendlyStatus(agent) {
       const desired = String(agent.desired_state || "").toLowerCase();
       const presence = String(agent.presence || "").toUpperCase();
       const confidence = String(agent.confidence || "").toUpperCase();
       const reason = String(agent.confidence_reason || "").toLowerCase();
+      const approval = String(agent.approval_state || "").toLowerCase();
       const detail = String(agent.confidence_detail || "").trim();
+      const counts = mailboxCounts(agent);
+      const unread = counts.messages;
+      const tasks = counts.tasks;
 
       // Operator intent overrides observed presence — if the user hit Stop,
       // the agent should read "Stopped" immediately, even if a stale heartbeat
@@ -528,6 +678,12 @@
           detail: "Stopped via the gateway. New messages won't be delivered or processed until you Start it again.",
         };
       }
+      if (approval === "pending") {
+        return { label: "Needs approval", tone: "warning", detail: detail || "Approve the fingerprinted Gateway binding before this agent can pass work through." };
+      }
+      if (approval === "rejected") {
+        return { label: "Rejected", tone: "error", detail: detail || "This Gateway binding was rejected." };
+      }
       if (presence === "ERROR" || reason === "setup_blocked") {
         return { label: "Setup error", tone: "error", detail: detail || "Something is missing for this runtime to start." };
       }
@@ -536,6 +692,15 @@
       }
       if (confidence === "BLOCKED") {
         return { label: "Blocked", tone: "warning", detail: detail || "Gateway has blocked this runtime." };
+      }
+      if (isMailboxRuntime(agent)) {
+        if (unread > 0 || tasks > 0) {
+          const parts = [];
+          if (unread > 0) parts.push(unread === 1 ? "1 new message" : `${unread} new messages`);
+          if (tasks > 0) parts.push(tasks === 1 ? "1 task" : `${tasks} tasks`);
+          return { label: parts.join(" · "), tone: "warning", detail: "Mailbox has queued work waiting for the agent to check in." };
+        }
+        return { label: "Inbox", tone: "muted", detail: detail || "Mailbox is available. It is not a live listener." };
       }
       if (presence === "STALE") return { label: "Stale", tone: "warning", detail: detail || "Heartbeat is overdue." };
       if (presence === "OFFLINE") return { label: "Offline", tone: "muted", detail: detail || "Runtime is not currently connected." };
@@ -618,11 +783,13 @@
     async function loadTemplates() {
       try {
         const payload = await api("GET", "/api/templates");
-        const templates = Array.isArray(payload.templates) ? payload.templates : [];
-        const map = new Map(templates.map((t) => [String(t.id || "").toLowerCase(), t]));
-        state.templates = FEATURED_TEMPLATE_IDS.map((id) => map.get(id)).filter(Boolean);
+        state.templates = Array.isArray(payload.templates) ? payload.templates : [];
+        if (!state.templates.some((t) => String(t.id || "").toLowerCase() === state.selectedTemplateId)) {
+          state.selectedTemplateId = String((state.templates[0] || {}).id || "ollama").toLowerCase();
+        }
         renderTemplateGrid();
         renderOllamaModelField();
+        renderHermesPreflight();
       } catch (err) {
         state.templates = [];
       }
@@ -781,30 +948,31 @@
         grid.appendChild(makeEl("div", { style: { gridColumn: "1/-1", color: "var(--muted)", fontSize: "13px" } }, ["Loading runtimes…"]));
         return;
       }
+      const select = makeEl("select", {
+        class: "template-select",
+        onchange: (event) => {
+          state.selectedTemplateId = String(event.target.value || "").toLowerCase();
+          renderTemplateGrid();
+          renderOllamaModelField();
+          renderHermesPreflight();
+        },
+      });
       for (const tmpl of state.templates) {
         const id = String(tmpl.id || "").toLowerCase();
         const copy = TEMPLATE_COPY[id] || { name: tmpl.label || id, tag: "", desc: tmpl.summary || "" };
-        const card = makeEl(
-          "button",
-          {
-            type: "button",
-            class: "template-card" + (state.selectedTemplateId === id ? " selected" : ""),
-            dataset: { templateId: id },
-            onclick: () => {
-              state.selectedTemplateId = id;
-              renderTemplateGrid();
-              renderOllamaModelField();
-              renderHermesPreflight();
-            },
-          },
-          [
-            makeEl("div", { class: "template-tag" }, [copy.tag]),
-            makeEl("div", { class: "template-name" }, [copy.name]),
-            makeEl("div", { class: "template-desc" }, [copy.desc]),
-          ]
-        );
-        grid.appendChild(card);
+        const disabled = tmpl.launchable === false;
+        const suffix = disabled ? " · coming soon" : "";
+        select.appendChild(makeEl("option", { value: id, selected: state.selectedTemplateId === id, disabled }, [copy.name + suffix]));
       }
+      grid.appendChild(select);
+      const selected = state.templates.find((t) => String(t.id || "").toLowerCase() === state.selectedTemplateId) || state.templates[0];
+      const id = String((selected || {}).id || "").toLowerCase();
+      const copy = TEMPLATE_COPY[id] || { name: selected.label || id || "Runtime", tag: selected.availability || "", desc: selected.operator_summary || selected.description || "" };
+      grid.appendChild(makeEl("div", { class: "template-card summary selected" }, [
+        makeEl("div", { class: "template-tag" }, [copy.tag || String(selected.availability || "Runtime")]),
+        makeEl("div", { class: "template-name" }, [copy.name]),
+        makeEl("div", { class: "template-desc" }, [copy.desc || String(selected.description || "")]),
+      ]));
     }
 
     function renderHermesPreflight() {
@@ -919,8 +1087,6 @@
         const head = makeEl("div", { class: "agent-list-head agent-grid-cols" }, [
           makeEl("span"),
           makeEl("span", null, ["Agent"]),
-          makeEl("span", null, ["Type"]),
-          makeEl("span", null, ["Status"]),
           makeEl("span", null, ["Last activity"]),
           makeEl("span", null, ["Space"]),
           makeEl("span"),
@@ -977,70 +1143,183 @@
     }
 
     function lastActivityLabel(agent) {
-      // "Last activity" = last time the agent actually received or completed work.
-      // Connection/heartbeat timestamps are intentionally excluded — those are
-      // implied by the connected status pill on the row.
+      // "Last activity" = the most recent meaningful action on this agent,
+      // labeled with WHAT it was so operators can see at a glance ("Replied
+      // 1m ago", "Stopped 5m ago", "Awaiting approval"). Connection/heartbeat
+      // timestamps are intentionally excluded — those are implied by the
+      // connected status pill on the row.
+      const approval = String(agent.approval_state || "").toLowerCase();
+      const confidence = String(agent.confidence || "").toUpperCase();
+      const desiredStopped = String(agent.desired_state || "").toLowerCase() === "stopped";
+      const counts = mailboxCounts(agent);
+      const unread = counts.messages;
+      const tasks = counts.tasks;
+      if (isMailboxRuntime(agent)) {
+        const checkedTs = agent.last_inbox_polled_at || agent.last_checked_at;
+        const repliedTs = agent.last_reply_at || agent.last_work_completed_at;
+        const receivedTs = agent.last_work_received_at || agent.last_received_at;
+        if (unread > 0 || tasks > 0) {
+          const parts = [];
+          if (unread > 0) parts.push(unread === 1 ? "New message" : `${unread} new messages`);
+          if (tasks > 0) parts.push(tasks === 1 ? "1 task" : `${tasks} tasks`);
+          const ts = receivedTs || agent.added_at;
+          return relativeActivity(parts.join(" · "), ts);
+        }
+        // Surface the most-recent action so operators can see "Replied 1m ago"
+        // for pass-through agents that just sent a message via /api/agents/<name>/ack.
+        // Replies and inbound receipts both count as actions; pick whichever is newer.
+        const repliedDt = repliedTs ? new Date(repliedTs).getTime() : 0;
+        const receivedDt = receivedTs ? new Date(receivedTs).getTime() : 0;
+        if (repliedDt && repliedDt >= receivedDt) return relativeActivity("Sent message", repliedTs);
+        if (receivedDt) return relativeActivity("Received message", receivedTs);
+        if (checkedTs) return relativeActivity("Checked", checkedTs);
+        if (approval === "pending") return relativeActivity("Awaiting approval", agent.last_local_connect_at || agent.added_at);
+        return { text: "Inbox ready", fresh: false };
+      }
+      const currentTool = String(agent.current_tool || "").trim();
+      if (currentTool) return relativeActivity(`Tool: ${currentTool}`, agent.last_seen_at || agent.last_work_received_at || agent.added_at);
+      const currentActivity = String(agent.current_activity || "").trim();
+      if (currentActivity) return relativeActivity(currentActivity, agent.last_seen_at || agent.last_work_received_at || agent.added_at);
+      // (label, timestamp) candidates ordered so operationally meaningful
+      // actions (replied, received) win ties over generic ones.
       const candidates = [
-        agent.last_work_completed_at,
-        agent.last_work_received_at,
-        agent.last_reply_at,
-        agent.last_received_at,
+        ["Replied",       agent.last_work_completed_at || agent.last_reply_at],
+        ["Picked up",     agent.last_work_received_at  || agent.last_received_at],
       ];
+      if (desiredStopped) candidates.push(["Stopped", agent.stopped_at || agent.last_state_change_at]);
+      if (approval === "pending") candidates.push(["Awaiting approval", agent.last_local_connect_at || agent.added_at]);
+      if (approval === "rejected") candidates.push(["Rejected", agent.last_state_change_at || agent.added_at]);
+      if (confidence === "BLOCKED") candidates.push(["Blocked", agent.last_blocked_at || agent.added_at]);
+
+      let pickedLabel = null;
       let mostRecentTs = null;
-      for (const ts of candidates) {
+      for (const [label, ts] of candidates) {
         if (!ts) continue;
         const d = new Date(ts);
         if (isNaN(d.getTime())) continue;
-        if (!mostRecentTs || d > mostRecentTs) mostRecentTs = d;
+        if (!mostRecentTs || d > mostRecentTs) {
+          mostRecentTs = d;
+          pickedLabel = label;
+        }
       }
       if (!mostRecentTs) return { text: "—", fresh: false };
-      const seconds = Math.max(0, Math.floor((Date.now() - mostRecentTs.getTime()) / 1000));
-      if (seconds < 5) return { text: "just now", fresh: true };
-      if (seconds < 60) return { text: seconds + "s ago", fresh: seconds < 30 };
-      if (seconds < 3600) return { text: Math.floor(seconds / 60) + "m ago", fresh: seconds < 120 };
-      if (seconds < 86400) return { text: Math.floor(seconds / 3600) + "h ago", fresh: false };
-      return { text: Math.floor(seconds / 86400) + "d ago", fresh: false };
+      return relativeActivity(pickedLabel, mostRecentTs);
+    }
+
+    function relativeActivity(label, ts) {
+      if (!ts) return { text: label || "—", fresh: false };
+      const d = ts instanceof Date ? ts : new Date(ts);
+      if (isNaN(d.getTime())) return { text: label || "—", fresh: false };
+      const seconds = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+      let rel;
+      if (seconds < 5)         rel = "just now";
+      else if (seconds < 60)   rel = seconds + "s ago";
+      else if (seconds < 3600) rel = Math.floor(seconds / 60) + "m ago";
+      else if (seconds < 86400) rel = Math.floor(seconds / 3600) + "h ago";
+      else                     rel = Math.floor(seconds / 86400) + "d ago";
+      const text = label ? `${label} · ${rel}` : rel;
+      const fresh = seconds < 120;
+      return { text, fresh };
     }
 
     function createRow(agent) {
       const name = String(agent.name || "");
-      const row = makeEl("button", {
-        type: "button",
+      const row = makeEl("div", {
+        role: "button",
+        tabindex: "0",
         class: "agent-row agent-grid-cols",
         dataset: { name },
         onclick: () => openDrawer(name),
+        onkeydown: (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openDrawer(name);
+          }
+        },
       });
       row.appendChild(makeEl("span", { class: "dot tone-muted" }));
-      row.appendChild(makeEl("span", { class: "row-name" }, [name]));
-      row.appendChild(makeEl("span", { class: "chip template" }, [templateLabel(agent)]));
-      row.appendChild(makeEl("span", { class: "row-status tone-muted" }));
+      row.appendChild(makeEl("span", { class: "row-agent" }, [
+        makeEl("span", { class: "type-mark type-custom", title: "Custom", "aria-label": "Custom" }, [typeIcon("custom", "Custom")]),
+        makeEl("span", { class: "row-agent-text" }, [
+          makeEl("span", { class: "row-name" }, [name]),
+          makeEl("span", { class: "row-type-label" }, ["Ready"]),
+        ]),
+      ]));
       row.appendChild(makeEl("span", { class: "row-last-seen" }));
       row.appendChild(makeEl("span", { class: "row-space" }));
-      row.appendChild(makeEl("span", { class: "row-chev" }, ["›"]));
+      row.appendChild(makeEl("span", { class: "row-action" }, [makeEl("span", { class: "row-chev" }, ["›"])]));
       updateRow(row, agent);
       return row;
+    }
+
+    async function approveAgent(agent, button) {
+      if (!agent || !agent.name) return;
+      const original = button ? button.textContent : "";
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Approving";
+      }
+      try {
+        await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/approve", { scope: "asset" });
+        showToast("Approved @" + agent.name, "ok");
+        await loadStatus();
+        if (state.drawerAgentName === agent.name) refreshDrawer();
+      } catch (err) {
+        showToast(err.message || "Approval failed", "err");
+        if (button) {
+          button.disabled = false;
+          button.textContent = original || "Approve";
+        }
+      }
+    }
+
+    function renderMailboxIndicator(container, agent, status) {
+      const counts = mailboxCounts(agent);
+      clearChildren(container);
+      container.className = "mailbox-indicator";
+      container.title = status.label;
+      const icon = makeEl("span", { class: "mailbox-icon", title: "Mailbox", "aria-label": "Mailbox" });
+      if (counts.messages > 0) {
+        icon.appendChild(makeEl("span", { class: "mailbox-count", title: "Unread messages" }, [String(counts.messages)]));
+      }
+      container.appendChild(icon);
+      if (counts.tasks > 0) {
+        container.appendChild(makeEl("span", { class: "mailbox-badge task", title: "Open tasks" }, ["T" + String(counts.tasks)]));
+      }
     }
 
     function updateRow(row, agent) {
       const status = friendlyStatus(agent);
       const dot = row.children[0];
-      const nameEl = row.children[1];
-      const templateEl = row.children[2];
-      const statusEl = row.children[3];
-      const lastSeenEl = row.children[4];
-      const spaceEl = row.children[5];
+      const agentEl = row.children[1];
+      const typeMarkEl = agentEl.children[0];
+      const nameEl = agentEl.querySelector(".row-name");
+      const typeLabelEl = agentEl.querySelector(".row-type-label");
+      const lastSeenEl = row.children[2];
+      const spaceEl = row.children[3];
+      const actionEl = row.children[4];
 
-      dot.className = "dot tone-" + status.tone;
-      dot.title = status.label;
+      if (isMailboxRuntime(agent)) {
+        renderMailboxIndicator(dot, agent, status);
+      } else {
+        clearChildren(dot);
+        dot.className = "dot tone-" + status.tone;
+        dot.title = status.label;
+        dot.textContent = "";
+      }
       const newName = String(agent.name || "");
       if (nameEl.textContent !== newName) nameEl.textContent = newName;
       const sys = isSystemAgent(agent);
-      const newTemplate = sys ? "System" : templateLabel(agent);
-      const newChipClass = sys ? "chip system" : "chip template";
-      if (templateEl.textContent !== newTemplate) templateEl.textContent = newTemplate;
-      if (templateEl.className !== newChipClass) templateEl.className = newChipClass;
-      statusEl.className = "row-status tone-" + status.tone;
-      if (statusEl.textContent !== status.label) statusEl.textContent = status.label;
+      const type = agentTypeMeta(agent, sys);
+      typeMarkEl.className = "type-mark " + type.className;
+      typeMarkEl.title = type.label;
+      typeMarkEl.setAttribute("aria-label", type.label);
+      if (typeMarkEl.dataset.icon !== type.icon) {
+        clearChildren(typeMarkEl);
+        typeMarkEl.appendChild(typeIcon(type.icon, type.label));
+        typeMarkEl.dataset.icon = type.icon;
+      }
+      if (typeLabelEl.textContent !== type.label) typeLabelEl.textContent = type.label;
       const activity = lastActivityLabel(agent);
       lastSeenEl.className = "row-last-seen" + (activity.fresh ? " fresh" : "");
       if (lastSeenEl.textContent !== activity.text) lastSeenEl.textContent = activity.text;
@@ -1048,6 +1327,21 @@
       const spaceIsMuted = newSpace === "—";
       spaceEl.className = "row-space" + (spaceIsMuted ? " muted" : "");
       if (spaceEl.textContent !== newSpace) spaceEl.textContent = newSpace;
+      const needsApproval = String(agent.approval_state || "").toLowerCase() === "pending" && agent.approval_id;
+      clearChildren(actionEl);
+      if (needsApproval) {
+        actionEl.appendChild(makeEl("button", {
+          type: "button",
+          class: "row-approve",
+          title: "Review approval details",
+          onclick: (event) => {
+            event.stopPropagation();
+            openDrawer(newName);
+          },
+        }, ["Review"]));
+      } else {
+        actionEl.appendChild(makeEl("span", { class: "row-chev" }, ["›"]));
+      }
       row.classList.toggle("active-row", state.drawerAgentName === agent.name);
     }
 
@@ -1080,13 +1374,26 @@
       "runtime_activity",
       "thinking",
     ]);
+    const TOOL_ACTIVITY_EVENTS = new Set([
+      "tool_started",
+      "tool_finished",
+      "tool_call_recorded",
+      "tool_call_record_failed",
+      "runtime_activity",
+    ]);
+
+    function isToolActivity(activity) {
+      const event = String(activity.event || "");
+      if (!TOOL_ACTIVITY_EVENTS.has(event)) return false;
+      return !!String(activity.tool_name || "").trim();
+    }
 
     function eventTone(activity) {
       const event = String(activity.event || "");
       if (event === "reply_sent") return "reply";
       if (event === "gateway_test_sent" || event === "message_received" || event === "message_queued") return "send";
       if (event === "runtime_error" || event === "runtime_timeout" || event === "blocked" || event === "invocation_blocked" || event === "crashed") return "error";
-      if (event === "message_claimed" || event === "thinking" || event === "runtime_activity") return "work";
+      if (event === "message_claimed" || event === "thinking" || event === "runtime_activity" || event === "tool_started" || event === "tool_finished") return "work";
       return "";
     }
 
@@ -1103,6 +1410,10 @@
         case "runtime_error": return "Runtime error";
         case "runtime_timeout": return "Timed out";
         case "reply_sent": return "Replied";
+        case "tool_started": return "Tool started";
+        case "tool_finished": return "Tool finished";
+        case "tool_call_recorded": return "Tool recorded";
+        case "tool_call_record_failed": return "Tool record failed";
         case "runtime_activity": {
           const msg = String(activity.activity_message || "").trim();
           return msg || "Working";
@@ -1118,10 +1429,82 @@
       if (event === "gateway_test_sent") return String(activity.reply_preview || "").trim();
       if (event === "message_received") return String(activity.preview || activity.content_preview || "").trim();
       if (event === "runtime_error" || event === "runtime_timeout") return String(activity.error || activity.detail || "").trim();
+      if (event === "tool_started") return String(activity.tool_action || activity.activity_message || "").trim();
+      if (event === "tool_finished") return String(activity.status || activity.activity_message || "").trim();
+      if (event === "tool_call_record_failed") return String(activity.error || "").trim();
       if (event === "runtime_status" || event === "runtime_activity") {
         return String(activity.activity_message || activity.status || "").trim();
       }
       return "";
+    }
+
+    function activityTimeValue(activity) {
+      const d = new Date(activity.ts || "");
+      return isNaN(d.getTime()) ? 0 : d.getTime();
+    }
+
+    function toolGroupKey(activity) {
+      const message = String(activity.message_id || "message").trim();
+      const tool = String(activity.tool_name || "tool").trim();
+      const call = String(activity.tool_call_id || "").trim();
+      return message + "::" + tool + "::" + (call || "latest");
+    }
+
+    function groupActivityEvents(visible) {
+      const groups = new Map();
+      const output = [];
+      for (const ev of visible) {
+        if (!isToolActivity(ev)) {
+          output.push({ kind: "event", ts: activityTimeValue(ev), event: ev });
+          continue;
+        }
+        const key = toolGroupKey(ev);
+        let group = groups.get(key);
+        if (!group) {
+          group = { kind: "tool_group", key, ts: 0, tool_name: String(ev.tool_name || "tool"), events: [] };
+          groups.set(key, group);
+          output.push(group);
+        }
+        group.events.push(ev);
+        group.ts = Math.max(group.ts, activityTimeValue(ev));
+      }
+      for (const group of groups.values()) {
+        group.events.sort((a, b) => activityTimeValue(a) - activityTimeValue(b));
+      }
+      output.sort((a, b) => b.ts - a.ts);
+      return output;
+    }
+
+    function renderToolGroup(group) {
+      const events = group.events || [];
+      const latest = events[events.length - 1] || {};
+      const title = "Tool: " + String(group.tool_name || latest.tool_name || "tool");
+      const detail = eventDetail(latest) || String(latest.activity_message || latest.status || "").trim();
+      const time = relTime(latest.ts);
+      const node = makeEl("div", { class: "activity-event work" }, [
+        makeEl("span", { class: "activity-event-icon dot" }),
+        makeEl("div", { class: "activity-event-body" }, [
+          makeEl("div", { class: "activity-event-title" }, [
+            title,
+            makeEl("span", { class: "activity-count" }, [events.length === 1 ? "1 event" : events.length + " events"]),
+          ]),
+          detail ? makeEl("div", { class: "activity-event-detail" }, [detail]) : null,
+          time ? makeEl("div", { class: "activity-event-time" }, [time]) : null,
+        ]),
+      ]);
+      if (events.length > 1) {
+        const body = node.querySelector(".activity-event-body");
+        const subevents = makeEl("div", { class: "activity-subevents" });
+        for (const ev of events) {
+          subevents.appendChild(makeEl("div", { class: "activity-subevent" }, [
+            makeEl("strong", null, [eventLabel(ev)]),
+            makeEl("span", null, [eventDetail(ev) || String(ev.status || ev.activity_message || "").trim() || "—"]),
+            makeEl("span", { class: "activity-subevent-time" }, [relTime(ev.ts)]),
+          ]));
+        }
+        body.appendChild(subevents);
+      }
+      return node;
     }
 
     function relTime(ts) {
@@ -1135,10 +1518,48 @@
       return d.toLocaleTimeString();
     }
 
-    function isProcessingNow(activity) {
+    function isMailboxRuntime(agent) {
+      // Pass-through / inbox runtimes hold queued messages until polled — they
+      // don't "process" in the way listener-loop agents do. Distinct UX:
+      // mailbox state ("N unread", "All caught up") instead of "Working".
+      if (!agent) return false;
+      const intakeModel = String(agent.intake_model || "").toLowerCase();
+      const runtimeType = String(agent.runtime_type || "").toLowerCase();
+      const template = String(agent.template_id || "").toLowerCase();
+      return intakeModel === "polling_mailbox" || runtimeType === "inbox" || template === "pass_through";
+    }
+
+    function mailboxStateLabel(agent) {
+      // Returns { title, detail, tone } for the drawer's mailbox status card,
+      // or null if the agent isn't a mailbox runtime.
+      if (!isMailboxRuntime(agent)) return null;
+      const unread = Number(agent.backlog_depth || 0);
+      const lastChecked = agent.last_inbox_polled_at || null;
+      const checkedRel = lastChecked ? relTime(lastChecked) : null;
+      if (unread > 0) {
+        return {
+          title: unread === 1 ? "1 message awaiting check" : `${unread} messages awaiting check`,
+          detail: checkedRel
+            ? `Agent hasn't polled since ${checkedRel}. Mailbox holds the messages until the agent checks in.`
+            : "Mailbox holds the messages until the agent polls Gateway.",
+          tone: "warning",
+        };
+      }
+      return {
+        title: "All caught up",
+        detail: checkedRel
+          ? `No unread messages. Last poll ${checkedRel}.`
+          : "No unread messages in this agent's mailbox.",
+        tone: "ok",
+      };
+    }
+
+    function isProcessingNow(activity, agent) {
       // Returns true when the most recent runtime_status / message_claimed has not been
-      // followed by reply_sent within the same message_id.
+      // followed by reply_sent within the same message_id. Mailbox runtimes never
+      // "process" in this sense — for them, queued IS the resting state.
       if (!Array.isArray(activity) || !activity.length) return false;
+      if (isMailboxRuntime(agent)) return false;
       // recent_activity is newest-first per backend convention; sort defensively.
       const sorted = activity.slice().sort((a, b) => String(b.ts || "").localeCompare(String(a.ts || "")));
       const latest = sorted[0];
@@ -1235,11 +1656,42 @@
       const meta = makeEl("div", { class: "drawer-meta" }, [
         makeEl("span", { class: "chip template" }, [templateLabel(agent)]),
         makeEl("span", { class: "chip" }, [String(agent.mode || agent.runtime_type || "Custom")]),
+        agent.registry_ref ? makeEl("span", { class: "chip" }, ["Registry " + String(agent.registry_ref)]) : null,
       ]);
       drawerBody.appendChild(makeEl("section", { class: "drawer-section" }, [
         makeEl("div", { class: "drawer-label" }, ["Runtime"]),
         meta,
       ]));
+
+      const fingerprint = agent.candidate_binding || agent.binding || {};
+      const runtimeFingerprint = fingerprint.runtime_fingerprint || agent.runtime_fingerprint || {};
+      const localFingerprint = agent.local_fingerprint || {};
+      const signature = String(fingerprint.candidate_signature || "").replace(/^sha256:/, "");
+      const launchHash = String(fingerprint.launch_spec_hash || "").replace(/^sha256:/, "");
+      const runtimeHash = String(fingerprint.runtime_fingerprint_hash || runtimeFingerprint.runtime_fingerprint_hash || "").replace(/^sha256:/, "");
+      const exeHash = String(localFingerprint.exe_sha256 || runtimeFingerprint.executable_sha256 || "").replace(/^sha256:/, "");
+      const actorUser = String(localFingerprint.user || runtimeFingerprint.user || "").trim();
+      const hostHash = String(runtimeFingerprint.host_fingerprint || "").replace(/^host:/, "");
+      const originPath = String(localFingerprint.cwd || runtimeFingerprint.workdir || fingerprint.path || agent.workdir || "").trim();
+      if (signature || launchHash || runtimeHash || originPath || agent.install_id || agent.approval_id) {
+        drawerBody.appendChild(makeEl("section", { class: "drawer-section" }, [
+          makeEl("div", { class: "drawer-label" }, ["Fingerprint"]),
+          makeEl("div", { class: "drawer-meta" }, [
+            makeEl("span", { class: "chip" }, ["Install " + String(agent.install_id || fingerprint.install_id || "—").slice(0, 8)]),
+            agent.registry_ref ? makeEl("span", { class: "chip" }, ["Ref " + String(agent.registry_ref)]) : null,
+            signature ? makeEl("span", { class: "chip" }, ["Sig " + signature.slice(0, 12)]) : null,
+            launchHash ? makeEl("span", { class: "chip" }, ["Launch " + launchHash.slice(0, 12)]) : null,
+            runtimeHash ? makeEl("span", { class: "chip" }, ["Runtime " + runtimeHash.slice(0, 12)]) : null,
+            exeHash ? makeEl("span", { class: "chip" }, ["Exe " + exeHash.slice(0, 12)]) : null,
+            hostHash ? makeEl("span", { class: "chip" }, ["Host " + hostHash.slice(0, 12)]) : null,
+            actorUser ? makeEl("span", { class: "chip" }, ["User " + actorUser]) : null,
+            agent.approval_id ? makeEl("span", { class: "chip" }, ["Approval " + String(agent.approval_id).slice(0, 8)]) : null,
+          ]),
+          makeEl("div", { class: "drawer-value muted" }, [
+            originPath || "No local folder path recorded.",
+          ]),
+        ]));
+      }
 
       // Space section (with picker + pin toggle)
       const currentSpaceId = String(agent.space_id || "").trim();
@@ -1293,9 +1745,17 @@
 
       // Actions
       const desiredRunning = String(agent.desired_state || "").toLowerCase() !== "stopped";
+      const needsApproval = String(agent.approval_state || "").toLowerCase() === "pending" && agent.approval_id;
       const actions = makeEl("div", { class: "drawer-actions" });
+      if (needsApproval) {
+        actions.appendChild(makeEl("button", {
+          class: "btn btn-primary",
+          onclick: (event) => approveAgent(agent, event.currentTarget),
+        }, ["Approve connection"]));
+      }
       actions.appendChild(makeEl("button", {
-        class: "btn btn-primary",
+        class: needsApproval ? "btn btn-ghost" : "btn btn-primary",
+        disabled: needsApproval,
         onclick: async () => {
           try {
             await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/test", {});
@@ -1352,20 +1812,42 @@
       state.drawerActivity = activity || [];
       const region = document.getElementById("drawer-activity");
       if (!region) return;
+      const agent = findAgent(state.drawerAgentName);
       const visible = (activity || []).filter((a) => !ACTIVITY_HIDE.has(String(a.event || "")));
       // Sort newest-first.
       visible.sort((a, b) => String(b.ts || "").localeCompare(String(a.ts || "")));
 
       // Cheap signature to skip re-render when nothing changed.
-      const sig = visible.map((e) => (e.event || "") + ":" + (e.ts || "") + ":" + (e.message_id || "")).join("|");
-      const processing = isProcessingNow(activity || []);
-      const sigKey = sig + "|p=" + (processing ? 1 : 0);
+      const sig = visible.map((e) => [
+        e.event || "",
+        e.ts || "",
+        e.message_id || "",
+        e.tool_call_id || "",
+        e.tool_name || "",
+        e.status || "",
+        e.activity_message || "",
+      ].join(":")).join("|");
+      const processing = isProcessingNow(activity || [], agent);
+      const mailbox = mailboxStateLabel(agent);
+      const mailboxKey = mailbox ? `${mailbox.title}|${mailbox.tone}` : "";
+      const sigKey = sig + "|p=" + (processing ? 1 : 0) + "|m=" + mailboxKey;
       if (sigKey === state.drawerActivityKey) return;
       state.drawerActivityKey = sigKey;
 
       clearChildren(region);
 
-      if (processing) {
+      if (mailbox) {
+        // Pass-through / mailbox-style runtimes get a dedicated state card
+        // showing whether the agent has unread messages waiting to be polled,
+        // not a generic "Working" spinner.
+        region.appendChild(makeEl("div", { class: "activity-event " + (mailbox.tone === "warning" ? "warning" : mailbox.tone === "ok" ? "ok" : "") }, [
+          makeEl("span", { class: "activity-event-icon dot" }),
+          makeEl("div", { class: "activity-event-body" }, [
+            makeEl("div", { class: "activity-event-title" }, [mailbox.title]),
+            makeEl("div", { class: "activity-event-detail" }, [mailbox.detail]),
+          ]),
+        ]));
+      } else if (processing) {
         region.appendChild(makeEl("div", { class: "activity-event work" }, [
           makeEl("span", { class: "activity-event-icon dot" }),
           makeEl("div", { class: "activity-event-body" }, [
@@ -1380,14 +1862,20 @@
         ]));
       }
 
-      if (!visible.length && !processing) {
+      if (!visible.length && !processing && !mailbox) {
         region.appendChild(makeEl("div", { class: "activity-empty" }, [
           "No recent activity. Hit Send test message to start the round-trip.",
         ]));
         return;
       }
 
-      for (const ev of visible) {
+      const grouped = groupActivityEvents(visible);
+      for (const item of grouped) {
+        if (item.kind === "tool_group") {
+          region.appendChild(renderToolGroup(item));
+          continue;
+        }
+        const ev = item.event;
         const tone = eventTone(ev);
         const title = eventLabel(ev);
         const detail = eventDetail(ev);

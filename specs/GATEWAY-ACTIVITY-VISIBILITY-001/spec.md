@@ -59,6 +59,44 @@ Bridges MUST emit at least:
 - `{"kind":"status","status":"completed"}` exactly once at end
 - `{"kind":"status","status":"error","error_message":"..."}` on failure (replaces completed)
 
+## Conversation-history contract
+
+Gateway-managed conversational runtimes must use the platform transcript as the
+source of truth. A runtime should not rely on process-local memory for correctness,
+because on-demand agents, supervised runtimes, and future containerized adapters
+may restart or move.
+
+Required model:
+
+1. On message pickup, the runtime fetches recent messages from the agent's
+   current `space_id` using the agent-bound token.
+2. The runtime filters that transcript to messages addressed to this agent and
+   messages authored by this agent. Busy team traffic must not evict the latest
+   direct exchange.
+3. The runtime shapes filtered messages into model turns:
+   - messages authored by the agent -> `assistant`
+   - messages addressed to the agent -> `user`
+   - leading `@agent` mention text is stripped from user turns before model call
+4. The runtime packs context from newest to oldest under a bounded turn count and
+   character budget, then reverses into chronological order before calling the
+   model.
+5. The runtime emits a visible status such as
+   `Preparing Ollama request (<model>, N prior turns)` so operators can see that
+   continuity is active.
+
+This is the pattern proven by the Gateway Ollama smoke test on 2026-04-26:
+
+- turn 1: user told `gemma4` favorite color `violet-copper-9184`
+- turn 1 reply: `remembered violet-copper-9184`
+- turn 2: user asked what the favorite color was
+- turn 2 reply: `violet-copper-9184`
+- activity showed `Preparing Ollama request (gemma4:latest, 6 prior turns)` and
+  a streaming preview before final reply
+
+For LangGraph-style adapters, this transcript-shaping step should become the
+state loader before graph invocation. LangGraph may own tool routing and node
+state, but the aX transcript remains the canonical conversation memory.
+
 ## Failure-mode visibility
 
 - `_publish_processing_status` MUST log every failure to `~/.ax/gateway/gateway.log` (not silently swallow). Today (pre-fix) it does `except Exception: pass` — that is broken. After this spec, it logs `processing-status post failed: msg=… status=… err=…`.

@@ -24,6 +24,7 @@ EVENT_PREFIX = "AX_GATEWAY_EVENT "
 DEFAULT_OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 DEFAULT_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 HISTORY_LIMIT = int(os.environ.get("AX_OLLAMA_HISTORY_LIMIT", "20") or 20)
+HISTORY_FETCH_LIMIT = int(os.environ.get("AX_OLLAMA_HISTORY_FETCH_LIMIT", str(max(50, HISTORY_LIMIT * 3))) or 50)
 HISTORY_CHAR_BUDGET = int(os.environ.get("AX_OLLAMA_HISTORY_CHAR_BUDGET", "12000") or 12000)
 
 # Make the ax_cli package importable when the bridge is launched from the
@@ -83,6 +84,53 @@ def _looks_like_attribution(text: str) -> bool:
     return False
 
 
+def _message_mentions_agent(msg: dict[str, Any], agent_name: str, agent_id: str | None) -> bool:
+    content = str(msg.get("content") or msg.get("text") or "")
+    if f"@{agent_name}".lower() in content.lower():
+        return True
+    metadata = msg.get("metadata")
+    mentions = metadata.get("mentions") if isinstance(metadata, dict) else None
+    if not isinstance(mentions, list):
+        return False
+    normalized_name = agent_name.strip().lstrip("@").lower()
+    normalized_id = (agent_id or "").strip()
+    for mention in mentions:
+        if isinstance(mention, str) and mention.strip().lstrip("@").lower() == normalized_name:
+            return True
+        if isinstance(mention, dict):
+            mention_name = str(mention.get("agent_name") or mention.get("name") or "").strip().lstrip("@").lower()
+            mention_id = str(mention.get("agent_id") or mention.get("id") or "").strip()
+            if mention_name and mention_name == normalized_name:
+                return True
+            if normalized_id and mention_id == normalized_id:
+                return True
+    return False
+
+
+def _message_authored_by_agent(msg: dict[str, Any], agent_name: str, agent_id: str | None) -> bool:
+    normalized_name = agent_name.strip().lstrip("@").lower()
+    normalized_id = (agent_id or "").strip()
+    names = [
+        msg.get("sender_agent_name"),
+        msg.get("agent_name"),
+        msg.get("sender_name"),
+        msg.get("from_name"),
+        msg.get("display_name"),
+    ]
+    if any(str(name or "").strip().lstrip("@").lower() == normalized_name for name in names):
+        return True
+    ids = [msg.get("agent_id"), msg.get("sender_agent_id")]
+    return bool(normalized_id and any(str(value or "").strip() == normalized_id for value in ids))
+
+
+def _strip_agent_mention(text: str, agent_name: str) -> str:
+    token = f"@{agent_name}".lower()
+    stripped = text.strip()
+    if stripped.lower().startswith(token):
+        return stripped[len(token) :].strip()
+    return stripped
+
+
 def _shape_history(prompt: str) -> list[dict[str, str]]:
     """Return Ollama-style messages[] for /api/chat.
 
@@ -90,6 +138,7 @@ def _shape_history(prompt: str) -> list[dict[str, str]]:
     """
     fallback = [{"role": "user", "content": prompt}]
     agent_name = os.environ.get("AX_GATEWAY_AGENT_NAME", "").strip()
+    agent_id = os.environ.get("AX_GATEWAY_AGENT_ID", "").strip() or os.environ.get("AX_AGENT_ID", "").strip() or None
     space_id = os.environ.get("AX_GATEWAY_SPACE_ID", "").strip() or os.environ.get("AX_SPACE_ID", "").strip()
     if not agent_name or not space_id:
         return fallback
@@ -99,7 +148,7 @@ def _shape_history(prompt: str) -> list[dict[str, str]]:
         return fallback
 
     try:
-        payload = client.list_messages(limit=HISTORY_LIMIT, space_id=space_id)
+        payload = client.list_messages(limit=HISTORY_FETCH_LIMIT, space_id=space_id)
     except Exception as exc:  # noqa: BLE001
         emit_event({"kind": "activity", "activity": f"history fetch failed: {exc}"})
         return fallback
@@ -108,11 +157,9 @@ def _shape_history(prompt: str) -> list[dict[str, str]]:
     if not isinstance(items, list):
         return fallback
 
-    # Backend returns newest-first; we want oldest-first for the model.
-    items = list(reversed(items))
-
-    # Trim the tail to fit a character budget so we don't blow up small models.
-    shaped: list[dict[str, str]] = []
+    # Backend returns newest-first. Select this agent's recent exchange from the
+    # newest side so busy team traffic cannot evict the latest direct message.
+    selected_newest: list[dict[str, str]] = []
     used_chars = 0
     incoming_seen = False
     for msg in items:
@@ -121,27 +168,30 @@ def _shape_history(prompt: str) -> list[dict[str, str]]:
         text = str(msg.get("content") or msg.get("text") or "").strip()
         if _looks_like_attribution(text):
             continue
-        sender = str(
-            msg.get("sender_agent_name")
-            or msg.get("agent_name")
-            or msg.get("sender_name")
-            or msg.get("from_name")
-            or ""
-        ).strip().lstrip("@")
+        authored_by_agent = _message_authored_by_agent(msg, agent_name, agent_id)
+        addressed_to_agent = _message_mentions_agent(msg, agent_name, agent_id)
+        if not authored_by_agent and not addressed_to_agent:
+            continue
         # Treat messages authored by THIS agent as "assistant" turns; everything else
         # (humans, other agents) is "user" context. Ollama's chat format allows multiple
         # user turns in sequence, which Hermes-style agents handle fine.
-        role = "assistant" if sender == agent_name else "user"
+        role = "assistant" if authored_by_agent else "user"
+        content = text if role == "assistant" else _strip_agent_mention(text, agent_name)
         # If this is the freshly-received prompt, mark that we've seen it so we don't
         # double-append below.
-        if role == "user" and text.strip() == prompt.strip():
+        if role == "user" and (text.strip() == prompt.strip() or content.strip() == prompt.strip()):
             incoming_seen = True
         # Char budget: count chars and stop when over.
-        added = len(text) + 8
-        if used_chars + added > HISTORY_CHAR_BUDGET and shaped:
+        added = len(content) + 8
+        if used_chars + added > HISTORY_CHAR_BUDGET and selected_newest:
             break
-        shaped.append({"role": role, "content": text})
+        selected_newest.append({"role": role, "content": content})
         used_chars += added
+        if len(selected_newest) >= HISTORY_LIMIT:
+            break
+
+    # Ollama expects chronological order.
+    shaped = list(reversed(selected_newest))
 
     if not incoming_seen:
         # Belt-and-suspenders — make sure the actual prompt is the last turn.
@@ -201,7 +251,15 @@ def _chat(messages: list[dict[str, str]]) -> str:
                         first_token_seen = True
                         emit_event({"kind": "status", "status": "processing", "message": f"Ollama is responding ({model})"})
                     if now - last_activity_at >= 1.0:
-                        emit_event({"kind": "activity", "activity": f"Streaming response from {model}..."})
+                        preview = "".join(chunks).strip().replace("\n", " ")
+                        if len(preview) > 180:
+                            preview = "..." + preview[-177:]
+                        emit_event(
+                            {
+                                "kind": "activity",
+                                "activity": f"{model}: {preview}" if preview else f"Streaming response from {model}...",
+                            }
+                        )
                         last_activity_at = now
                 if payload.get("done"):
                     break

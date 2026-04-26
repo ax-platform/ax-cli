@@ -128,7 +128,11 @@ CREATE TABLE agent_placement (
 );
 ```
 
-This **replaces** scattered `.ax/config.toml` `space_id` fields for Gateway-managed agents. Direct-mode agents continue to read their `.ax/config.toml` until they migrate.
+This **replaces** scattered `.ax/config.toml` `space_id` fields for
+Gateway-managed agents. A Gateway registry pointer may still include an
+expected `space_id` to explain drift, but it is not authoritative and changing
+it does not move the agent. Direct-mode agents continue to read their
+credential-bearing `.ax/config.toml` until they migrate.
 
 A periodic reconcile loop (every 60s, or on SSE event) calls `GET /api/v1/agents/{id}/placement` and rectifies divergence. Drift longer than 60s flags an alert in the activity stream.
 

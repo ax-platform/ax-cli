@@ -21,12 +21,14 @@ Naming: this view is **not** "the demo." It is the gateway's default. The detail
 
 ## Scope
 
-**In** (default `/` route — to be renamed from `/demo`):
+**In** (default `/` route):
 - Hero: "Bring your agents online" with single primary CTA "Connect agent"
-- One agent table, single header row, columns: dot · Agent · Type · Status · Last activity · Space
+- One agent table, single header row, columns: indicator · Agent · Last activity · Space · action
 - Click any row → side drawer with status detail, space picker, pin toggle, send-test, start/stop, remove
 - Top bar: brand mark, connection pill (`connected · paxai.app`), Space filter (defaults to "All spaces"), "Advanced view →" link
-- Connect wizard modal (Ollama featured, others available, autosetup triggered when the runtime needs it — see GATEWAY-RUNTIME-AUTOSETUP-001)
+- Connect wizard modal with a registry-style runtime dropdown, readable details
+  for the selected runtime, and autosetup/preflight when the runtime needs it
+  — see GATEWAY-RUNTIME-AUTOSETUP-001
 
 **Out** (still reachable at `/operator` — old detail UI):
 - Approvals queue
@@ -35,7 +37,10 @@ Naming: this view is **not** "the demo." It is the gateway's default. The detail
 - Alerts panel
 - Per-agent drill-in dashboard
 
-## Status vocabulary (single column on the row)
+## Row indicator and status vocabulary
+
+Status is not a standalone row column in the simple view. It appears through
+the row indicator, row action, drawer status section, and last-activity text.
 
 Map raw `presence` × `confidence` × `desired_state` → one human label:
 
@@ -53,6 +58,16 @@ Map raw `presence` × `confidence` × `desired_state` → one human label:
 
 Operator intent overrides observed presence: pressing Stop reads "Stopped" immediately, even if a stale heartbeat is still draining.
 
+Pass-through and mailbox runtimes are the exception to dot semantics:
+
+- they use a mailbox indicator instead of a live dot;
+- unread messages render as a small count bubble attached to the mailbox icon;
+- pending task counts may render as a compact task badge;
+- they must not show `Active` just because Gateway can hold work for them.
+
+Pending approval rows show `Review` as the row action. Clicking it opens the
+drawer so the operator can inspect the fingerprint before approving.
+
 ## Lifecycle (the kill switch)
 
 - "Stop" sets `desired_state=stopped` on the gateway registry entry.
@@ -66,12 +81,53 @@ Operator intent overrides observed presence: pressing Stop reads "Stopped" immed
 
 - Backend `agent_space_access` table is the canonical record (per AGENT-SPACE-ACCESS rules in `ax-backend/CLAUDE.md` §Architectural rules #6).
 - The gateway exposes a per-agent `pinned: bool` in **local registry only** — refuses move client-side when pinned. No backend schema change.
-- Move flow: `POST /api/agents/{name}/move` → `client.update_agent(name, space_id=…)` → gateway refetches `GET /api/v1/agents/manage/{id}` → reconciles local registry to whatever backend actually applied. Backend = source.
+- Move flow: `POST /api/agents/{name}/move` or `ax gateway agents move <name> --space-id <space>` → `client.set_agent_placement(agent_id, space_id=…)` → gateway refetches placement/manage state → reconciles local registry to whatever backend actually applied. Backend = source.
+- After a move, every Gateway-mediated send path, including "Send test message",
+  must route through the agent row's current active space. Test delivery must
+  not reuse a stale switchboard/default space.
 - Coercion: when backend silently keeps an agent in its existing space (because the target wasn't in `allowed_spaces`), gateway logs `managed_agent_move_coerced` activity for audit.
+
+## Test messages and service senders
+
+The drawer's "Send test message" action is a v1 shortcut for a more general
+Gateway message composer.
+
+Rules:
+
+- The UI must make the sender visible. A test is authored by a Gateway-managed
+  service sender, not by a mystery system action.
+- The default sender should be the service account for the target space, such
+  as `switchboard-<space>`, when that sender exists and has a valid credential.
+- If the per-space service sender cannot be created or used, Gateway may fall
+  back to a clearly marked self-authored diagnostic send rather than crashing.
+  The response metadata must say that fallback happened.
+- The message is sent to the target agent's current active space after
+  placement reconciliation.
+- Future UI should replace the single button with a compact composer: sender
+  selector, message text, immediate send, and later schedule/cron controls.
+
+Open follow-up tasks:
+
+- Add a service-account management surface for creating/reusing per-space
+  Gateway notification senders.
+- Add drawer composer UX with sender selector and explicit "from" label.
+- Add scheduled test/message support once the immediate send contract is stable.
 
 ## "Last activity" column
 
 Source: most-recent of `last_work_completed_at`, `last_work_received_at`, `last_reply_at`, `last_received_at`. **Excludes** heartbeat / connection timestamps — those are implied by the connection pill and the row dot. If none of the work timestamps are set, show `—`.
+
+For pass-through/mailbox rows, use the more specific contract from
+**GATEWAY-PASS-THROUGH-MAILBOX-001**:
+
+- unread messages: `New message` or `N new messages` from
+  `last_work_received_at` / queued item time;
+- no unread messages and no activity: `Inbox ready`;
+- last check-in: `Checked`;
+- replies: `Sent message`;
+- pending approval: `Awaiting approval`.
+
+Refreshing `/api/status` must not reset a queued message to `just now`.
 
 ## System-agent visibility
 
@@ -109,12 +165,43 @@ curl -sS -X POST http://127.0.0.1:8765/api/agents/demo-bot/pin -d '{"pinned":fal
 # Positive case — guards against pin-bypass regressions
 curl -sS -X POST http://127.0.0.1:8765/api/agents/demo-bot/move -d '{"space_id":"<allowed-space-id>"}' -H 'Content-Type: application/json'
 # expect: 200, response.space_id reflects backend's applied space_id
+ax gateway agents move demo-bot --space-id <allowed-space-id> --json
+ax gateway agents test demo-bot --json
+# expect: message.space_id == applied space_id
 
 # Cleanup
 ax gateway agents remove demo-bot
 ```
 
 All five smokes must pass before the simple gateway is "demo ready."
+
+## UI acceptance smoke
+
+Before PR, verify the browser surface at `http://127.0.0.1:8765/`:
+
+- connection pill reads `connected · paxai.app` in production mode;
+- runtime picker lists all non-advanced templates from `/api/templates`;
+- pass-through rows use a mailbox indicator, not a live dot;
+- mailbox count bubbles do not shift the Agent column;
+- pending approval rows open the drawer instead of approving inline;
+- approval drawer shows origin/fingerprint details before the approve action;
+- last activity for mailbox rows uses queued-message timestamps and does not
+  reset to `just now` on refresh.
+
+## Runtime picker
+
+The connect wizard must scale like an open-source adapter registry, not a fixed
+three-card marketing surface.
+
+- Use a compact runtime dropdown/list as the primary selector.
+- Show one readable detail panel for the selected runtime.
+- Include all non-advanced Gateway templates returned by `/api/templates`, not
+  only featured templates.
+- Disabled/coming-soon templates may be listed for roadmap visibility, but must
+  not submit.
+- Large generated artwork is optional and should come from template metadata
+  later; v1 should keep the layout simple enough for community-contributed
+  templates.
 
 ## Out-of-scope cross-references
 

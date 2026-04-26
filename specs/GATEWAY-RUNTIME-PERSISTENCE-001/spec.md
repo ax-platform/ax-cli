@@ -7,9 +7,35 @@
 - @madtank 2026-04-25: "I think what's happening is your invoking them like a individual call but I think we need to keep them running and we need to keep them available. That way when we send a message they're already running. They're already working and they hold the session context."
 - @madtank: "We need to make sure that an agent at least be able to hold a conversation."
 
+## Current PR boundary
+
+This spec describes the **next persistent-runtime step**, not the current PR's
+Ollama implementation.
+
+Current PR behavior:
+
+- Ollama remains `intake_model=launch_on_send`.
+- Gateway launches `examples/gateway_ollama/ollama_bridge.py` per message.
+- The bridge reconstructs conversation context from recent aX transcript
+  history using the agent's managed token.
+- The bridge emits pickup, request-preparation, streaming-preview, completion,
+  and reply activity.
+
+Follow-up behavior in this spec:
+
+- promote conversational runtimes such as Ollama to a long-running listener
+  option;
+- keep in-process per-thread memory while still treating aX transcript history
+  as canonical on cold start;
+- add heartbeat/restart/runtime-log commands for the persistent bridge.
+
 ## Vocabulary alignment
 
-This spec **anchors on `connection_mode`** from AVAIL-CONTRACT-001 (`specs/AGENT-AVAILABILITY-CONTRACT-001/spec.md`). The four legal values are `live_listener | on_demand_warm | inbox_queue | disconnected`. We do **not** invent a new `intake_model` field — that would collide. Whenever this spec talks about "making Ollama persistent", we mean **flipping its `connection_mode` from `on_demand_warm` → `live_listener`**. Every other field on the agent record stays as-is.
+This spec describes the follow-up transition from `intake_model=launch_on_send`
+to `intake_model=live_listener` for conversational runtimes. Older notes used
+`connection_mode`; current Gateway templates expose `intake_model`, `placement`,
+and `activation`, with derived `Mode + Presence + Reply + Confidence` for
+display. Do not introduce a second competing status vocabulary.
 
 ## Why this exists
 
@@ -19,12 +45,16 @@ The Ollama runtime today is `intake_model: launch_on_send`. Every incoming messa
 3. exits
 
 Effects:
-- **No in-memory session context.** Each call is fresh. The bridge currently fetches recent messages from aX as a workaround, but that's a per-call HTTP round trip.
+- **No in-memory session context.** Each call is fresh. The current bridge
+  fetches recent messages from aX and shapes them into model history, so
+  conversation continuity works, but it is reconstructed per call.
 - **Cold-start latency** every message (Python startup, Ollama load, reconnect to aX).
 - **Activity bubbles look choppy** because the runtime isn't continuously emitting events between messages.
 - **Doesn't match the user's mental model.** Users expect "I started this agent, it's running, it remembers what we talked about" — like Hermes or Claude.
 
-We want Ollama (and any conversational runtime) to be **persistent**: a long-lived listener process that holds session memory in process, subscribes to incoming work via SSE, and replies inline.
+We want a follow-up option where Ollama and other conversational runtimes can be
+**persistent**: a long-lived listener process that holds session memory in
+process, subscribes to incoming work via SSE, and replies inline.
 
 ## Scope
 
@@ -100,7 +130,7 @@ ax gateway agents runtime logs <name> --tail 50
 ## Acceptance smokes (CLI-driven)
 
 ```bash
-# Add an agent with persistent intake
+# Follow-up: add an agent with persistent intake once implemented
 ax gateway agents add memo-bot --template ollama --connection-mode live_listener
 ax gateway agents runtime status memo-bot
 # expect: running=true, pid=<int>, threads_loaded=0

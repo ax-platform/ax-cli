@@ -95,6 +95,20 @@ ax gateway runtime status hermes
 
 (These commands need to be added — they don't exist today.)
 
+## Current PR boundary
+
+This spec is intentionally ahead of the current Gateway demo implementation.
+The demo branch should not claim full zero-touch runtime setup until these
+pieces land:
+
+- `ax gateway runtime status/install` CLI commands;
+- local API template preflight/install endpoints;
+- explicit Hermes `install_ready` vs `provider_ready` fields;
+- wizard controls for provider authentication.
+
+For this PR, Hermes setup gaps should remain visible through Doctor/setup
+errors rather than being described as automatically fixed.
+
 ## Security model
 
 The install endpoint executes `git clone` and `pip install`. That is code execution. The following constraints are mandatory:
