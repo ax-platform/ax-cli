@@ -740,6 +740,49 @@ class AxClient:
         r.raise_for_status()
         return self._parse_json(r)
 
+    def get_agent_placement(self, agent_id_or_name: str) -> dict:
+        """GET agent record + extract placement-relevant fields.
+
+        No dedicated GET /placement endpoint today (per backend's
+        agents_unified.py). Reads the agent record and surfaces
+        ``space_id`` / ``pinned`` / ``allowed_spaces`` (when present)
+        in a stable shape, plus passes through any ``placement`` /
+        ``placement_state`` sub-objects backend emits later.
+        """
+        # Resolve UUID directly; otherwise look up via /manage/{name}
+        if len(agent_id_or_name) == 36 and agent_id_or_name.count("-") == 4:
+            agent = self.get_agent(agent_id_or_name)
+        else:
+            agent = self.get_agent(agent_id_or_name)
+        record = agent.get("agent", agent) if isinstance(agent, dict) else {}
+        return {
+            "agent_id": record.get("id"),
+            "name": record.get("name"),
+            "space_id": record.get("space_id"),
+            "pinned": record.get("pinned"),
+            "allowed_spaces": record.get("allowed_spaces"),
+            "placement": record.get("placement"),  # forward-compat — backend may emit later
+            "placement_state": record.get("placement_state"),
+            "_record": record,  # full record for diagnostics
+        }
+
+    def set_agent_placement(self, agent_id_or_name: str, *, space_id: str, pinned: bool = False) -> dict:
+        """POST /api/v1/agents/{id}/placement — set default space + pinned.
+
+        Per ax-backend agents_unified.py, body is ``{space_id, pinned}``.
+        Future-compat: when backend implements the full
+        ``GATEWAY-PLACEMENT-POLICY-001`` machinery (policy_kind /
+        allowed_spaces / placement_state envelope), this method's
+        signature can extend; the existing call site stays compatible.
+        """
+        body = {"space_id": space_id, "pinned": pinned}
+        r = self._http.post(
+            f"/api/v1/agents/{agent_id_or_name}/placement",
+            json=body,
+        )
+        r.raise_for_status()
+        return self._parse_json(r)
+
     def get_agent_presence(self, agent_id_or_name: str, *, space_id: str | None = None) -> dict:
         """GET single-agent availability record.
 

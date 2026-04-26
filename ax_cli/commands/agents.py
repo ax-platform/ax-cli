@@ -787,6 +787,102 @@ def check(
             console.print(body)
 
 
+placement_app = typer.Typer(
+    name="placement",
+    help="Agent space-placement management (per GATEWAY-PLACEMENT-POLICY-001)",
+    no_args_is_help=True,
+)
+app.add_typer(placement_app, name="placement")
+
+
+@placement_app.command("get")
+def placement_get(
+    name_or_id: str = typer.Argument(..., help="Agent name or UUID"),
+    as_json: bool = JSON_OPTION,
+):
+    """Show an agent's current space placement.
+
+    Today renders the basic placement shape (``space_id``, ``pinned``,
+    ``allowed_spaces`` when present). When backend implements the full
+    GATEWAY-PLACEMENT-POLICY-001 machinery (``policy_kind`` /
+    ``placement_state`` / ``policy_revision``), those fields surface
+    transparently — same forward-compat pattern as ``ax agents check``.
+    """
+    client = get_client()
+    try:
+        record = client.get_agent_placement(name_or_id)
+    except httpx.HTTPStatusError as exc:
+        handle_error(exc)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if as_json:
+        print_json(record)
+        return
+
+    name = record.get("name") or name_or_id
+    space_id = record.get("space_id") or "—"
+    pinned = record.get("pinned")
+    pinned_str = "yes" if pinned else ("no" if pinned is False else "—")
+    allowed = record.get("allowed_spaces")
+
+    console.print(f"[bold]@{name}[/bold] placement")
+    rows = [
+        {"field": "space_id", "value": space_id},
+        {"field": "pinned", "value": pinned_str},
+    ]
+    if allowed:
+        rows.append({"field": "allowed_spaces", "value": ", ".join(str(s) for s in allowed)})
+
+    # Forward-compat: render these only when backend provides them
+    placement = record.get("placement")
+    if isinstance(placement, dict):
+        for k in ("policy_kind", "current_space", "current_space_set_by", "policy_revision"):
+            v = placement.get(k)
+            if v is not None:
+                rows.append({"field": f"placement.{k}", "value": str(v)})
+    placement_state = record.get("placement_state")
+    if placement_state:
+        rows.append({"field": "placement_state", "value": str(placement_state)})
+
+    print_table(["Field", "Value"], rows, keys=["field", "value"])
+
+
+@placement_app.command("set")
+def placement_set(
+    name_or_id: str = typer.Argument(..., help="Agent name or UUID"),
+    space_id: str = typer.Option(..., "--space-id", help="Target space UUID (or short prefix)"),
+    pinned: bool = typer.Option(False, "--pinned/--no-pinned", help="Lock the agent to this space"),
+    as_json: bool = JSON_OPTION,
+):
+    """Set an agent's default space + pinned status.
+
+    Calls POST ``/api/v1/agents/{id}/placement`` with ``{space_id, pinned}``.
+    Requires ownership of the agent + membership in the target space.
+
+    When the agent is Gateway-managed, the placement change propagates
+    to the runtime per GATEWAY-PLACEMENT-POLICY-001's transition flow.
+    For direct-mode agents, the change applies to the agent record but
+    the running listener may need a restart to pick up the new space.
+    """
+    client = get_client()
+    try:
+        result = client.set_agent_placement(name_or_id, space_id=space_id, pinned=pinned)
+    except httpx.HTTPStatusError as exc:
+        handle_error(exc)
+
+    if as_json:
+        print_json(result)
+        return
+
+    record = result.get("agent", result) if isinstance(result, dict) else {}
+    name = record.get("name") or name_or_id
+    new_space = record.get("space_id") or space_id
+    pinned_str = "pinned" if record.get("pinned") else "unpinned"
+    console.print(f"[green]Updated[/green] @{name} → space={new_space} ({pinned_str})")
+
+
 @app.command("tools")
 def tools(
     agent_id: str = typer.Argument(..., help="Agent ID"),
