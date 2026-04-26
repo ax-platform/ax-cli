@@ -115,7 +115,7 @@
 
     /* Agent list (rows) */
     .agent-list { border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(10px); overflow: hidden; }
-    .agent-grid-cols { display: grid; grid-template-columns: 38px minmax(240px, 1.2fr) minmax(210px, 1fr) minmax(170px, 0.85fr) minmax(70px, auto); gap: 14px; align-items: center; }
+    .agent-grid-cols { display: grid; grid-template-columns: 38px minmax(220px, 1.15fr) minmax(150px, 0.72fr) minmax(210px, 1fr) minmax(40px, auto); gap: 14px; align-items: center; }
     .agent-list-head { padding: 12px 20px; border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, 0.02); font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted-2); }
     .agent-row { padding: 16px 20px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer; transition: background 120ms ease; text-align: left; font: inherit; width: 100%; }
     .agent-row:last-child { border-bottom: 0; }
@@ -304,17 +304,14 @@
     .toast.err { border-color: rgba(251, 113, 133, 0.4); color: var(--red); }
 
     @media (max-width: 960px) {
-      .agent-grid-cols { grid-template-columns: 38px minmax(190px, 1.1fr) minmax(180px, 1fr) minmax(70px, auto); gap: 12px; }
-      .agent-list-head > :nth-child(4),
-      .agent-row > :nth-child(4) { display: none; }
+      .agent-grid-cols { grid-template-columns: 38px minmax(170px, 1fr) minmax(128px, 0.65fr) minmax(154px, 0.82fr) minmax(30px, auto); gap: 12px; }
+      .row-space { font-size: 12px; }
     }
     @media (max-width: 720px) {
       .template-grid { grid-template-columns: 1fr; }
       .hero h1 { font-size: 44px; }
       .topbar { margin-bottom: 28px; }
-      .agent-grid-cols { grid-template-columns: 34px minmax(0, 1fr) minmax(128px, 0.8fr) minmax(70px, auto); gap: 10px; }
-      .agent-list-head > :nth-child(4),
-      .agent-row > :nth-child(4) { display: none; }
+      .agent-grid-cols { grid-template-columns: 34px minmax(0, 1fr) minmax(96px, 0.55fr) minmax(116px, 0.65fr) minmax(22px, auto); gap: 10px; }
       .type-mark { width: 30px; height: 30px; border-radius: 9px; }
       .type-mark svg { width: 18px; height: 18px; }
       .row-agent { gap: 9px; }
@@ -1094,8 +1091,8 @@
         const head = makeEl("div", { class: "agent-list-head agent-grid-cols" }, [
           makeEl("span"),
           makeEl("span", null, ["Agent"]),
-          makeEl("span", null, ["Last activity"]),
           makeEl("span", null, ["Space"]),
+          makeEl("span", null, ["Last activity"]),
           makeEl("span"),
         ]);
         list.appendChild(head);
@@ -1252,8 +1249,8 @@
           makeEl("span", { class: "row-type-label" }, ["Ready"]),
         ]),
       ]));
-      row.appendChild(makeEl("span", { class: "row-last-seen" }));
       row.appendChild(makeEl("span", { class: "row-space" }));
+      row.appendChild(makeEl("span", { class: "row-last-seen" }));
       row.appendChild(makeEl("span", { class: "row-action" }, [makeEl("span", { class: "row-chev" }, ["›"])]));
       updateRow(row, agent);
       return row;
@@ -1302,8 +1299,8 @@
       const typeMarkEl = agentEl.children[0];
       const nameEl = agentEl.querySelector(".row-name");
       const typeLabelEl = agentEl.querySelector(".row-type-label");
-      const lastSeenEl = row.children[2];
-      const spaceEl = row.children[3];
+      const spaceEl = row.children[2];
+      const lastSeenEl = row.children[3];
       const actionEl = row.children[4];
 
       if (isMailboxRuntime(agent)) {
@@ -1334,6 +1331,7 @@
       const spaceIsMuted = newSpace === "—";
       spaceEl.className = "row-space" + (spaceIsMuted ? " muted" : "");
       if (spaceEl.textContent !== newSpace) spaceEl.textContent = newSpace;
+      spaceEl.title = spaceIsMuted ? "" : newSpace;
       const needsApproval = String(agent.approval_state || "").toLowerCase() === "pending" && agent.approval_id;
       clearChildren(actionEl);
       if (needsApproval) {
