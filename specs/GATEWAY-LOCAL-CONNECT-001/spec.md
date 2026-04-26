@@ -152,6 +152,36 @@ Each row shows:
 
 The row must not use `Active`, `Live`, or listener language unless the agent has separately attached a live receive path. Pass-through means "can pass approved calls through Gateway when it checks in," not "Gateway is running the agent."
 
+## Approval drawer UX (pending state)
+
+Pending agents use the **same drawer layout as approved agents** — fingerprint, space picker, lock toggle, activity feed — with two differences:
+
+1. **Approve button** appears at the top of the Actions row (primary tone). Approval is one click.
+2. **Send test message / Start / Stop** are disabled until approved.
+
+The settings (space picker + lock toggle) are live before approval too — the operator can adjust the space binding or pre-lock the agent first, then click Approve. There is **no separate "review mode"**, no mandatory reason field, no reject button cluttering the primary path. Approval is intentionally low-friction; if the fingerprint looks wrong, the operator just doesn't click Approve and removes the row instead.
+
+Once approved, the drawer becomes a standard agent drawer — same layout, same controls, Send test message and Start/Stop unlock. The operator can immediately send a message to verify the round-trip.
+
+`POST /api/agents/<name>/approve` body (existing — unchanged):
+```json
+{ "scope": "asset" }
+```
+
+Optional fields the body MAY accept (no schema break — server defaults to current behavior):
+- `space_id` — re-bind on approval (default: keep current)
+- `pinned` — pre-lock (default: false)
+- `reason` — free-form audit string written to activity log
+
+Reject is intentionally NOT a primary control. To reject a pending pass-through, the operator removes the agent (`DELETE /api/agents/<name>`), which surfaces in the activity log as a rejection. This keeps the demo path simple — one happy primary action, one well-known destructive action, no third button to explain.
+
+CLI parity:
+```bash
+ax gateway local approvals approve <id>           # one-click parity with the button
+ax gateway local approvals approve <id> --space <uuid> --pin --reason '...'  # advanced
+ax gateway agents remove <name>                   # rejection path
+```
+
 ## Acceptance smokes
 
 ```bash

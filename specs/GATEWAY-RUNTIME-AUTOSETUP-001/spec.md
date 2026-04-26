@@ -36,11 +36,43 @@ The contract: **picking a runtime in the wizard should make it work.** If someth
 - **Steps:**
   1. `git clone https://github.com/NousResearch/hermes-agent ~/hermes-agent`
   2. `pip install -e ~/hermes-agent` *(if requirements.txt or pyproject exists)*
-  3. Verify by re-running `hermes_setup_status({"template_id": "hermes"})` → must return `ready: true`
+  3. **Provider auth** (mandatory — without this, Hermes runs but never calls tools):
+     - Hermes maintains its own credential pool in `~/.hermes/auth.json`. Even when
+       `~/.codex/auth.json` already exists from the Codex CLI, Hermes does NOT
+       auto-import it on first run — its credential pool starts empty. `hermes auth
+       status openai-codex` returns `logged out`, the runtime falls through every
+       provider in its chain (`openrouter, nous, local/custom, openai-codex,
+       api-key`), no provider has tool capability, and Hermes silently degrades to
+       text-only replies. Symptom: sentinel log shows `done in Ns, 0 tools, K
+       api_calls` for every message and the agent "lies" about tool use ("done"
+       without ever running anything).
+     - The wizard MUST detect `hermes auth status openai-codex` returning logged-out
+       and treat the runtime as **not ready**, with `fix_steps` describing the
+       provider-auth path (do NOT just call this "ready" because Hermes itself
+       launched).
+     - The fix is one of these (operator picks in the wizard):
+       1. `hermes login --provider openai-codex` — interactive OAuth, registers
+          the Codex provider in Hermes' pool. Reuses the same Codex account that
+          backs `~/.codex/auth.json`.
+       2. Set `OPENROUTER_API_KEY` in the sentinel's env — Hermes' provider chain
+          tries openrouter first; tool-capable models (Claude, GPT-4) work
+          immediately. Fastest path for demo machines that already have an
+          OpenRouter key.
+       3. `hermes auth add anthropic --type api-key` — direct Anthropic API key.
+     - Verification: `hermes auth list` must show at least one credential for a
+       tool-capable provider before the wizard advances to "Connect."
+  4. Verify by re-running `hermes_setup_status({"template_id": "hermes"})` → must
+     return `ready: true` AND `provider_ready: true` (new field — see preflight
+     payload below).
 - **Failure modes & UX:**
   - Network failure → toast "Couldn't reach github.com — check your network and retry."
   - Clone permission failure → toast "Can't write to ~/hermes-agent — check your filesystem permissions."
   - Install requirements failure → log full pip stderr, surface "Hermes installed but pip dependencies failed: <one-line>" with a "Show details" expand.
+  - **Provider not authenticated** → wizard shows "Hermes installed, but no
+    LLM provider is authenticated yet. Without one, Hermes can't call tools. Pick
+    a provider:" with three buttons: "Sign in with Codex", "Use OpenRouter key",
+    "Use Anthropic key". Surface the sentinel-log fingerprint of the broken-state
+    (`0 tools, N api_calls`) so operators can recognize the symptom.
 
 ### Ollama
 - **Source:** local `ollama serve` (assumed already installed; we don't bundle Ollama).
@@ -93,8 +125,31 @@ POST /api/templates/{id}/install          # NEW: streams progress (text/event-st
 [
   { "kind": "clone", "url": "https://github.com/NousResearch/hermes-agent", "target": "~/hermes-agent" },
   { "kind": "pip", "target": "~/hermes-agent" },
+  { "kind": "provider_auth", "provider_options": ["openai-codex", "openrouter", "anthropic"] },
   { "kind": "verify" }
 ]
+```
+
+The `provider_auth` step is mandatory for Hermes — without it the runtime
+launches but produces tool-less replies (silent demo killer). The wizard
+surfaces this step distinctly because each option has different UX:
+- `openai-codex` → triggers `hermes login --provider openai-codex` interactive
+  OAuth (browser opens). Reuses the user's existing Codex account.
+- `openrouter` → reads `OPENROUTER_API_KEY` from operator clipboard / form
+  input, validates with a probe request, persists into the gateway's per-agent
+  env so subsequent sentinel restarts pick it up.
+- `anthropic` → similar to openrouter for an `ANTHROPIC_API_KEY`.
+
+The preflight response distinguishes installation vs. provider readiness:
+```json
+{
+  "ready": false,
+  "install_ready": true,
+  "provider_ready": false,
+  "summary": "Hermes installed, but no LLM provider is authenticated.",
+  "detail": "Without an authenticated provider Hermes can't call tools. Sign in with Codex (free, recommended) or paste an OpenRouter / Anthropic API key.",
+  "fix_steps": [{"kind": "provider_auth", "provider_options": [...]}]
+}
 ```
 
 **SSE progress event shape** for the `POST .../install` stream:
