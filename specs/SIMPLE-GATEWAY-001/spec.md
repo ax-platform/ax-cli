@@ -85,6 +85,14 @@ drawer so the operator can inspect the fingerprint before approving.
 - After a move, every Gateway-mediated send path, including "Send test message",
   must route through the agent row's current active space. Test delivery must
   not reuse a stale switchboard/default space.
+- If a managed runtime is already connected when its active space changes, the
+  Gateway must cancel/restart or otherwise rebind that runtime before the next
+  delivery. A stale listener must never keep watching the old space while the
+  row and service sender point at the new space.
+- If the runtime is actively working during a requested move, the UI should
+  warn the operator and offer either "wait until current work finishes" or
+  "force move and cancel current work". CLI/API paths should expose the same
+  semantics once the work-state lock is durable.
 - Coercion: when backend silently keeps an agent in its existing space (because the target wasn't in `allowed_spaces`), gateway logs `managed_agent_move_coerced` activity for audit.
 
 ## Test messages and service senders
@@ -103,14 +111,16 @@ Rules:
   The response metadata must say that fallback happened.
 - The message is sent to the target agent's current active space after
   placement reconciliation.
-- Future UI should replace the single button with a compact composer: sender
-  selector, message text, immediate send, and later schedule/cron controls.
+- The drawer should use a compact composer: visible sender, message text,
+  immediate send, and later schedule/cron controls.
 
 Open follow-up tasks:
 
 - Add a service-account management surface for creating/reusing per-space
   Gateway notification senders.
-- Add drawer composer UX with sender selector and explicit "from" label.
+- Add a full sender selector once service-account management exists. The v1
+  composer may display the resolved default sender and rely on the backend
+  response to report fallback.
 - Add scheduled test/message support once the immediate send contract is stable.
 
 ## "Last activity" column

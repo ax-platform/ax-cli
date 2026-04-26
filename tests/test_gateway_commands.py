@@ -1078,6 +1078,68 @@ def test_gateway_daemon_reconcile_blocks_hermes_without_repo(monkeypatch, tmp_pa
     assert "Hermes checkout not found" in str(agent["confidence_detail"])
 
 
+def test_gateway_daemon_rebinds_running_runtime_when_space_changes(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    started: list[str] = []
+    stopped: list[str] = []
+
+    class FakeRuntime:
+        def __init__(self, entry, **kwargs):
+            self.entry = dict(entry)
+            self.name = str(entry.get("name"))
+            self.started = False
+
+        def start(self):
+            self.started = True
+            started.append(str(self.entry.get("space_id")))
+
+        def stop(self):
+            stopped.append(str(self.entry.get("space_id")))
+            self.started = False
+
+        def snapshot(self):
+            return {
+                "effective_state": "running" if self.started else "stopped",
+                "runtime_instance_id": f"runtime-{self.entry.get('space_id')}",
+                "last_error": None,
+                "current_status": None,
+                "current_activity": None,
+                "current_tool": None,
+                "current_tool_call_id": None,
+                "backlog_depth": 0,
+            }
+
+    monkeypatch.setattr(gateway_core, "ManagedAgentRuntime", FakeRuntime)
+    entry = {
+        "name": "space-bot",
+        "agent_id": "agent-space-1",
+        "space_id": "space-1",
+        "base_url": "https://paxai.app",
+        "runtime_type": "echo",
+        "desired_state": "running",
+        "attestation_state": "verified",
+        "approval_state": "approved",
+        "identity_status": "verified",
+        "environment_status": "environment_allowed",
+        "space_status": "active_allowed",
+    }
+    daemon = gateway_core.GatewayDaemon(client_factory=lambda **kwargs: _SharedRuntimeClient({}))
+
+    daemon._reconcile_runtime(entry)
+    assert started == ["space-1"]
+    assert stopped == []
+
+    moved = {**entry, "space_id": "space-2"}
+    daemon._reconcile_runtime(moved)
+
+    assert stopped == ["space-1"]
+    assert started == ["space-1", "space-2"]
+    assert daemon._runtimes["space-bot"].snapshot()["runtime_instance_id"] == "runtime-space-2"
+    events = gateway_core.load_recent_gateway_activity()
+    assert any(row["event"] == "runtime_rebinding" and row.get("new_space_id") == "space-2" for row in events)
+
+
 def test_gateway_approvals_approve_updates_binding(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))

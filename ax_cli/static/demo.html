@@ -201,6 +201,13 @@
     .drawer-meta { display: flex; flex-wrap: wrap; gap: 6px; }
     .drawer-actions { display: flex; flex-wrap: wrap; gap: 10px; }
     .drawer-actions .btn-ghost, .drawer-actions .btn-primary { padding: 10px 16px; font-size: 14px; }
+    .message-composer { display: grid; gap: 10px; width: 100%; }
+    .message-composer textarea { width: 100%; min-height: 88px; resize: vertical; border-radius: 12px; border: 1px solid var(--line); background: rgba(255,255,255,0.035); color: var(--text); padding: 12px 14px; font: 13px/1.45 var(--font); outline: none; }
+    .message-composer textarea:focus { border-color: rgba(132,245,231,0.8); box-shadow: 0 0 0 3px rgba(94,234,212,0.12); }
+    .message-composer textarea::placeholder { color: var(--muted-2); }
+    .message-composer-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; }
+    .message-composer-meta strong { color: var(--text); font-weight: 600; }
+    .message-composer-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
     .drawer-foot { padding: 16px 24px 22px; border-top: 1px solid var(--line); }
     .drawer-select { width: 100%; padding: 10px 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line); color: var(--text); font-family: var(--sans); font-size: 14px; outline: none; }
     .drawer-select:focus { border-color: var(--accent); }
@@ -1359,6 +1366,17 @@
       return state.agents.find((a) => String(a.name || "") === name) || null;
     }
 
+    function defaultTestPrompt(agent) {
+      const template = String(agent?.template_id || agent?.runtime_type || "").toLowerCase();
+      if (template === "inbox" || template === "pass_through") {
+        return "Queue this test job, mark it received, and do not reply inline.";
+      }
+      if (template === "ollama" || String(agent?.runtime_type || "").toLowerCase() === "echo") {
+        return "Reply with exactly: Gateway test OK. Then mention which local model answered.";
+      }
+      return "Reply with exactly: Gateway test OK.";
+    }
+
     /* --- Activity events ----------------------------------------- */
 
     const ACTIVITY_HIDE = new Set([
@@ -1366,7 +1384,6 @@
       "runtime_status",   // we still consume these but only as the "thinking" cue, not as a row
     ]);
     const ACTIVITY_LIVE_EVENTS = new Set([
-      "gateway_test_sent",
       "message_received",
       "message_queued",
       "message_claimed",
@@ -1426,7 +1443,11 @@
     function eventDetail(activity) {
       const event = String(activity.event || "");
       if (event === "reply_sent") return String(activity.reply_preview || activity.preview || "").trim();
-      if (event === "gateway_test_sent") return String(activity.reply_preview || "").trim();
+      if (event === "gateway_test_sent") {
+        const preview = String(activity.reply_preview || "").trim();
+        const sender = String(activity.sender_agent_name || "").trim();
+        return sender ? `From @${sender}: ${preview}` : preview;
+      }
       if (event === "message_received") return String(activity.preview || activity.content_preview || "").trim();
       if (event === "runtime_error" || event === "runtime_timeout") return String(activity.error || activity.detail || "").trim();
       if (event === "tool_started") return String(activity.tool_action || activity.activity_message || "").trim();
@@ -1753,19 +1774,52 @@
           onclick: (event) => approveAgent(agent, event.currentTarget),
         }, ["Approve connection"]));
       }
-      actions.appendChild(makeEl("button", {
+      const defaultPrompt = defaultTestPrompt(agent);
+      const senderName = "switchboard-" + String(agent.space_id || agent.active_space_id || "default").replace(/[^a-z0-9]/gi, "").slice(0, 8).toLowerCase();
+      const composerTextarea = makeEl("textarea", {
+        placeholder: "Message to @" + agent.name,
+        disabled: needsApproval,
+      }, [defaultPrompt]);
+      const sendButton = makeEl("button", {
         class: needsApproval ? "btn btn-ghost" : "btn btn-primary",
         disabled: needsApproval,
-        onclick: async () => {
+        onclick: async (event) => {
+          const btn = event.currentTarget;
+          const content = String(composerTextarea.value || "").trim();
+          if (!content) {
+            showToast("Message is required", "err");
+            composerTextarea.focus();
+            return;
+          }
+          btn.disabled = true;
           try {
-            await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/test", {});
-            showToast("Test sent to @" + agent.name, "ok");
+            const result = await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/test", { content, author: "agent" });
+            const sender = result.sender_agent ? " from @" + result.sender_agent : "";
+            showToast("Message sent" + sender + " to @" + agent.name, "ok");
             loadAgentDetail(agent.name);
           } catch (err) {
-            showToast(err.message || "Test failed", "err");
+            showToast(err.message || "Send failed", "err");
+          } finally {
+            btn.disabled = needsApproval;
           }
         },
-      }, ["Send test message"]));
+      }, ["Send message"]);
+      const resetButton = makeEl("button", {
+        class: "btn btn-ghost",
+        disabled: needsApproval,
+        onclick: () => {
+          composerTextarea.value = defaultPrompt;
+          composerTextarea.focus();
+        },
+      }, ["Reset test"]);
+      actions.appendChild(makeEl("div", { class: "message-composer" }, [
+        makeEl("div", { class: "message-composer-meta" }, [
+          makeEl("span", {}, ["From ", makeEl("strong", {}, ["@" + senderName])]),
+          makeEl("span", {}, ["To ", makeEl("strong", {}, ["@" + agent.name])]),
+        ]),
+        composerTextarea,
+        makeEl("div", { class: "message-composer-actions" }, [sendButton, resetButton]),
+      ]));
       if (desiredRunning) {
         actions.appendChild(makeEl("button", {
           class: "btn btn-ghost",

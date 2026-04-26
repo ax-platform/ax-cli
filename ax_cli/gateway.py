@@ -4977,6 +4977,33 @@ class GatewayDaemon:
             and space_status not in {"active_not_allowed", "no_active_space"}
         )
         if allowed_to_run:
+            if runtime is not None:
+                restart_fields = (
+                    "space_id",
+                    "base_url",
+                    "agent_id",
+                    "token_file",
+                    "runtime_type",
+                    "exec_command",
+                    "workdir",
+                    "ollama_model",
+                )
+                changed_fields = [
+                    field
+                    for field in restart_fields
+                    if str(runtime.entry.get(field) or "") != str(entry.get(field) or "")
+                ]
+                if changed_fields:
+                    record_gateway_activity(
+                        "runtime_rebinding",
+                        entry=entry,
+                        changed_fields=changed_fields,
+                        previous_space_id=runtime.entry.get("space_id"),
+                        new_space_id=entry.get("space_id"),
+                    )
+                    runtime.stop()
+                    self._runtimes.pop(name, None)
+                    runtime = None
             if runtime is None:
                 runtime = ManagedAgentRuntime(entry, client_factory=self.client_factory, logger=self.logger)
                 self._runtimes[name] = runtime
