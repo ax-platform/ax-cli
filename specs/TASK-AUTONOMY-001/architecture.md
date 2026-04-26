@@ -158,11 +158,24 @@ CREATE INDEX idx_task_reminder_runs_pending ON task_reminder_runs (delivery_stat
 
 **Audit trail:** every mutation in `tasks` autonomy fields and every entry in `task_reminder_runs` is queryable and joined to `task_autonomy_audit` per `spec.md` §Auth.
 
-## Dev-first principle (ChatGPT 17:39 UTC)
+## Dev-first principle (ChatGPT 17:39 + 17:42 UTC)
 
-> "Jacob wants this shipped and validated in dev first. The architecture must explain how reminder loops run in local Docker and dev.paxai.app, then how the same behavior translates to production. Production may use different infrastructure, and EventBridge may make sense, but the dev/staging path must be concrete and fast."
+> "Jacob wants this shipped and validated in dev first. … Production may use different infrastructure, and EventBridge may make sense, but the dev/staging path must be concrete and fast." (17:39)
+>
+> "Do not let managed services become AWS-only product behavior too early. … Postgres should be durable source of truth … Redis can be acceleration/coordination, not durable reminder truth. Managed AWS services may wrap/operate the worker later … They should not own business logic." (17:42)
 
-**The contract from `spec.md` does NOT change between environments.** Events, idempotency, state machine, audit trail are platform-wide. What CAN change is **where the scheduler runs**.
+### Guardrail alignment (17:42 → this doc)
+
+| Guardrail | Where it lives in this doc |
+|---|---|
+| Platform code first, Postgres-backed, containerized worker | §"Scheduler ownership" — in-process FastAPI thread inside existing API container |
+| Local Docker + dev.paxai.app exercise the same lifecycle before any prod infra rollout | §"Local Docker (developer laptop)" + §"dev.paxai.app" + §"Phase 1 — dev/staging only" — identical code path, same tick semantics, 24h soak before prod consideration |
+| Postgres = durable source of truth (due_at, policy, recurrence, SLA, next_reminder_at, idempotency, stop conditions) | §"Persistence layer" — `tasks` table extension + `task_reminder_runs` audit + composite-PK idempotency. **All 14 autonomy fields live in Postgres**, including `next_reminder_at`, `auto_cancel_at`, `stale_threshold_seconds`, `paused_at` |
+| Redis for acceleration/coordination only | §"Single-process race" — Redis lock only for distributed-tick dedup. Existing `redis_sse_broker` is the activity-stream transport, not reminder truth |
+| Managed AWS services (EventBridge / SQS / CloudWatch) wrap the worker later, don't own business logic | §"Production (`paxai.app`)" — invariants list explicitly says "the trigger source changes; the contract, dispatch path, persistence, and event vocabulary do not" |
+| No prod/main RC push until dev validation | §"RC gates for `main` / `paxai.app`" — 10 gates, gate #1 is "all 4 spec smokes pass continuously for 24h on dev.paxai.app" |
+
+**The contract from `spec.md` does NOT change between environments.** Events, idempotency, state machine, audit trail are platform-wide. What CAN change is **where the scheduler runs** — and even that change can't move business logic out of platform code.
 
 ### Local Docker (developer laptop)
 
