@@ -214,6 +214,70 @@ def test_gateway_state_dir_allows_explicit_override(monkeypatch, tmp_path):
     assert gateway_core.registry_path() == custom_dir / "registry.json"
 
 
+def test_gateway_environment_ignores_user_login_environment(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("AX_USER_ENV", "dev")
+    monkeypatch.setenv("AX_ENV", "prod")
+    monkeypatch.delenv("AX_GATEWAY_ENV", raising=False)
+    monkeypatch.delenv("AX_GATEWAY_DIR", raising=False)
+
+    assert gateway_core.gateway_environment() is None
+    assert gateway_core.gateway_dir() == config_dir / "gateway"
+
+
+def test_gateway_process_scan_ignores_other_gateway_environment(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("AX_GATEWAY_ENV", "dev")
+    monkeypatch.setattr(gateway_core, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        gateway_core.subprocess,
+        "check_output",
+        lambda *args, **kwargs: (
+            "1234 /tmp/bin/ax gateway run --poll-interval 1\n5678 /tmp/bin/ax gateway run --poll-interval 1\n"
+        ),
+    )
+    monkeypatch.setattr(
+        gateway_core,
+        "_pid_environ",
+        lambda pid: {"AX_GATEWAY_ENV": "prod"} if pid == 1234 else {"AX_GATEWAY_ENV": "dev"},
+    )
+
+    assert gateway_core._scan_gateway_process_pids() == [5678]
+
+
+def test_gateway_process_scan_matches_explicit_gateway_dir(monkeypatch, tmp_path):
+    current_dir = tmp_path / "dev-gateway"
+    other_dir = tmp_path / "prod-gateway"
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(current_dir))
+    monkeypatch.setattr(gateway_core, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        gateway_core.subprocess,
+        "check_output",
+        lambda *args, **kwargs: (
+            "1234 /tmp/bin/ax gateway run --poll-interval 1\n5678 /tmp/bin/ax gateway run --poll-interval 1\n"
+        ),
+    )
+    monkeypatch.setattr(
+        gateway_core,
+        "_pid_environ",
+        lambda pid: {"AX_GATEWAY_DIR": str(other_dir)} if pid == 1234 else {"AX_GATEWAY_DIR": str(current_dir)},
+    )
+
+    assert gateway_core._scan_gateway_process_pids() == [5678]
+
+
+def test_gateway_default_ui_port_uses_only_explicit_override(monkeypatch):
+    monkeypatch.delenv("AX_GATEWAY_UI_PORT", raising=False)
+    monkeypatch.setenv("AX_GATEWAY_ENV", "prod")
+    assert gateway_core.default_gateway_ui_port() == 8765
+    monkeypatch.setenv("AX_GATEWAY_ENV", "dev")
+    assert gateway_core.default_gateway_ui_port() == 8765
+    monkeypatch.setenv("AX_GATEWAY_UI_PORT", "8877")
+    assert gateway_core.default_gateway_ui_port() == 8877
+
+
 def test_gateway_run_refuses_second_live_daemon(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
@@ -1953,6 +2017,29 @@ def test_annotate_runtime_health_blocks_environment_mismatch(monkeypatch, tmp_pa
         ),
         (
             {
+                "runtime_type": "hermes_sentinel",
+                "template_id": "hermes",
+                "effective_state": "running",
+                "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                "last_doctor_result": {
+                    "status": "failed",
+                    "summary": "Gateway does not have a launch command for this runtime.",
+                    "checks": [
+                        {"name": "runtime_launch", "status": "failed"},
+                        {"name": "live_path", "status": "passed"},
+                    ],
+                },
+            },
+            {
+                "mode": "LIVE",
+                "presence": "IDLE",
+                "reply": "REPLY",
+                "confidence": "HIGH",
+                "reachability": "live_now",
+            },
+        ),
+        (
+            {
                 "template_id": "ollama",
                 "placement": "hosted",
                 "activation": "on_demand",
@@ -3368,6 +3455,56 @@ def test_gateway_agents_doctor_persists_structured_result(monkeypatch, tmp_path)
     stored = gateway_core.load_gateway_registry()["agents"][0]
     assert stored["last_doctor_result"]["status"] == "warning"
     assert stored["last_successful_doctor_at"]
+
+
+def test_gateway_agents_doctor_keeps_connected_live_listener_high_confidence(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "codex",
+        }
+    )
+    hermes_repo = tmp_path / "hermes-agent"
+    hermes_repo.mkdir()
+    token_file = tmp_path / "sentinel.token"
+    token_file.write_text("axp_a_agent.secret")
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "dev_sentinel",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes_sentinel",
+            "template_id": "hermes",
+            "desired_state": "running",
+            "effective_state": "running",
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
+            "hermes_repo_path": str(hermes_repo),
+            "token_file": str(token_file),
+            "transport": "gateway",
+            "credential_source": "gateway",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    result = runner.invoke(app, ["gateway", "agents", "doctor", "dev_sentinel", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "warning"
+    runtime_launch = next(item for item in payload["checks"] if item["name"] == "runtime_launch")
+    assert runtime_launch["status"] == "warning"
+    assert "automatic restart" in runtime_launch["detail"]
+    assert payload["agent"]["connected"] is True
+    assert payload["agent"]["liveness"] == "connected"
+    assert payload["agent"]["reachability"] == "live_now"
+    assert payload["agent"]["confidence"] == "HIGH"
+    assert payload["agent"]["confidence_reason"] == "live_now"
 
 
 def test_gateway_status_payload_surfaces_alerts(monkeypatch, tmp_path):

@@ -934,6 +934,32 @@ def _doctor_has_failed(snapshot: dict[str, Any]) -> bool:
     return False
 
 
+def _doctor_failed_checks(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    result = snapshot.get("last_doctor_result")
+    if not isinstance(result, dict):
+        return []
+    checks = result.get("checks")
+    if not isinstance(checks, list):
+        return []
+    return [
+        item for item in checks if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "failed"
+    ]
+
+
+def _doctor_has_blocking_failure(snapshot: dict[str, Any], *, mode: str, liveness: str) -> bool:
+    failed_checks = _doctor_failed_checks(snapshot)
+    if not failed_checks:
+        result = snapshot.get("last_doctor_result")
+        return isinstance(result, dict) and str(result.get("status") or "").strip().lower() in {"failed", "error"}
+    if mode == "LIVE" and liveness == "connected":
+        # A connected live listener can accept work now. Missing launch metadata
+        # is an automatic-restart gap, not evidence that the live path is down.
+        nonblocking = {"runtime_launch"}
+        if all(str(item.get("name") or "").strip() in nonblocking for item in failed_checks):
+            return False
+    return True
+
+
 def _derive_mode(profile: dict[str, str]) -> str:
     if profile["placement"] == "mailbox":
         return "INBOX"
@@ -1093,7 +1119,7 @@ def _derive_confidence(
         return ("BLOCKED", governance_reason or "approval_denied", governance_detail)
     if attestation_state in {"blocked", "unknown", "drifted"} or approval_state == "pending":
         return ("BLOCKED", governance_reason or "approval_required", governance_detail)
-    if _doctor_has_failed(snapshot):
+    if _doctor_has_blocking_failure(snapshot, mode=mode, liveness=liveness):
         detail = _doctor_summary(snapshot) or "Gateway Doctor reported a failed send path."
         return ("LOW", "recent_test_failed", detail)
     completion_rate = snapshot.get("completion_rate")
@@ -2469,11 +2495,7 @@ def gateway_dir() -> Path:
 
 
 def gateway_environment() -> str | None:
-    raw = (
-        str(os.environ.get("AX_GATEWAY_ENV") or "").strip()
-        or str(os.environ.get("AX_USER_ENV") or "").strip()
-        or str(os.environ.get("AX_ENV") or "").strip()
-    )
+    raw = str(os.environ.get("AX_GATEWAY_ENV") or "").strip()
     if not raw:
         return None
     normalized = re.sub(r"[^a-z0-9_.-]+", "-", raw.lower()).strip(".-")
@@ -2707,6 +2729,60 @@ def daemon_status() -> dict[str, Any]:
     }
 
 
+def _pid_environ(pid: int) -> dict[str, str]:
+    environ_path = Path("/proc") / str(pid) / "environ"
+    try:
+        raw = environ_path.read_bytes()
+    except OSError:
+        return {}
+    values: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        try:
+            values[key.decode("utf-8", errors="ignore")] = value.decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+    return values
+
+
+def _normalize_gateway_env_name(raw: object) -> str | None:
+    normalized = re.sub(r"[^a-z0-9_.-]+", "-", str(raw or "").strip().lower()).strip(".-")
+    if not normalized or normalized in {"default", "user"}:
+        return None
+    return normalized
+
+
+def _gateway_scope_from_environ(environ: dict[str, str]) -> tuple[str | None, Path | None]:
+    explicit_dir = str(environ.get("AX_GATEWAY_DIR") or "").strip()
+    env_name = _normalize_gateway_env_name(str(environ.get("AX_GATEWAY_ENV") or "").strip())
+    if explicit_dir:
+        return env_name, Path(explicit_dir).expanduser().resolve()
+    return env_name, None
+
+
+def _process_matches_gateway_scope(pid: int) -> bool:
+    """Return True when a scanned Gateway process belongs to this env/dir.
+
+    Gateway scoping is explicit. Login env such as AX_ENV/AX_USER_ENV must not
+    split the local daemon state; use AX_GATEWAY_ENV or AX_GATEWAY_DIR when an
+    operator intentionally needs a separate Gateway state directory.
+    """
+    environ = _pid_environ(pid)
+    process_env, process_dir = _gateway_scope_from_environ(environ)
+    current_env = gateway_environment()
+    current_dir = gateway_dir().resolve()
+
+    if process_dir is not None:
+        return process_dir == current_dir
+
+    if process_env is not None:
+        return process_env == current_env
+
+    return current_env is None and not str(os.environ.get("AX_GATEWAY_DIR") or "").strip()
+
+
 def _scan_process_pids(pattern: re.Pattern[str]) -> list[int]:
     current_pid = os.getpid()
     parent_pid = os.getppid()
@@ -2732,7 +2808,7 @@ def _scan_process_pids(pattern: re.Pattern[str]) -> list[int]:
         if pid in {current_pid, parent_pid} or not _pid_alive(pid):
             continue
         command = command.strip()
-        if command and pattern.search(command):
+        if command and pattern.search(command) and _process_matches_gateway_scope(pid):
             pids.append(pid)
     return sorted(set(pids))
 
@@ -2742,11 +2818,21 @@ def _scan_gateway_process_pids() -> list[int]:
     return _scan_process_pids(_GATEWAY_PROCESS_RE)
 
 
+def default_gateway_ui_port() -> int:
+    explicit = str(os.environ.get("AX_GATEWAY_UI_PORT") or "").strip()
+    if explicit:
+        try:
+            return int(explicit)
+        except ValueError:
+            return 8765
+    return 8765
+
+
 def _default_ui_state() -> dict[str, Any]:
     return {
         "pid": None,
         "host": "127.0.0.1",
-        "port": 8765,
+        "port": default_gateway_ui_port(),
         "last_started_at": None,
     }
 
@@ -2755,7 +2841,7 @@ def load_gateway_ui_state() -> dict[str, Any]:
     state = _read_json(ui_state_path(), default=_default_ui_state())
     state.setdefault("pid", None)
     state.setdefault("host", "127.0.0.1")
-    state.setdefault("port", 8765)
+    state.setdefault("port", default_gateway_ui_port())
     state.setdefault("last_started_at", None)
     return state
 
@@ -2778,7 +2864,7 @@ def ui_status() -> dict[str, Any]:
     try:
         port = int(state.get("port") or 8765)
     except (TypeError, ValueError):
-        port = 8765
+        port = default_gateway_ui_port()
     running = _pid_alive(pid_value)
     if not running:
         scanned = _scan_gateway_ui_process_pids()

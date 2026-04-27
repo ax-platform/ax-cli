@@ -53,6 +53,7 @@ from ..gateway import (
     clear_gateway_ui_state,
     daemon_log_path,
     daemon_status,
+    default_gateway_ui_port,
     deny_gateway_approval,
     ensure_gateway_identity_binding,
     ensure_local_asset_binding,
@@ -1840,6 +1841,12 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
             elif runtime_type != "echo":
                 if exec_command:
                     add_check("runtime_launch", "passed", "Gateway has a launch command for this runtime.")
+                elif bool(snapshot.get("connected")):
+                    add_check(
+                        "runtime_launch",
+                        "warning",
+                        "Live listener is connected; no launch command is available for automatic restart.",
+                    )
                 else:
                     add_check("runtime_launch", "failed", "Gateway does not have a launch command for this runtime.")
         elif intake_model == "launch_on_send":
@@ -4771,16 +4778,19 @@ def _terminate_pids(pids: list[int], *, timeout: float = 8.0) -> tuple[list[int]
 @app.command("ui")
 def ui(
     host: str = typer.Option("127.0.0.1", "--host", help="Host interface to bind the local Gateway UI"),
-    port: int = typer.Option(8765, "--port", help="Port for the local Gateway UI"),
+    port: int | None = typer.Option(
+        None, "--port", help="Port for the local Gateway UI (defaults to AX_GATEWAY_UI_PORT or 8765)"
+    ),
     activity_limit: int = typer.Option(24, "--activity-limit", help="Number of recent events to expose in the UI"),
     refresh: float = typer.Option(2.0, "--refresh", help="Browser auto-refresh interval in seconds"),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the local UI in a browser"),
 ):
     """Serve a local Gateway web UI."""
+    resolved_port = port if port is not None else default_gateway_ui_port()
     refresh_ms = max(250, int(refresh * 1000))
     handler = _build_gateway_ui_handler(activity_limit=activity_limit, refresh_ms=refresh_ms)
     try:
-        server = _GatewayUiServer((host, port), handler)
+        server = _GatewayUiServer((host, resolved_port), handler)
     except OSError as exc:
         err_console.print(f"[red]Failed to start Gateway UI:[/red] {exc}")
         raise typer.Exit(1)
@@ -4812,12 +4822,15 @@ def ui(
 def start(
     poll_interval: float = typer.Option(1.0, "--poll-interval", help="Registry reconcile interval in seconds"),
     host: str = typer.Option("127.0.0.1", "--host", help="Host interface to bind the local Gateway UI"),
-    port: int = typer.Option(8765, "--port", help="Port for the local Gateway UI"),
+    port: int | None = typer.Option(
+        None, "--port", help="Port for the local Gateway UI (defaults to AX_GATEWAY_UI_PORT or 8765)"
+    ),
     activity_limit: int = typer.Option(24, "--activity-limit", help="Number of recent events to expose in the UI"),
     refresh: float = typer.Option(2.0, "--refresh", help="Browser auto-refresh interval in seconds"),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the local UI in a browser"),
 ):
     """Start the Gateway daemon and local UI in the background."""
+    resolved_port = port if port is not None else default_gateway_ui_port()
     session = load_gateway_session()
     daemon_pid = active_gateway_pid()
     ui_pid = active_gateway_ui_pid()
@@ -4851,7 +4864,7 @@ def start(
                 "--host",
                 host,
                 "--port",
-                str(port),
+                str(resolved_port),
                 "--activity-limit",
                 str(activity_limit),
                 "--refresh",
@@ -4860,7 +4873,7 @@ def start(
             ),
             log_path=ui_log_path(),
         )
-        if _wait_for_ui_ready(ui_process, host=host, port=port):
+        if _wait_for_ui_ready(ui_process, host=host, port=resolved_port):
             ui_pid = active_gateway_ui_pid() or ui_process.pid
             ui_started = True
         else:
@@ -4874,7 +4887,7 @@ def start(
     ui_meta = ui_status()
     if open_browser and ui_meta.get("running"):
         try:
-            webbrowser.open_new_tab(str(ui_meta.get("url") or f"http://{host}:{port}"))
+            webbrowser.open_new_tab(str(ui_meta.get("url") or f"http://{host}:{resolved_port}"))
         except Exception:
             err_console.print("[yellow]Could not open a browser automatically.[/yellow]")
 
@@ -4885,7 +4898,7 @@ def start(
     err_console.print(f"  ui        = {'started' if ui_started else 'running' if ui_pid else 'not started'}")
     if ui_pid:
         err_console.print(f"  ui_pid    = {ui_pid}")
-    err_console.print(f"  url       = {ui_meta.get('url') or f'http://{host}:{port}'}")
+    err_console.print(f"  url       = {ui_meta.get('url') or f'http://{host}:{resolved_port}'}")
     err_console.print(f"  logs      = {daemon_log_path()}")
     err_console.print(f"  ui_logs   = {ui_log_path()}")
     if daemon_note:
