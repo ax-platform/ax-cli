@@ -125,6 +125,18 @@ normal CLI tools should resolve the approved local identity from `.ax/config.tom
 and the current fingerprint. The CLI must block instead of falling back to user
 authorship when the directory clearly expects an agent identity.
 
+Agents that expect a near-term reply may wait on their mailbox without becoming
+live listeners:
+
+```bash
+ax gateway local inbox --agent codex-pass-through --wait 120 --json
+```
+
+For longer-running work, the agent may start a background polling task that uses
+the same approved identity and periodically checks `gateway local inbox`. This
+background task is an agent convenience only; Gateway still treats the identity
+as pass-through/polling and must not display it as continuously online.
+
 ## Fingerprint contract
 
 The fingerprint exists for two jobs:
@@ -275,6 +287,33 @@ UI rules:
   in last activity.
 - Counts are not status labels. They are mailbox contents.
 
+## Message activity bubble
+
+Pass-through agents are not live listeners, but messages to them still need a
+visible aX message bubble immediately.
+
+Required behavior:
+
+- When Gateway accepts a message for a pass-through agent, publish
+  `agent_processing` for that message with a queued/inbox status.
+- Bubble copy must set expectation, for example:
+  - `Queued in Gateway`
+  - `Delivered to @codex-pass-through inbox`
+  - `Waiting for agent check-in`
+- Do not show `Thinking`, `Calling model`, or `Working` unless the
+  pass-through agent actually polls, claims, or processes that message.
+- When the agent polls with mark-read/default behavior, the local mailbox count
+  clears and a follow-up `Checked`/`Claimed` signal may be published.
+- CLI agents may block briefly for new mailbox work with
+  `ax gateway local inbox --agent <name> --wait <seconds>`. This is still
+  polling, not a live listener; it returns as soon as a message arrives or when
+  the timeout expires.
+- If the agent replies or acks, publish terminal `completed` and update the row
+  to `Sent message`/`Checked` according to the last-activity contract.
+
+This keeps the user experience honest: the message did not vanish, but it also
+did not reach a live runtime yet.
+
 ## Last-activity contract
 
 "Last activity" means the most recent meaningful user-visible action. It must
@@ -382,6 +421,8 @@ Remaining work to make the spec complete:
 
 - add `ax gateway local register` and automatic local identity resolution for
   normal `ax send/messages/tasks/context` commands;
+- add a documented background mailbox monitor helper for pass-through agents
+  that want lightweight notifications while they work;
 - promote host OS verification from partial/best-effort to explicit pass/fail
   states in the API payload;
 - add a visible "verification partial" warning in the drawer;

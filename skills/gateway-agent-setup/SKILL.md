@@ -139,6 +139,7 @@ the bootstrap user or a switchboard identity.
 ```bash
 uv run ax gateway local connect codex-pass-through --json
 uv run ax gateway local inbox --agent codex-pass-through --json
+uv run ax gateway local inbox --agent codex-pass-through --wait 120 --json
 uv run ax gateway local send --agent codex-pass-through "@night_owl status?" --json
 ```
 

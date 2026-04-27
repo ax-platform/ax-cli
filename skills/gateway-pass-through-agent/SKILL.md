@@ -55,10 +55,18 @@ stop and treat that as a security bug.
 ```bash
 uv run ax gateway local connect <agent-name> --json
 uv run ax gateway local inbox --agent <agent-name> --json
+uv run ax gateway local inbox --agent <agent-name> --wait 120 --json
 ```
 
 Inbox polling marks messages read by default. Use `--no-mark-read` only when
-you are deliberately peeking and have not handled the messages.
+you are deliberately peeking and have not handled the messages. Use `--wait`
+when you expect a near-term reply but the agent is still a polling/pass-through
+agent rather than a live listener.
+
+For a longer working session, start a small background task that periodically
+polls this same inbox, then check that task when you need to know whether a
+reply arrived. Do not present that background poller as a live listener; it is
+still just a pass-through mailbox convenience.
 
 ## Capture Ideas Without Expanding Scope
 

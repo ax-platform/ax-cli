@@ -100,6 +100,7 @@ _CONTROLLED_ASSET_CLASSES = {
     "scheduled_job",
     "alert_listener",
     "service_proxy",
+    "service_account",
 }
 _CONTROLLED_INTAKE_MODELS = {
     "live_listener",
@@ -110,6 +111,7 @@ _CONTROLLED_INTAKE_MODELS = {
     "scheduled_run",
     "event_triggered",
     "manual_only",
+    "notification_source",
 }
 _CONTROLLED_TRIGGER_SOURCES = {
     "direct_message",
@@ -119,6 +121,9 @@ _CONTROLLED_TRIGGER_SOURCES = {
     "scheduled_invocation",
     "external_alert",
     "manual_trigger",
+    "manual_message",
+    "automation",
+    "scheduled_job",
     "tool_call",
 }
 _CONTROLLED_RETURN_PATHS = {
@@ -128,10 +133,11 @@ _CONTROLLED_RETURN_PATHS = {
     "summary_post",
     "task_update",
     "event_log",
+    "outbound_message",
     "silent",
 }
 _CONTROLLED_TELEMETRY_SHAPES = {"rich", "basic", "heartbeat_only", "opaque"}
-_CONTROLLED_WORKER_MODELS = {"agent_check_in", "queue_drain"}
+_CONTROLLED_WORKER_MODELS = {"agent_check_in", "queue_drain", "no_runtime"}
 _CONTROLLED_ATTESTATION_STATES = {"verified", "drifted", "unknown", "blocked"}
 _CONTROLLED_APPROVAL_STATES = {"not_required", "pending", "approved", "rejected"}
 _CONTROLLED_IDENTITY_STATUSES = {
@@ -192,6 +198,7 @@ _WORKING_STATUSES = {
     "working",
 }
 _BLOCKED_STATUSES = {"rate_limited"}
+_NO_REPLY_STATUSES = {"no_reply", "declined", "skipped", "not_responding"}
 
 
 def _normalized_controlled(value: object, allowed: set[str], *, fallback: str) -> str:
@@ -314,6 +321,12 @@ def _template_operator_defaults(template_id: str | None, runtime_type: object) -
             "placement": "mailbox",
             "activation": "attach_only",
             "reply_mode": "background",
+            "telemetry_level": "basic",
+        },
+        "service_account": {
+            "placement": "mailbox",
+            "activation": "queue_worker",
+            "reply_mode": "silent",
             "telemetry_level": "basic",
         },
         "inbox": {
@@ -454,6 +467,21 @@ def _template_asset_defaults(template_id: str | None, runtime_type: object) -> d
             "capabilities": ["poll_mailbox", "reply"],
             "constraints": ["requires-approval"],
         },
+        "service_account": {
+            "asset_class": "service_account",
+            "intake_model": "notification_source",
+            "trigger_sources": ["manual_message", "automation", "scheduled_job"],
+            "return_paths": ["outbound_message"],
+            "telemetry_shape": "basic",
+            "worker_model": "no_runtime",
+            "addressable": True,
+            "messageable": True,
+            "schedulable": True,
+            "externally_triggered": True,
+            "tags": ["service-account", "notifications", "automation-source"],
+            "capabilities": ["send_message", "label_source"],
+            "constraints": ["no-runtime-reply"],
+        },
         "inbox": {
             "asset_class": "background_worker",
             "intake_model": "queue_accept",
@@ -527,6 +555,8 @@ def _asset_type_label(*, asset_class: str, intake_model: str, worker_model: str 
         return "Scheduled Job"
     if asset_class == "alert_listener":
         return "Alert Listener"
+    if asset_class == "service_account":
+        return "Service Account"
     if asset_class == "service_proxy":
         return "Service / Tool Proxy"
     return "Connected Asset"
@@ -541,6 +571,7 @@ def _output_label(return_paths: list[str]) -> str:
         "summary_post": "Summary",
         "task_update": "Task",
         "event_log": "Event Log",
+        "outbound_message": "Message",
         "silent": "Silent",
     }.get(primary, "Reply")
 
@@ -3630,6 +3661,7 @@ class ManagedAgentRuntime:
         self._reply_anchor_ids: set[str] = set()
         self._seen_ids: set[str] = set()
         self._completed_seen_ids: set[str] = set()
+        self._no_reply_seen_ids: set[str] = set()
         self._sentinel_sessions: dict[str, str] = {}
         self._state_lock = threading.Lock()
         self._stream_client = None
@@ -3716,6 +3748,21 @@ class ManagedAgentRuntime:
             seen = message_id in self._completed_seen_ids
             if seen:
                 self._completed_seen_ids.discard(message_id)
+            return seen
+
+    def _mark_no_reply_seen(self, message_id: str) -> None:
+        if not message_id:
+            return
+        with self._state_lock:
+            self._no_reply_seen_ids.add(message_id)
+
+    def _consume_no_reply_seen(self, message_id: str) -> bool:
+        if not message_id:
+            return False
+        with self._state_lock:
+            seen = message_id in self._no_reply_seen_ids
+            if seen:
+                self._no_reply_seen_ids.discard(message_id)
             return seen
 
     def _handle_placement_event(self, data: dict[str, Any]) -> None:
@@ -4023,11 +4070,19 @@ class ManagedAgentRuntime:
                 if not message_id:
                     continue
                 status = str(event.get("status") or "processing").strip()
+                normalized_status = status.lower()
                 activity = str(event.get("activity") or event.get("message") or "").strip() or None
                 tool_name = str(event.get("tool_name") or event.get("tool") or "").strip() or None
                 # Mirror the runtime worker's update + publish path so the row
                 # status pill and the aX UI bubble both reflect what the
                 # sentinel is currently doing.
+                if normalized_status in _NO_REPLY_STATUSES:
+                    self._record_no_reply_decision(
+                        message_id,
+                        reason=str(event.get("reason") or normalized_status),
+                        activity=activity,
+                    )
+                    continue
                 updates: dict[str, Any] = {"current_status": status, "last_seen_at": _now_iso()}
                 if activity is not None:
                     updates["current_activity"] = activity[:240]
@@ -4197,6 +4252,71 @@ class ManagedAgentRuntime:
         except Exception as exc:  # noqa: BLE001
             self._log(f"processing-status post failed: msg={message_id} status={status} err={exc}")
 
+    def _record_no_reply_decision(
+        self,
+        message_id: str,
+        *,
+        reason: str | None = None,
+        activity: str | None = None,
+    ) -> None:
+        """Record an explicit terminal no-reply decision without posting a chat reply."""
+        self._mark_no_reply_seen(message_id)
+        reason_code = (reason or "no_reply").strip() or "no_reply"
+        message = (activity or "Chose not to respond").strip() or "Chose not to respond"
+        self._update_state(
+            current_status=None,
+            current_activity=None,
+            current_tool=None,
+            current_tool_call_id=None,
+            last_error=None,
+            last_work_completed_at=_now_iso(),
+        )
+        self._publish_processing_status(
+            message_id,
+            "no_reply",
+            activity=message,
+            reason=reason_code,
+            detail={"terminal": True, "reply_created": False},
+        )
+        record_gateway_activity(
+            "agent_skipped",
+            entry=self.entry,
+            message_id=message_id,
+            status="no_reply",
+            activity_message=message,
+            reason=reason_code,
+        )
+        if not self._send_client:
+            return
+        metadata = self._gateway_message_metadata(message_id)
+        gateway_meta = metadata.setdefault("gateway", {})
+        gateway_meta.update(
+            {
+                "signal_kind": "agent_skipped",
+                "reason": reason_code,
+                "reply_created": False,
+            }
+        )
+        metadata.update(
+            {
+                "signal_only": True,
+                "reason": reason_code,
+                "reason_code": reason_code,
+                "signal_kind": "agent_skipped",
+            }
+        )
+        try:
+            self._send_client.send_message(
+                self.space_id,
+                message,
+                agent_id=self.agent_id,
+                parent_id=message_id,
+                metadata=metadata,
+                message_type="agent_pause",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"agent-pause audit row failed: msg={message_id} reason={reason_code} err={exc}")
+
     @staticmethod
     def _processing_status_metadata(event: dict[str, Any]) -> dict[str, Any]:
         progress = event.get("progress") if isinstance(event.get("progress"), dict) else None
@@ -4285,11 +4405,19 @@ class ManagedAgentRuntime:
             return
         if kind == "status":
             status = str(event.get("status") or "processing").strip()
+            normalized_status = status.lower()
             if status == "completed":
                 self._mark_completed_seen(message_id)
             activity = str(event.get("message") or event.get("activity") or "").strip() or None
             tool_name = str(event.get("tool") or event.get("tool_name") or "").strip() or None
             metadata = self._processing_status_metadata(event)
+            if normalized_status in _NO_REPLY_STATUSES:
+                self._record_no_reply_decision(
+                    message_id,
+                    reason=metadata["reason"] or normalized_status,
+                    activity=activity,
+                )
+                return
             updates: dict[str, Any] = {}
             updates["current_status"] = status
             if activity is not None:
@@ -4723,7 +4851,8 @@ class ManagedAgentRuntime:
                     )
             try:
                 response_text = self._handle_prompt(prompt, message_id=message_id, data=data)
-                if response_text and self._send_client:
+                runtime_declined = self._consume_no_reply_seen(message_id)
+                if response_text and self._send_client and not runtime_declined:
                     result = self._send_client.send_message(
                         self.space_id,
                         response_text,
@@ -4749,7 +4878,7 @@ class ManagedAgentRuntime:
                 bridge_already_closed = (
                     runtime_type in {"exec", "command"} or _is_sentinel_cli_runtime(runtime_type)
                 ) and self._consume_completed_seen(message_id)
-                if message_id and not bridge_already_closed:
+                if message_id and not bridge_already_closed and not runtime_declined:
                     self._publish_processing_status(message_id, "completed")
                 self._bump("processed_count")
                 self._update_state(

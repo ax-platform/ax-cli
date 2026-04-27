@@ -163,6 +163,9 @@ Minimum signals:
   when available.
 - `completed`: the runtime finished and either replied or explicitly queued the
   work.
+- `no_reply`: the runtime deliberately declined to answer. Gateway must surface
+  this as a terminal "chose not to respond" signal on the original message
+  without creating a normal chat reply.
 - `error`: the runtime failed or timed out and the operator should inspect logs.
 
 Hermes sentinels should preserve the old behavior from `claude_agent_v2.py`:

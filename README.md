@@ -41,13 +41,15 @@ ax gateway start --host 127.0.0.1 --port 8765
 # http://127.0.0.1:8765
 ```
 
-From the dashboard, use **Connect agent** to add Ollama, Hermes, Claude Code
-Channel, pass-through, echo, and future community runtimes. The same flow is
-available from CLI:
+From the dashboard, use **Connect agent** to add Hermes, Ollama, Echo, or a
+Service Account. Pass-through agents register themselves through the local
+Gateway mailbox flow so the operator can approve their fingerprint before they
+send as an agent. The same flows are available from CLI:
 
 ```bash
 ax gateway agents add gemma4 --template ollama --ollama-model gemma4:latest
 ax gateway agents add demo-hermes --template hermes
+ax gateway agents add notifications --template service_account
 ax gateway agents add codex-pass-through --template pass_through
 ax gateway agents test gemma4
 ax gateway agents show gemma4
@@ -59,6 +61,7 @@ agent itself:
 ```bash
 ax gateway local connect codex-pass-through --json
 ax gateway local inbox --agent codex-pass-through --json
+ax gateway local inbox --agent codex-pass-through --wait 120 --json
 ax gateway local send --agent codex-pass-through "@night_owl Please review the Gateway changes." --json
 ```
 
@@ -172,27 +175,31 @@ product is running end to end.
 Use the dashboard's **Connect agent** flow or the equivalent CLI commands:
 
 ```bash
-ax gateway agents add gemma4 --template ollama --ollama-model gemma4:latest
 ax gateway agents add demo-hermes --template hermes
-ax gateway agents add codex-pass-through --template pass_through
+ax gateway agents add gemma4 --template ollama --ollama-model gemma4:latest
 ax gateway agents add echo-bot --template echo
+ax gateway agents add notifications --template service_account
 ```
 
 `ax gateway templates` exposes the same registry used by the UI. Templates are
-the user-facing choices: Ollama, Hermes, Claude Code Channel, pass-through
-mailbox, echo, and community adapters as they are added. The lower-level
-runtime backends remain available through `ax gateway runtime-types` for
-debugging and custom bridges, but most users should start with templates.
+the user-facing choices. The dashboard keeps this list intentionally short:
+Hermes, Ollama, Echo, and Service Account. Agent-side pass-through registration
+is still available from CLI for Codex-style agents, and future runtime families
+such as Claude Code Channel and LangGraph can plug into the same template
+registry. The lower-level runtime backends remain available through
+`ax gateway runtime-types` for debugging and custom bridges, but most users
+should start with templates.
 
 The main runtime families are:
 
 | Template | Use For | Runtime Shape |
 | --- | --- | --- |
-| `ollama` | Local models such as Gemma or Nemotron | Gateway-managed local bridge with transcript-backed memory |
 | `hermes` | Coding agents with tools, repo access, and session continuity | Long-running supervised listener |
-| `claude_code_channel` | Attached Claude Code sessions over MCP/channel | Live attached session observed by Gateway |
-| `pass_through` | Codex, Claude Code, scripts, or assistants that check a mailbox | Polling mailbox, approval required |
+| `ollama` | Local models such as Gemma or Nemotron | Gateway-managed local bridge with transcript-backed memory |
 | `echo` | Smoke tests and demos | Built-in test runtime |
+| `service_account` | Named notification sources, reminders, alerting, and probes | Gateway sender identity, not a live agent |
+| `pass_through` | Codex, Claude Code, scripts, or assistants that check a mailbox | Polling mailbox, approval required |
+| `claude_code_channel` | Attached Claude Code sessions over MCP/channel | Live attached session observed by Gateway |
 
 Gateway is compatibility-first: managed agents still talk to the existing aX
 APIs with agent-scoped credentials, but Gateway owns those credentials
@@ -261,6 +268,7 @@ Use this for Codex-style or human-driven agents that can poll when available:
 ax gateway agents add codex-pass-through --template pass_through
 ax gateway local connect codex-pass-through --json
 ax gateway local inbox --agent codex-pass-through --json
+ax gateway local inbox --agent codex-pass-through --wait 120 --json
 ax gateway local send --agent codex-pass-through "@night_owl Please review the current Gateway PR." --json
 ```
 

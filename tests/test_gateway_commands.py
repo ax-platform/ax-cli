@@ -125,6 +125,7 @@ class _SharedRuntimeClient:
                 "agent_id": agent_id,
                 "parent_id": parent_id,
                 "metadata": kwargs.get("metadata"),
+                "message_type": kwargs.get("message_type", "text"),
             }
         )
         return {"message": {"id": "reply-1"}}
@@ -1436,6 +1437,73 @@ print("done", flush=True)
     assert "tool_finished" in events
 
 
+def test_managed_exec_runtime_can_decline_without_chat_reply(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+    script = tmp_path / "decline_bridge.py"
+    script.write_text(
+        """
+import json
+
+prefix = "AX_GATEWAY_EVENT "
+print(prefix + json.dumps({"kind": "status", "status": "no_reply", "reason": "ack", "message": "Chose not to respond"}), flush=True)
+""".strip()
+    )
+    payload = {
+        "id": "msg-1",
+        "content": "@exec-bot thanks, no action needed",
+        "author": {"id": "user-1", "name": "madtank", "type": "user"},
+        "mentions": ["exec-bot"],
+    }
+    shared = _SharedRuntimeClient(payload)
+
+    runtime = gateway_core.ManagedAgentRuntime(
+        {
+            "name": "exec-bot",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "exec",
+            "exec_command": f"{sys.executable} {script}",
+            "token_file": str(token_file),
+        },
+        client_factory=lambda **kwargs: shared,
+    )
+
+    runtime.start()
+    deadline = time.time() + 3.0
+    while time.time() < deadline and not any(row["status"] == "no_reply" for row in shared.processing):
+        time.sleep(0.05)
+    runtime.stop()
+
+    assert [row["status"] for row in shared.processing] == ["started", "processing", "no_reply"]
+    no_reply = shared.processing[-1]
+    assert no_reply["activity"] == "Chose not to respond"
+    assert no_reply["reason"] == "ack"
+    assert no_reply["detail"] == {"terminal": True, "reply_created": False}
+    assert len(shared.sent) == 1
+    pause_row = shared.sent[0]
+    assert pause_row["space_id"] == "space-1"
+    assert pause_row["content"] == "Chose not to respond"
+    assert pause_row["agent_id"] == "agent-1"
+    assert pause_row["parent_id"] == "msg-1"
+    assert pause_row["message_type"] == "agent_pause"
+    assert pause_row["metadata"]["control_plane"] == "gateway"
+    assert pause_row["metadata"]["signal_only"] is True
+    assert pause_row["metadata"]["reason"] == "ack"
+    assert pause_row["metadata"]["reason_code"] == "ack"
+    assert pause_row["metadata"]["signal_kind"] == "agent_skipped"
+    assert pause_row["metadata"]["gateway"]["parent_message_id"] == "msg-1"
+    assert pause_row["metadata"]["gateway"]["signal_kind"] == "agent_skipped"
+    assert pause_row["metadata"]["gateway"]["reason"] == "ack"
+    assert pause_row["metadata"]["gateway"]["reply_created"] is False
+    recent = gateway_core.load_recent_gateway_activity()
+    assert "agent_skipped" in [row["event"] for row in recent]
+
+
 def test_managed_exec_runtime_marks_message_timed_out(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -2285,9 +2353,17 @@ def test_gateway_templates_command_json():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     ids = [item["id"] for item in payload["templates"]]
-    assert ids[:6] == ["echo_test", "ollama", "hermes", "pass_through", "sentinel_cli", "claude_code_channel"]
+    assert ids[:7] == [
+        "hermes",
+        "ollama",
+        "echo_test",
+        "service_account",
+        "pass_through",
+        "sentinel_cli",
+        "claude_code_channel",
+    ]
     assert "inbox" not in ids
-    assert payload["count"] == 6
+    assert payload["count"] == 7
     ollama = next(item for item in payload["templates"] if item["id"] == "ollama")
     assert ollama["runtime_type"] == "exec"
     assert ollama["launchable"] is True
@@ -2299,6 +2375,10 @@ def test_gateway_templates_command_json():
     assert pass_through["runtime_type"] == "inbox"
     assert pass_through["requires_approval"] is True
     assert pass_through["intake_model"] == "polling_mailbox"
+    service_account = next(item for item in payload["templates"] if item["id"] == "service_account")
+    assert service_account["runtime_type"] == "inbox"
+    assert service_account["asset_type_label"] == "Service Account"
+    assert service_account["output_label"] == "Message"
 
 
 def test_gateway_template_echo_alias_resolves():
@@ -2414,9 +2494,10 @@ def test_gateway_ui_handler_serves_status_and_agent_detail(monkeypatch, tmp_path
             templates = client.get("/api/templates")
             assert templates.status_code == 200
             template_payload = templates.json()
-            assert template_payload["templates"][0]["id"] == "echo_test"
-            assert template_payload["templates"][5]["launchable"] is False
-            assert template_payload["count"] == 6
+            assert template_payload["templates"][0]["id"] == "hermes"
+            assert template_payload["templates"][3]["id"] == "service_account"
+            assert template_payload["templates"][6]["launchable"] is False
+            assert template_payload["count"] == 7
 
             detail = client.get("/api/agents/echo-bot")
             assert detail.status_code == 200
@@ -2516,7 +2597,7 @@ def test_gateway_ui_handler_supports_agent_mutations(monkeypatch, tmp_path):
             assert tested_payload["sender_agent"].startswith("switchboard-")
             assert (
                 tested_payload["content"]
-                == "@ui-bot Reply with exactly: Gateway test OK. Then mention which local model answered."
+                == "@ui-bot Reply naturally that the Gateway round trip worked, then mention which local model answered."
             )
 
             doctored = client.post("/api/agents/ui-bot/doctor", json={})
@@ -3459,6 +3540,56 @@ def test_gateway_local_inbox_auto_connects_and_marks_read(monkeypatch):
     payload = json.loads(result.output)
     assert payload["agent"] == "codex-pass-through"
     assert payload["connect"]["registry_ref"] == "#4"
+
+
+def test_gateway_local_inbox_waits_until_message_arrives(monkeypatch):
+    calls = []
+    get_count = {"value": 0}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append({"method": "POST", "url": url, "json": json, "headers": headers, "timeout": timeout})
+        return _FakeHttpResponse(
+            {
+                "status": "approved",
+                "agent": {"name": "codex-pass-through"},
+                "registry_ref": "#4",
+                "session_token": "axgw_s_test.session",
+            }
+        )
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        get_count["value"] += 1
+        calls.append({"method": "GET", "url": url, "params": params, "headers": headers, "timeout": timeout})
+        messages = [] if get_count["value"] == 1 else [{"id": "msg-1", "content": "ready"}]
+        return _FakeHttpResponse({"agent": "codex-pass-through", "messages": messages, "count": len(messages)})
+
+    monkeypatch.setattr(gateway_cmd.httpx, "post", fake_post)
+    monkeypatch.setattr(gateway_cmd.httpx, "get", fake_get)
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda _seconds: None)
+
+    result = runner.invoke(
+        app,
+        [
+            "gateway",
+            "local",
+            "inbox",
+            "--agent",
+            "codex-pass-through",
+            "--url",
+            "http://127.0.0.1:8765",
+            "--wait",
+            "3",
+            "--poll-interval",
+            "0.5",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert get_count["value"] == 2
+    payload = json.loads(result.output)
+    assert payload["messages"] == [{"id": "msg-1", "content": "ready"}]
+    assert payload["waited_seconds"] == 3
 
 
 def test_gateway_agents_doctor_persists_structured_result(monkeypatch, tmp_path):
