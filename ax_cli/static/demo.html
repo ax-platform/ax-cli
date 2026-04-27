@@ -470,6 +470,7 @@
       sentinel_cli: { name: "Sentinel CLI", tag: "Session agent", desc: "Long-lived Claude or Codex CLI runtime with session resume and tool activity." },
       claude_code_channel: { name: "Claude Code Channel", tag: "MCP channel", desc: "Planned live Claude Code channel adapter for a supervised Gateway session." },
       pass_through: { name: "Pass-through", tag: "Polling inbox", desc: "Mailbox identity for agents that check Gateway instead of listening live. Requires approval." },
+      service_account: { name: "Service Account", tag: "Notification source", desc: "Named sender for alerts, reminders, automation, and operator probes. Not a live agent." },
       echo_test: { name: "Echo", tag: "Test runtime", desc: "Zero setup. Confirms your gateway can deliver and receive in real time." },
       inbox: { name: "Passive Inbox", tag: "Advanced queue", desc: "Receives queued work without launching an answering runtime." },
     };
@@ -483,7 +484,7 @@
       activeSpaceId: null,
       sessionSpaceId: null,
       templates: [],
-      selectedTemplateId: "ollama",
+      selectedTemplateId: "hermes",
       submitting: false,
       drawerAgentName: null,
       drawerActivity: [],
@@ -820,9 +821,12 @@
     async function loadTemplates() {
       try {
         const payload = await api("GET", "/api/templates");
-        state.templates = Array.isArray(payload.templates) ? payload.templates : [];
+        state.templates = (Array.isArray(payload.templates) ? payload.templates : []).filter((template) => {
+          const id = String(template.id || "").toLowerCase();
+          return !["pass_through", "sentinel_cli", "claude_code_channel", "inbox"].includes(id);
+        });
         if (!state.templates.some((t) => String(t.id || "").toLowerCase() === state.selectedTemplateId)) {
-          state.selectedTemplateId = String((state.templates[0] || {}).id || "ollama").toLowerCase();
+          state.selectedTemplateId = String((state.templates[0] || {}).id || "hermes").toLowerCase();
         }
         renderTemplateGrid();
         renderOllamaModelField();
@@ -1402,8 +1406,11 @@
       if (template === "inbox" || template === "pass_through") {
         return "Queue this test job, mark it received, and do not reply inline.";
       }
-      if (template === "ollama" || String(agent?.runtime_type || "").toLowerCase() === "echo") {
-        return "Reply with exactly: Gateway test OK. Then mention which local model answered.";
+      if (template === "ollama") {
+        return "Reply naturally that the Gateway round trip worked, then mention which local model answered.";
+      }
+      if (String(agent?.runtime_type || "").toLowerCase() === "echo") {
+        return "gateway test ping";
       }
       return "Reply with exactly: Gateway test OK.";
     }

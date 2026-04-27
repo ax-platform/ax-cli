@@ -545,6 +545,12 @@ def test_processing_status_text_highlights_gateway_pickup():
     assert text == "tooling: @orion picked up the message — Picked up by Gateway"
 
 
+def test_processing_status_text_handles_no_reply():
+    text = _processing_status_text({"status": "no_reply", "agent_name": "orion", "activity": "Chose not to respond"})
+
+    assert text == "tooling: @orion chose not to respond — Chose not to respond"
+
+
 def test_messages_edit_and_delete_resolve_short_id_prefix(monkeypatch):
     message_id = "12345678-90ab-cdef-1234-567890abcdef"
     calls = {}

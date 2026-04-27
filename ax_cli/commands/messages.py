@@ -81,6 +81,8 @@ def _processing_status_text(status_event: dict, *, wait_label: str = "reply") ->
         base = f"tooling: {target} is streaming a reply"
     elif status == "completed":
         base = f"tooling: {target} finished processing"
+    elif status in {"no_reply", "declined", "skipped", "not_responding"}:
+        base = f"tooling: {target} chose not to respond"
     elif status == "error":
         base = f"tooling: {target} hit an error"
     else:

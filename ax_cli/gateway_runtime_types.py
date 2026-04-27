@@ -261,7 +261,7 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "telemetry_shape": "basic",
             "suggested_name": "ollama-bot",
             "operator_summary": "Good for a local model with pickup, liveness, and streaming activity.",
-            "recommended_test_message": "Reply with exactly: Gateway test OK. Then mention which local model answered.",
+            "recommended_test_message": "Reply naturally that the Gateway round trip worked, then mention which local model answered.",
             "what_you_need": [
                 "Run a local Ollama server on this machine.",
                 "Have at least one Ollama model pulled locally. Gateway can suggest an installed model when the server is reachable.",
@@ -338,6 +338,41 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "signals": runtime_signals["sentinel_cli"],
             "advanced": {
                 "adapter_label": "Gateway sentinel CLI runner",
+                "supports_command_override": False,
+            },
+        },
+        "service_account": {
+            "id": "service_account",
+            "label": "Service Account",
+            "description": "Named sender identity for Gateway notifications, reminders, alerts, and operator-authored probes.",
+            "availability": "ready",
+            "launchable": True,
+            "runtime_type": "inbox",
+            "asset_class": "service_account",
+            "intake_model": "notification_source",
+            "worker_model": "no_runtime",
+            "trigger_sources": ["manual_message", "automation", "scheduled_job"],
+            "return_paths": ["outbound_message"],
+            "telemetry_shape": "basic",
+            "suggested_name": "notifications",
+            "operator_summary": "Best fit for sending messages from a named automation or notification source.",
+            "recommended_test_message": "Service account delivery check.",
+            "what_you_need": [],
+            "setup_skill": "gateway-agent-setup",
+            "setup_skill_path": str(skill_path),
+            "defaults": {
+                "runtime_type": "inbox",
+                "workdir": str(repo_root),
+            },
+            "signals": {
+                **runtime_signals["inbox"],
+                "delivery": "Gateway sends messages as this named service identity.",
+                "liveness": "Service accounts are not live agents and are not expected to reply.",
+                "activity": "Gateway reports sent, queued, and automation activity for this identity.",
+                "tools": "No tool telemetry. Service accounts represent sources, not tool-running agents.",
+            },
+            "advanced": {
+                "adapter_label": "Gateway service account",
                 "supports_command_override": False,
             },
         },
@@ -458,7 +493,16 @@ def agent_template_definition(template_id: str) -> dict[str, Any]:
 
 def agent_template_list(*, include_advanced: bool = False) -> list[dict[str, Any]]:
     catalog = agent_template_catalog()
-    ordered_ids = ["echo_test", "ollama", "hermes", "pass_through", "sentinel_cli", "claude_code_channel", "inbox"]
+    ordered_ids = [
+        "hermes",
+        "ollama",
+        "echo_test",
+        "service_account",
+        "pass_through",
+        "sentinel_cli",
+        "claude_code_channel",
+        "inbox",
+    ]
     templates = [catalog[template_id] for template_id in ordered_ids if template_id in catalog]
     if include_advanced:
         return templates

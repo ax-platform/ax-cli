@@ -5278,6 +5278,19 @@ def local_inbox(
         "--mark-read/--no-mark-read",
         help="Mark returned messages as read. Use --no-mark-read to peek without clearing.",
     ),
+    wait_seconds: int = typer.Option(
+        0,
+        "--wait",
+        min=0,
+        help="Wait up to this many seconds for an inbox message before returning.",
+    ),
+    poll_interval: float = typer.Option(
+        2.0,
+        "--poll-interval",
+        min=0.5,
+        max=30.0,
+        help="Seconds between inbox checks when --wait is used.",
+    ),
     gateway_url: str = typer.Option("http://127.0.0.1:8765", "--url", help="Local Gateway UI/API URL"),
     as_json: bool = JSON_OPTION,
 ):
@@ -5301,24 +5314,31 @@ def local_inbox(
     }
     if space_id:
         params["space_id"] = space_id
-    try:
-        response = httpx.get(
-            f"{gateway_url.rstrip('/')}/local/inbox",
-            params=params,
-            headers={"X-Gateway-Session": resolved_session_token},
-            timeout=20.0,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text
+    deadline = time.monotonic() + wait_seconds
+    payload = None
+    while True:
         try:
-            detail = exc.response.json().get("error", detail)
-        except Exception:
-            pass
-        raise typer.BadParameter(f"Gateway local inbox failed: {detail}") from exc
-    except Exception as exc:
-        raise typer.BadParameter(f"Gateway local inbox failed: {exc}") from exc
+            response = httpx.get(
+                f"{gateway_url.rstrip('/')}/local/inbox",
+                params=params,
+                headers={"X-Gateway-Session": resolved_session_token},
+                timeout=20.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text
+            try:
+                detail = exc.response.json().get("error", detail)
+            except Exception:
+                pass
+            raise typer.BadParameter(f"Gateway local inbox failed: {detail}") from exc
+        except Exception as exc:
+            raise typer.BadParameter(f"Gateway local inbox failed: {exc}") from exc
+
+        if payload.get("messages") or wait_seconds <= 0 or time.monotonic() >= deadline:
+            break
+        time.sleep(poll_interval)
     if as_json:
         if connect_payload:
             payload["connect"] = {
@@ -5328,6 +5348,8 @@ def local_inbox(
                 if isinstance(connect_payload.get("agent"), dict)
                 else None,
             }
+        if wait_seconds > 0:
+            payload["waited_seconds"] = wait_seconds
         print_json(payload)
         return
     messages = payload.get("messages") or []
