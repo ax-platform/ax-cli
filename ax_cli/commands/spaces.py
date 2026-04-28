@@ -127,7 +127,7 @@ def use_space(
     if as_json:
         print_json(result)
         return
-    console.print(f"[green]Current space:[/green] {label} ({sid})")
+    console.print(f"[green]Current space:[/green] {label}")
     console.print(f"[dim]Saved to {'global config' if global_config else 'local .ax/config.toml'}.[/dim]")
     if allowed is False and agent_name:
         console.print(

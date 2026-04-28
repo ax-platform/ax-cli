@@ -171,6 +171,43 @@ def test_messages_list_can_request_unread_and_mark_read(monkeypatch):
     assert "Marked read: 1" in result.output
 
 
+def test_messages_list_accepts_space_slug_alias(monkeypatch):
+    calls = {}
+
+    class FakeClient:
+        def list_messages(self, limit=20, channel="main", *, space_id=None, unread_only=False, mark_read=False):
+            calls["space_id"] = space_id
+            return {"messages": []}
+
+    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: f"resolved:{explicit}")
+
+    result = runner.invoke(app, ["messages", "list", "--space", "ax-cli-dev", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["space_id"] == "resolved:ax-cli-dev"
+
+
+def test_send_accepts_space_slug_alias(monkeypatch):
+    calls = {}
+
+    class FakeClient:
+        _base_headers = {}
+
+        def send_message(self, space_id, content, *, channel="main", parent_id=None, attachments=None):
+            calls["message"] = {"space_id": space_id, "content": content}
+            return {"id": "msg-1"}
+
+    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: f"resolved:{explicit}")
+    monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: None)
+
+    result = runner.invoke(app, ["send", "checkpoint", "--space", "ax-cli-dev", "--no-wait", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["message"] == {"space_id": "resolved:ax-cli-dev", "content": "checkpoint"}
+
+
 def test_messages_read_marks_single_message(monkeypatch):
     calls = {}
 

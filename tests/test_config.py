@@ -541,6 +541,35 @@ class TestResolveSpaceId:
 
         assert "matched multiple spaces" in capsys.readouterr().err
 
+    def test_bound_agent_default_beats_stale_config(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AX_SPACE", raising=False)
+        monkeypatch.delenv("AX_SPACE_ID", raising=False)
+        local_ax = tmp_path / ".ax"
+        local_ax.mkdir()
+        (local_ax / "config.toml").write_text('space_id = "stale-dev-space"\n')
+        monkeypatch.chdir(tmp_path)
+
+        class FakeClient:
+            def whoami(self):
+                return {"bound_agent": {"default_space_id": "agent-home-space"}}
+
+        assert resolve_space_id(FakeClient()) == "agent-home-space"
+
+    def test_env_space_slug_resolves_to_space_id(self, monkeypatch):
+        monkeypatch.setenv("AX_SPACE", "ax-cli-dev")
+        monkeypatch.delenv("AX_SPACE_ID", raising=False)
+
+        class FakeClient:
+            def list_spaces(self):
+                return {
+                    "spaces": [
+                        {"id": "private-space", "slug": "madtank-workspace", "name": "madtank's Workspace"},
+                        {"id": "team-space", "slug": "ax-cli-dev", "name": "aX CLI Dev"},
+                    ]
+                }
+
+        assert resolve_space_id(FakeClient()) == "team-space"
+
 
 class TestResolveToken:
     def test_env_var_wins(self, monkeypatch):

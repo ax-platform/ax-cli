@@ -98,7 +98,7 @@ def send_shortcut(
         "-f",
         help="Attach a local file to this message; creates a transcript preview backed by context metadata (repeatable)",
     ),
-    space_id: Optional[str] = typer.Option(None, "--space-id", "-s", help="Override default space"),
+    space_id: Optional[str] = typer.Option(None, "--space", "--space-id", "-s", help="Target space id, slug, or name"),
     as_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """Send a message and wait for a reply by default.

@@ -830,66 +830,77 @@ def _is_uuid_like(value: str) -> bool:
     return True
 
 
-def resolve_space_id(client: AxClient, *, explicit: str | None = None) -> str:
-    """Resolve space: explicit > env > config > bound agent default > auto-detect."""
-    if explicit:
-        ref = explicit.strip()
-        if not ref:
-            typer.echo("Error: Empty space value. Use a space id, slug, or name.", err=True)
-            raise typer.Exit(1)
-        if _is_uuid_like(ref):
-            return ref
-
-        spaces = _space_items(client.list_spaces())
-        needle = _space_lookup_key(ref)
-        matches = []
-        for space in spaces:
-            values = (
-                space.get("id"),
-                space.get("space_id"),
-                space.get("slug"),
-                space.get("name"),
-            )
-            if any(_space_lookup_key(value) == needle for value in values if value):
-                matches.append(space)
-
-        if not matches:
-            typer.echo(
-                f"Error: No visible space matched '{explicit}'. Use a space UUID or run `axctl spaces list`.",
-                err=True,
-            )
-            raise typer.Exit(1)
-        if len(matches) > 1:
-            candidates = ", ".join(
-                str(space.get("slug") or space.get("name") or space.get("id") or space.get("space_id"))
-                for space in matches[:5]
-            )
-            typer.echo(
-                f"Error: Space '{explicit}' matched multiple spaces ({candidates}). Use the space UUID.",
-                err=True,
-            )
-            raise typer.Exit(1)
-
-        space_id = matches[0].get("id") or matches[0].get("space_id")
-        if not space_id:
-            typer.echo(f"Error: Matched space '{explicit}' did not include an id.", err=True)
-            raise typer.Exit(1)
-        return str(space_id)
-    env = os.environ.get("AX_SPACE_ID")
-    if env:
-        return env
-    cfg = _load_config().get("space_id")
-    if cfg:
-        return cfg
-
-    # Try server-side resolution via bound agent context
+def _resolve_bound_agent_space(client: AxClient) -> str | None:
     try:
         me = client.whoami()
-        bound = me.get("bound_agent")
-        if bound and bound.get("default_space_id"):
-            return bound["default_space_id"]
     except Exception:
-        pass
+        return None
+    bound = me.get("bound_agent") if isinstance(me, dict) else None
+    if isinstance(bound, dict) and bound.get("default_space_id"):
+        return str(bound["default_space_id"])
+    return None
+
+
+def _resolve_space_ref(client: AxClient, ref: str, *, source: str) -> str:
+    value = ref.strip()
+    if not value:
+        typer.echo(f"Error: Empty {source} space value. Use a space id, slug, or name.", err=True)
+        raise typer.Exit(1)
+    if _is_uuid_like(value):
+        return value
+
+    spaces = _space_items(client.list_spaces())
+    needle = _space_lookup_key(value)
+    matches = []
+    for space in spaces:
+        values = (
+            space.get("id"),
+            space.get("space_id"),
+            space.get("slug"),
+            space.get("name"),
+        )
+        if any(_space_lookup_key(candidate) == needle for candidate in values if candidate):
+            matches.append(space)
+
+    if not matches:
+        typer.echo(
+            f"Error: No visible space matched '{ref}'. Use a space slug/name or run `axctl spaces list`.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if len(matches) > 1:
+        candidates = ", ".join(
+            str(space.get("slug") or space.get("name") or space.get("id") or space.get("space_id"))
+            for space in matches[:5]
+        )
+        typer.echo(
+            f"Error: Space '{ref}' matched multiple spaces ({candidates}). Use the space UUID.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    space_id = matches[0].get("id") or matches[0].get("space_id")
+    if not space_id:
+        typer.echo(f"Error: Matched space '{ref}' did not include an id.", err=True)
+        raise typer.Exit(1)
+    return str(space_id)
+
+
+def resolve_space_id(client: AxClient, *, explicit: str | None = None) -> str:
+    """Resolve space: explicit > env > bound agent default > saved config > auto-detect."""
+    if explicit:
+        return _resolve_space_ref(client, explicit, source="explicit")
+    env = os.environ.get("AX_SPACE") or os.environ.get("AX_SPACE_ID")
+    if env:
+        return _resolve_space_ref(client, env, source="environment")
+
+    bound_space = _resolve_bound_agent_space(client)
+    if bound_space:
+        return bound_space
+
+    cfg = _load_config().get("space_id")
+    if cfg:
+        return _resolve_space_ref(client, str(cfg), source="config")
 
     # Fallback: auto-detect from user's spaces
     spaces = client.list_spaces()
