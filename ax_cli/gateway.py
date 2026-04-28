@@ -4415,7 +4415,8 @@ class ManagedAgentRuntime:
     ) -> None:
         """Record an explicit terminal no-reply decision without posting a chat reply."""
         self._mark_no_reply_seen(message_id)
-        reason_code = (reason or "no_reply").strip() or "no_reply"
+        raw_reason_code = (reason or "no_reply").strip() or "no_reply"
+        canonical_reason = "no_reply"
         message = (activity or "Chose not to respond").strip() or "Chose not to respond"
         self._update_state(
             current_status=None,
@@ -4429,8 +4430,8 @@ class ManagedAgentRuntime:
             message_id,
             "no_reply",
             activity=message,
-            reason=reason_code,
-            detail={"terminal": True, "reply_created": False},
+            reason=canonical_reason,
+            detail={"terminal": True, "reply_created": False, "reason_code": raw_reason_code},
         )
         record_gateway_activity(
             "agent_skipped",
@@ -4438,7 +4439,8 @@ class ManagedAgentRuntime:
             message_id=message_id,
             status="no_reply",
             activity_message=message,
-            reason=reason_code,
+            reason=canonical_reason,
+            reason_code=raw_reason_code,
         )
         if not self._send_client:
             return
@@ -4447,15 +4449,16 @@ class ManagedAgentRuntime:
         gateway_meta.update(
             {
                 "signal_kind": "agent_skipped",
-                "reason": reason_code,
+                "reason": canonical_reason,
+                "reason_code": raw_reason_code,
                 "reply_created": False,
             }
         )
         metadata.update(
             {
                 "signal_only": True,
-                "reason": reason_code,
-                "reason_code": reason_code,
+                "reason": canonical_reason,
+                "reason_code": raw_reason_code,
                 "signal_kind": "agent_skipped",
             }
         )
@@ -4469,7 +4472,7 @@ class ManagedAgentRuntime:
                 message_type="agent_pause",
             )
         except Exception as exc:  # noqa: BLE001
-            self._log(f"agent-pause audit row failed: msg={message_id} reason={reason_code} err={exc}")
+            self._log(f"agent-pause audit row failed: msg={message_id} reason={raw_reason_code} err={exc}")
 
     @staticmethod
     def _processing_status_metadata(event: dict[str, Any]) -> dict[str, Any]:

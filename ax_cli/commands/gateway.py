@@ -43,7 +43,6 @@ from ..commands.bootstrap import (
 from ..config import resolve_space_id, resolve_user_base_url, resolve_user_token
 from ..gateway import (
     GatewayDaemon,
-    _is_hermes_sentinel_runtime,
     _is_passive_runtime,
     active_gateway_pid,
     active_gateway_pids,
@@ -2669,11 +2668,7 @@ def _move_managed_agent_space(name: str, new_space_id: str) -> dict:
     # nothing will produce the rebind events we are waiting on.
     if previous_space_id and previous_space_id != backend_space_id and active_gateway_pid() is not None:
         runtime_type = entry.get("runtime_type")
-        ready_events = (
-            {"runtime_started"}
-            if _is_passive_runtime(runtime_type) or _is_hermes_sentinel_runtime(runtime_type)
-            else {"listener_connected"}
-        )
+        ready_events = {"runtime_started"} if _is_passive_runtime(runtime_type) else {"listener_connected"}
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             recent = load_recent_gateway_activity(limit=20, agent_name=name)
@@ -6333,24 +6328,32 @@ def _launch_attached_agent_session(payload: dict) -> dict:
         if script_bin and sys.platform == "darwin":
             # Claude Code expects a TTY. macOS `script file command ...` gives
             # it a background pseudo-terminal without opening Terminal.app.
+            # `script` writes the PTY transcript to log_path itself; routing
+            # stdout to the same handle duplicates every byte on macOS.
             process_command = [script_bin, "-q", str(log_path), *command]
             stdin = subprocess.PIPE
+            stdout = subprocess.DEVNULL
         elif script_bin:
             process_command = [script_bin, "-q", "-f", "-c", launch_command, str(log_path)]
             stdin = subprocess.PIPE
+            stdout = subprocess.DEVNULL
         else:
             process_command = command
             stdin = subprocess.DEVNULL
+            stdout = handle
         process = subprocess.Popen(
             process_command,
             cwd=str(workdir),
             stdin=stdin,
-            stdout=handle,
+            stdout=stdout,
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
         )
         if process.stdin:
+            # Claude Code may ask first-run terminal questions before the
+            # channel starts. These answers select the default prompt choices
+            # so Gateway can attach without opening an operator terminal.
             for _ in range(3):
                 try:
                     process.stdin.write(b"1\n\n")
@@ -6358,6 +6361,13 @@ def _launch_attached_agent_session(payload: dict) -> dict:
                 except OSError:
                     break
                 time.sleep(0.45)
+            if process.poll() is not None:
+                handle.write(
+                    b"\n[ax-gateway] Claude Code exited immediately during background attach; "
+                    b"open this workspace manually or rerun Start after resolving first-run prompts.\n"
+                )
+                handle.flush()
+        _ATTACHED_SESSION_PROCESSES[:] = [managed for managed in _ATTACHED_SESSION_PROCESSES if managed.poll() is None]
         _ATTACHED_SESSION_PROCESSES.append(process)
     registry = load_gateway_registry()
     entry = find_agent_entry(registry, agent_name)

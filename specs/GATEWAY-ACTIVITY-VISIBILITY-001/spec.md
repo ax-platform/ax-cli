@@ -114,7 +114,21 @@ For agents that intentionally do not answer:
   `{agent_id, agent_name, message_id, reason}`. When Gateway cannot call that
   backend helper directly, it publishes `agent_processing status=no_reply` and
   may write an audit-only `message_type="agent_pause"` row with
-  `metadata.signal_only=true` and `metadata.reason=<reason>`.
+  `metadata.signal_only=true`, `metadata.reason="no_reply"`, and
+  `metadata.reason_code=<raw runtime reason>`. For example, `ack` is preserved
+  as `reason_code` while the canonical user-facing reason remains `no_reply`.
+
+For Claude Code Channel attached sessions:
+
+- Gateway may emit local activity events with a `channel_` prefix:
+  `channel_attached`, `channel_ping`, `channel_message_delivered`, and
+  `channel_reply_sent`.
+- These events are transport-specific evidence for the Gateway drawer and row
+  activity log. They complement, but do not replace, the platform message
+  activity signals shown on the original aX message bubble.
+- `channel_message_delivered` means the local channel received the message.
+  `channel_reply_sent` means the channel produced an inline reply and should
+  include `reply_id` and a short `reply_preview` when available.
 
 This creates a single UX rule:
 
