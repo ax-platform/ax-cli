@@ -38,7 +38,7 @@ from ..commands.bootstrap import (
     _mint_agent_pat,
     _polish_metadata,
 )
-from ..config import resolve_user_base_url, resolve_user_token
+from ..config import resolve_space_id, resolve_user_base_url, resolve_user_token
 from ..gateway import (
     GatewayDaemon,
     active_gateway_pid,
@@ -93,12 +93,14 @@ from ..output import JSON_OPTION, console, err_console, print_json, print_table
 
 app = typer.Typer(name="gateway", help="Run the local Gateway control plane", no_args_is_help=True)
 agents_app = typer.Typer(name="agents", help="Manage Gateway-controlled agents", no_args_is_help=True)
+spaces_app = typer.Typer(name="spaces", help="Manage Gateway current space", no_args_is_help=True)
 approvals_app = typer.Typer(name="approvals", help="Review and decide Gateway approval requests", no_args_is_help=True)
 runtime_app = typer.Typer(
     name="runtime", help="Install and inspect runtime templates (Hermes, etc.)", no_args_is_help=True
 )
 local_app = typer.Typer(name="local", help="Connect local pass-through agents to Gateway", no_args_is_help=True)
 app.add_typer(agents_app, name="agents")
+app.add_typer(spaces_app, name="spaces")
 app.add_typer(approvals_app, name="approvals")
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(local_app, name="local")
@@ -536,6 +538,16 @@ def _agent_row_space_ids(registry: dict) -> set[str]:
 def _space_list_from_response(raw: object) -> list[dict]:
     items = raw.get("spaces", raw) if isinstance(raw, dict) else raw
     return [item for item in (items or []) if isinstance(item, dict)]
+
+
+def _space_name_for_id(client: AxClient, space_id: str) -> str | None:
+    try:
+        for item in _space_list_from_response(client.list_spaces()):
+            if auth_cmd._candidate_space_id(item) == space_id:
+                return str(item.get("slug") or item.get("name") or space_id)
+    except Exception:
+        return None
+    return None
 
 
 def _resolve_gateway_agent_home_space(
@@ -4415,6 +4427,7 @@ def login(
             selected_space = None
     elif selected_space:
         try:
+            selected_space = resolve_space_id(client, explicit=selected_space)
             spaces = client.list_spaces()
             space_list = spaces.get("spaces", spaces) if isinstance(spaces, dict) else spaces
             selected_space_name = next(
@@ -4461,6 +4474,54 @@ def login(
         err_console.print(f"[green]Gateway login saved:[/green] {path}")
         for key, value in result.items():
             err_console.print(f"  {key} = {value}")
+
+
+@spaces_app.command("use")
+def use_gateway_space(
+    space: str = typer.Argument(..., help="Space id, slug, or name to make current for Gateway"),
+    as_json: bool = JSON_OPTION,
+):
+    """Set the Gateway bootstrap session's current space by id, slug, or name."""
+    session = _load_gateway_session_or_exit()
+    client = _load_gateway_user_client()
+    sid = resolve_space_id(client, explicit=space)
+    space_name = _space_name_for_id(client, sid)
+    session["space_id"] = sid
+    session["space_name"] = space_name
+    path = save_gateway_session(session)
+    registry = load_gateway_registry()
+    registry.setdefault("gateway", {})
+    registry["gateway"]["space_id"] = sid
+    registry["gateway"]["space_name"] = space_name
+    save_gateway_registry(registry)
+    record_gateway_activity("gateway_space_use", space_id=sid, space_name=space_name)
+    result = {
+        "session_path": str(path),
+        "space_id": sid,
+        "space_name": space_name,
+    }
+    if as_json:
+        print_json(result)
+        return
+    err_console.print(f"[green]Gateway current space:[/green] {space_name or sid} ({sid})")
+    err_console.print(f"  session = {path}")
+
+
+@spaces_app.command("current")
+def current_gateway_space(as_json: bool = JSON_OPTION):
+    """Show the Gateway bootstrap session's current space."""
+    session = _load_gateway_session_or_exit()
+    result = {
+        "space_id": session.get("space_id"),
+        "space_name": session.get("space_name"),
+        "base_url": session.get("base_url"),
+        "username": session.get("username"),
+    }
+    if as_json:
+        print_json(result)
+        return
+    err_console.print(f"Gateway current space: {result.get('space_name') or result.get('space_id') or '-'}")
+    err_console.print(f"  space_id = {result.get('space_id') or '-'}")
 
 
 @app.command("status")

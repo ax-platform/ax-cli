@@ -3427,3 +3427,64 @@ def test_gateway_status_payload_surfaces_alerts(monkeypatch, tmp_path):
     assert any("@stale-bot looks stale" == title for title in titles)
     assert any("@broken-bot hit an error" == title for title in titles)
     assert any("@setup-bot has a runtime setup error" == title for title in titles)
+
+
+def test_gateway_spaces_use_resolves_slug_and_updates_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "private-space",
+            "space_name": "madtank-workspace",
+            "username": "codex",
+        }
+    )
+
+    class FakeClient:
+        def list_spaces(self):
+            return {
+                "spaces": [
+                    {"id": "private-space", "slug": "madtank-workspace", "name": "madtank's Workspace"},
+                    {"id": "team-space", "slug": "ax-cli-dev", "name": "aX CLI Dev"},
+                ]
+            }
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: FakeClient())
+
+    result = runner.invoke(app, ["gateway", "spaces", "use", "ax-cli-dev", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["space_id"] == "team-space"
+    assert payload["space_name"] == "ax-cli-dev"
+    session = gateway_core.load_gateway_session()
+    assert session["space_id"] == "team-space"
+    assert session["space_name"] == "ax-cli-dev"
+    registry = gateway_core.load_gateway_registry()
+    assert registry["gateway"]["space_id"] == "team-space"
+    assert registry["gateway"]["space_name"] == "ax-cli-dev"
+
+
+def test_gateway_spaces_current_shows_session_space(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "team-space",
+            "space_name": "ax-cli-dev",
+            "username": "codex",
+        }
+    )
+
+    result = runner.invoke(app, ["gateway", "spaces", "current", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {
+        "space_id": "team-space",
+        "space_name": "ax-cli-dev",
+        "base_url": "https://paxai.app",
+        "username": "codex",
+    }
