@@ -1917,7 +1917,7 @@ def test_annotate_runtime_health_blocks_environment_mismatch(monkeypatch, tmp_pa
                 "activation": "queue_worker",
                 "reply_mode": "summary_only",
                 "effective_state": "running",
-                "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                "last_seen_at": "__recent__",
                 "backlog_depth": 0,
             },
             {
@@ -1935,7 +1935,7 @@ def test_annotate_runtime_health_blocks_environment_mismatch(monkeypatch, tmp_pa
                 "activation": "queue_worker",
                 "reply_mode": "summary_only",
                 "effective_state": "running",
-                "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                "last_seen_at": "__recent__",
                 "backlog_depth": 3,
                 "last_doctor_result": {
                     "status": "failed",
@@ -1985,6 +1985,9 @@ def test_annotate_runtime_health_blocks_environment_mismatch(monkeypatch, tmp_pa
     ],
 )
 def test_annotate_runtime_health_derives_gateway_operator_model(input_snapshot, expected):
+    input_snapshot = dict(input_snapshot)
+    if input_snapshot.get("last_seen_at") == "__recent__":
+        input_snapshot["last_seen_at"] = datetime.now(timezone.utc).isoformat()
     snapshot = gateway_core.annotate_runtime_health(input_snapshot)
 
     assert snapshot["mode"] == expected["mode"]
@@ -3427,3 +3430,64 @@ def test_gateway_status_payload_surfaces_alerts(monkeypatch, tmp_path):
     assert any("@stale-bot looks stale" == title for title in titles)
     assert any("@broken-bot hit an error" == title for title in titles)
     assert any("@setup-bot has a runtime setup error" == title for title in titles)
+
+
+def test_gateway_spaces_use_resolves_slug_and_updates_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "private-space",
+            "space_name": "madtank-workspace",
+            "username": "codex",
+        }
+    )
+
+    class FakeClient:
+        def list_spaces(self):
+            return {
+                "spaces": [
+                    {"id": "private-space", "slug": "madtank-workspace", "name": "madtank's Workspace"},
+                    {"id": "team-space", "slug": "ax-cli-dev", "name": "aX CLI Dev"},
+                ]
+            }
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: FakeClient())
+
+    result = runner.invoke(app, ["gateway", "spaces", "use", "ax-cli-dev", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["space_id"] == "team-space"
+    assert payload["space_name"] == "aX CLI Dev"
+    session = gateway_core.load_gateway_session()
+    assert session["space_id"] == "team-space"
+    assert session["space_name"] == "aX CLI Dev"
+    registry = gateway_core.load_gateway_registry()
+    assert registry["gateway"]["space_id"] == "team-space"
+    assert registry["gateway"]["space_name"] == "aX CLI Dev"
+
+
+def test_gateway_spaces_current_shows_session_space(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "team-space",
+            "space_name": "ax-cli-dev",
+            "username": "codex",
+        }
+    )
+
+    result = runner.invoke(app, ["gateway", "spaces", "current", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {
+        "space_id": "team-space",
+        "space_name": "ax-cli-dev",
+        "base_url": "https://paxai.app",
+        "username": "codex",
+    }
