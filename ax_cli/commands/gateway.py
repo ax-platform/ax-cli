@@ -104,6 +104,7 @@ runtime_app = typer.Typer(
     name="runtime", help="Install and inspect runtime templates (Hermes, etc.)", no_args_is_help=True
 )
 local_app = typer.Typer(name="local", help="Connect local pass-through agents to Gateway", no_args_is_help=True)
+_ATTACHED_SESSION_PROCESSES: list[subprocess.Popen[bytes]] = []
 app.add_typer(agents_app, name="agents")
 app.add_typer(spaces_app, name="spaces")
 app.add_typer(approvals_app, name="approvals")
@@ -874,6 +875,41 @@ def _register_managed_agent(
     return annotate_runtime_health(entry, registry=registry)
 
 
+def _agent_workspace_context_text(entry: dict, *, workdir: str) -> str:
+    name = str(entry.get("name") or "agent").strip()
+    template = str(entry.get("template_id") or entry.get("runtime_type") or "gateway").strip()
+    runtime = str(entry.get("runtime_type") or "gateway").strip()
+    return f"""# aX Agent Context
+
+You are `@{name}`, an agent connected to the aX multi-user, multi-agent network through the local Gateway.
+
+Identity and runtime:
+
+- Agent name: `@{name}`
+- Agent type: `{template}`
+- Runtime: `{runtime}`
+- Runtime folder: `{workdir}`
+- Gateway URL: `http://127.0.0.1:8765`
+
+How to use aX from this folder:
+
+```bash
+ax gateway local connect --workdir .
+ax gateway local inbox --workdir .
+ax gateway local send --workdir . "@agent_name message"
+```
+
+Guidelines:
+
+- Use the Gateway CLI from this folder for aX messages, inbox checks, tasks, and context.
+- Do not ask the user for a PAT and do not store user tokens in this folder.
+- If Gateway says approval is required, tell the user to open `http://127.0.0.1:8765` and approve the pending binding.
+- Treat aX as your shared agent network: messages may come from users, service accounts, or other agents.
+- Keep replies concise unless the task needs detail, and surface useful progress through the runtime when possible.
+- Keep self-description updates, preferences, avatar metadata, and capability notes aligned with Gateway-backed agent settings as those commands become available.
+"""
+
+
 def _agent_workspace_readme_text(entry: dict, *, workdir: str) -> str:
     name = str(entry.get("name") or "agent").strip()
     template = str(entry.get("template_id") or entry.get("runtime_type") or "gateway").strip()
@@ -884,6 +920,8 @@ This folder is registered with the local aX Gateway as `@{name}`.
 - Agent type: `{template}`
 - Runtime folder: `{workdir}`
 - Gateway URL: `http://127.0.0.1:8765`
+
+Read `.ax/AGENT_CONTEXT.md` first. It explains your aX identity and the Gateway CLI path.
 
 Use the Gateway CLI from this folder when you need platform context:
 
@@ -898,6 +936,23 @@ fingerprint binding for this agent. Keep self-description updates, preferences,
 avatar metadata, and capability notes in Gateway-backed agent settings as those
 commands become available.
 """
+
+
+def _write_agent_context_hint(path: Path, *, agent_name: str, context_path: Path) -> None:
+    if path.exists():
+        return
+    path.write_text(
+        "\n".join(
+            [
+                f"# {agent_name} on aX",
+                "",
+                "This workspace is connected to aX through the local Gateway.",
+                f"Read `{context_path}` before using aX tools.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def _write_agent_workspace_config(entry: dict) -> None:
@@ -921,6 +976,11 @@ def _write_agent_workspace_config(entry: dict) -> None:
     )
     (config_dir / "config.toml").chmod(0o600)
     (config_dir / "README.md").write_text(_agent_workspace_readme_text(entry, workdir=str(root)))
+    context_path = config_dir / "AGENT_CONTEXT.md"
+    context_path.write_text(_agent_workspace_context_text(entry, workdir=str(root)), encoding="utf-8")
+    _write_agent_context_hint(root / "AGENTS.md", agent_name=name, context_path=Path(".ax") / "AGENT_CONTEXT.md")
+    if template == "claude_code_channel" or runtime == "claude_code_channel":
+        _write_agent_context_hint(root / "CLAUDE.md", agent_name=name, context_path=Path(".ax") / "AGENT_CONTEXT.md")
 
 
 def _update_managed_agent(
@@ -1818,8 +1878,8 @@ def _send_gateway_test_to_managed_agent(
     reachability = str(snapshot.get("reachability") or "").strip().lower()
     if reachability == "attach_required":
         workdir = str(snapshot.get("workdir") or stored.get("workdir") or "").strip()
-        suffix = f" Start the attached session from {workdir}." if workdir else " Start the attached session first."
-        raise ValueError(f"@{name} is waiting for an attached session before it can receive messages.{suffix}")
+        suffix = f" Start Claude Code from {workdir}." if workdir else " Start Claude Code first."
+        raise ValueError(f"@{name} is stopped and cannot receive messages yet.{suffix}")
     space_id = str(snapshot.get("active_space_id") or stored.get("space_id") or entry.get("space_id") or "")
     if not space_id:
         raise ValueError(f"Managed agent is missing a space id: @{name}")
@@ -2083,12 +2143,12 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
         if intake_model == "live_listener":
             if snapshot.get("activation") == "attach_only":
                 if str(snapshot.get("reachability") or "") == "attach_required":
-                    add_check("session_attach", "warning", "Reconnect the attached session before sending.")
+                    add_check("claude_code_session", "warning", "Start Claude Code before sending.")
                 elif bool(snapshot.get("connected")):
-                    add_check("session_attach", "passed", "Attached session is connected to Gateway.")
+                    add_check("claude_code_session", "passed", "Claude Code is connected to Gateway.")
                 else:
                     add_check(
-                        "session_attach", "failed", "Gateway does not currently have an attached session to supervise."
+                        "claude_code_session", "failed", "Gateway does not currently have Claude Code running."
                     )
             elif runtime_type != "echo":
                 if exec_command:
@@ -2153,7 +2213,7 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
         if str(snapshot.get("presence") or "") == "IDLE":
             add_check("live_path", "passed", "Live listener is connected.")
         elif str(snapshot.get("reachability") or "") == "attach_required":
-            add_check("live_path", "warning", "Reconnect the attached session before sending.")
+            add_check("live_path", "warning", "Start Claude Code before sending.")
         elif str(snapshot.get("presence") or "") in {"STALE", "OFFLINE"}:
             add_check("live_path", "failed", str(snapshot.get("confidence_detail") or _reachability_copy(snapshot)))
     elif str(snapshot.get("mode") or "") == "ON-DEMAND" and not has_check("launch_ready"):
@@ -2277,7 +2337,7 @@ def _reachability_copy(agent: dict) -> str:
     if reachability == "launch_available":
         return "Gateway can launch this runtime on send."
     if reachability == "attach_required":
-        return "Reconnect the attached session before sending."
+        return "Start Claude Code before sending."
     if mode == "INBOX":
         return "Queue path is unavailable."
     return "Gateway does not currently have a working path."
@@ -4321,6 +4381,23 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                         timeout_seconds=body.get("timeout_seconds", body.get("timeout")),
                         start=bool(body.get("start", True)),
                     )
+                    profile = gateway_core.infer_operator_profile(payload)
+                    if (
+                        profile["placement"] == "attached"
+                        and profile["activation"] == "attach_only"
+                        and str(payload.get("desired_state") or "").strip().lower() == "running"
+                    ):
+                        launch_payload = _launch_attached_agent_session(_prepare_attached_agent_payload(payload["name"]))
+                        record_gateway_activity(
+                            "attached_session_launch_requested",
+                            agent_name=payload["name"],
+                            launch_mode=launch_payload.get("launch_mode"),
+                            workdir=str(Path(str(launch_payload["mcp_path"])).parent),
+                        )
+                        registry = load_gateway_registry()
+                        stored = find_agent_entry(registry, str(payload["name"]))
+                        if stored:
+                            payload = _with_registry_refs(registry, annotate_runtime_health(stored, registry=registry))
                     _write_json_response(self, payload, status=HTTPStatus.CREATED)
                     return
                 if parsed.path == "/local/connect":
@@ -4352,6 +4429,17 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                     name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/stop")).strip()
                     payload = _set_managed_agent_desired_state(name, "stopped")
                     _write_json_response(self, payload)
+                    return
+                if parsed.path.endswith("/attach") and parsed.path.startswith("/api/agents/"):
+                    name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/attach")).strip()
+                    payload = _launch_attached_agent_session(_prepare_attached_agent_payload(name))
+                    record_gateway_activity(
+                        "attached_session_launch_requested",
+                        agent_name=name,
+                        launch_mode=payload.get("launch_mode"),
+                        workdir=str(Path(str(payload["mcp_path"])).parent),
+                    )
+                    _write_json_response(self, payload, status=HTTPStatus.ACCEPTED)
                     return
                 if parsed.path.endswith("/send") and parsed.path.startswith("/api/agents/"):
                     name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/send")).strip()
@@ -6184,6 +6272,104 @@ def _attach_command_for_payload(payload: dict) -> str:
     return f"cd {shlex.quote(str(workdir))} && {payload['launch_command']}"
 
 
+def _prepare_attached_agent_payload(name: str) -> dict:
+    registry = load_gateway_registry()
+    entry = find_agent_entry(registry, name)
+    if not entry:
+        raise LookupError(f"Managed agent not found: {name}")
+    profile = gateway_core.infer_operator_profile(entry)
+    if profile["placement"] != "attached" or profile["activation"] != "attach_only":
+        raise ValueError(f"@{name} is not an attached-session agent.")
+    workdir = str(entry.get("workdir") or "").strip()
+    if not workdir:
+        raise ValueError(f"Attached agent has no workdir: @{name}")
+
+    from ..commands.channel import write_channel_setup
+
+    payload = write_channel_setup(agent_name=name, workdir=Path(workdir))
+    payload["attach_command"] = _attach_command_for_payload(payload)
+    _set_managed_agent_desired_state(name, "running")
+    return payload
+
+
+def _launch_attached_agent_session(payload: dict) -> dict:
+    workdir = Path(str(payload["mcp_path"])).parent
+    launch_command = str(payload.get("launch_command") or "").strip()
+    server_name = str(payload.get("server_name") or "ax-channel").strip() or "ax-channel"
+    agent_name = str(payload.get("agent") or "attached-session").strip() or "attached-session"
+    registry = load_gateway_registry()
+    existing_entry = find_agent_entry(registry, agent_name)
+    old_pid = int(existing_entry.get("attached_session_pid") or 0) if existing_entry else 0
+    if old_pid:
+        try:
+            os.killpg(old_pid, signal.SIGTERM)
+        except OSError:
+            pass
+    command = [
+        "claude",
+        "--strict-mcp-config",
+        "--mcp-config",
+        str(payload["mcp_path"]),
+        "--dangerously-load-development-channels",
+        f"server:{server_name}",
+    ]
+    if not shutil.which("claude"):
+        raise ValueError("Claude Code is not on PATH. Install or open Claude Code, then try attaching again.")
+
+    log_path = agent_dir(agent_name) / "attached-session.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as handle:
+        script_bin = shutil.which("script")
+        if script_bin and sys.platform == "darwin":
+            # Claude Code expects a TTY. macOS `script file command ...` gives
+            # it a background pseudo-terminal without opening Terminal.app.
+            process_command = [script_bin, "-q", str(log_path), *command]
+            stdin = subprocess.PIPE
+        elif script_bin:
+            process_command = [script_bin, "-q", "-f", "-c", launch_command, str(log_path)]
+            stdin = subprocess.PIPE
+        else:
+            process_command = command
+            stdin = subprocess.DEVNULL
+        process = subprocess.Popen(
+            process_command,
+            cwd=str(workdir),
+            stdin=stdin,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+        if process.stdin:
+            for _ in range(3):
+                try:
+                    process.stdin.write(b"1\n\n")
+                    process.stdin.flush()
+                except OSError:
+                    break
+                time.sleep(0.45)
+        _ATTACHED_SESSION_PROCESSES.append(process)
+    registry = load_gateway_registry()
+    entry = find_agent_entry(registry, agent_name)
+    if entry:
+        entry["desired_state"] = "running"
+        entry["effective_state"] = "starting"
+        entry["current_status"] = "attaching"
+        entry["current_activity"] = "Starting Claude Code"
+        entry["attached_session_pid"] = process.pid
+        entry["attached_session_log_path"] = str(log_path)
+        entry["last_started_at"] = datetime.now(timezone.utc).isoformat()
+        save_gateway_registry(registry)
+    return {
+        **payload,
+        "launched": True,
+        "launch_mode": "background",
+        "pid": process.pid,
+        "log_path": str(log_path),
+        "message": "Started Claude Code channel in the background.",
+    }
+
+
 @agents_app.command("attach")
 def attach_agent(
     name: str = typer.Argument(..., help="Attached-session agent name"),
@@ -6191,25 +6377,16 @@ def attach_agent(
     as_json: bool = JSON_OPTION,
 ):
     """Write channel config for an attached Claude Code agent and print the attach command."""
-    registry = load_gateway_registry()
-    entry = find_agent_entry(registry, name)
-    if not entry:
+    try:
+        payload = _prepare_attached_agent_payload(name)
+    except LookupError:
         err_console.print(f"[red]Managed agent not found:[/red] {name}")
         raise typer.Exit(1)
-    profile = gateway_core.infer_operator_profile(entry)
-    if profile["placement"] != "attached" or profile["activation"] != "attach_only":
+    except ValueError as exc:
         err_console.print(f"[red]Not an attached-session agent:[/red] @{name}")
+        err_console.print(str(exc))
         raise typer.Exit(1)
-    workdir = str(entry.get("workdir") or "").strip()
-    if not workdir:
-        err_console.print(f"[red]Attached agent has no workdir:[/red] @{name}")
-        raise typer.Exit(1)
-
-    from ..commands.channel import write_channel_setup
-
-    payload = write_channel_setup(agent_name=name, workdir=Path(workdir))
-    payload["attach_command"] = _attach_command_for_payload(payload)
-    _set_managed_agent_desired_state(name, "running")
+    workdir = str(Path(str(payload["mcp_path"])).parent)
     if as_json:
         print_json(payload)
         return

@@ -926,6 +926,35 @@ def _derive_liveness(snapshot: dict[str, Any], *, raw_state: str, last_seen_age:
     return "offline", False
 
 
+def _pid_is_alive(pid: object) -> bool:
+    try:
+        pid_int = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    try:
+        os.kill(pid_int, 0)
+    except PermissionError:
+        # The local OS can deny signal checks even when the child is still
+        # visible to the user. Treat permission-denied as "alive enough" for
+        # a UI-managed attached session.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _attached_session_log_is_ready(path: object) -> bool:
+    if not path:
+        return False
+    try:
+        content = Path(str(path)).read_text(errors="ignore")[-8000:]
+    except OSError:
+        return False
+    return "Listening for channel messages" in content or "ax-channel" in content
+
+
 def _derive_work_state(snapshot: dict[str, Any], *, liveness: str, profile: dict[str, str] | None = None) -> str:
     attestation_state = _normalized_optional_controlled(
         snapshot.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES
@@ -1148,10 +1177,10 @@ def _derive_confidence(
         return ("MEDIUM", "launch_available", "Gateway can launch this runtime on send. Cold start possible.")
     if liveness in {"offline", "stale"}:
         if reachability == "attach_required":
-            return ("LOW", "attach_required", "Reconnect the attached session before sending.")
+            return ("LOW", "attach_required", "Start Claude Code before sending.")
         return ("LOW", "unavailable", "Gateway does not currently have a healthy live path.")
     if liveness == "connected":
-        return ("HIGH", "live_now", "A live runtime is attached and ready to claim work.")
+        return ("HIGH", "live_now", "A live runtime is ready to claim work.")
     return ("MEDIUM", "unknown", "Gateway has partial health signals but no stronger confidence signal yet.")
 
 
@@ -2482,7 +2511,24 @@ def annotate_runtime_health(
     asset_descriptor = infer_asset_descriptor(enriched, operator_profile=profile)
     state = str(enriched.get("effective_state") or "stopped").lower()
     raw_state = state
+    attached_session_alive = False
     liveness, connected = _derive_liveness(enriched, raw_state=state, last_seen_age=last_seen_age)
+    if profile["activation"] == "attach_only":
+        local_pid_alive = (
+            str(enriched.get("desired_state") or "").lower() == "running"
+            and _pid_is_alive(enriched.get("attached_session_pid"))
+        )
+        if local_pid_alive:
+            attached_session_alive = True
+            if liveness in {"stale", "offline"}:
+                liveness = "connected"
+                connected = True
+                state = "running"
+            enriched["local_attach_state"] = "connected"
+            enriched["local_attach_detail"] = "Gateway-managed Claude Code session is running locally."
+        elif str(enriched.get("local_attach_state") or "").lower() == "connected":
+            enriched["local_attach_state"] = "stopped"
+            enriched["local_attach_detail"] = "Claude Code is not running locally."
     if liveness == "stale" and raw_state == "running":
         state = "stale"
     elif liveness == "setup_error":
@@ -2528,6 +2574,8 @@ def annotate_runtime_health(
     enriched["asset_descriptor"] = asset_descriptor
     enriched["effective_state"] = state
     enriched["connected"] = connected
+    if attached_session_alive:
+        enriched["last_seen_age_seconds"] = 0
     enriched["liveness"] = _normalized_controlled(liveness, _CONTROLLED_LIVENESS, fallback="offline")
     enriched["work_state"] = _normalized_controlled(work_state, _CONTROLLED_WORK_STATES, fallback="idle")
     enriched["mode"] = _normalized_controlled(mode, _CONTROLLED_MODES, fallback="ON-DEMAND")
@@ -2563,6 +2611,12 @@ def annotate_runtime_health(
     if not queue_capable and str(enriched.get("current_status") or "").strip().lower() == "queued":
         enriched["current_status"] = "idle"
         if str(enriched.get("current_activity") or "").strip().lower().startswith("queued in gateway"):
+            enriched["current_activity"] = None
+    if str(enriched.get("current_status") or "").strip().lower() == "attaching" and (
+        connected or (_age_seconds(enriched.get("last_started_at"), now=now) or 0) > 30
+    ):
+        enriched["current_status"] = None
+        if str(enriched.get("current_activity") or "").strip().lower().startswith("starting attached"):
             enriched["current_activity"] = None
     enriched.setdefault("last_successful_doctor_at", None)
     enriched.setdefault("last_doctor_result", None)

@@ -428,7 +428,6 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "setup_skill_path": str(skill_path),
             "defaults": {
                 "runtime_type": "claude_code_channel",
-                "start": False,
             },
             "signals": runtime_signals["claude_code_channel"],
             "advanced": {

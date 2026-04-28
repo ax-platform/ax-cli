@@ -145,6 +145,54 @@ def _write_gateway_cli_config(
     path.chmod(0o600)
 
 
+def _channel_agent_context_text(*, agent_name: str, workdir: Path) -> str:
+    return f"""# aX Agent Context
+
+You are `@{agent_name}`, a Claude Code Channel agent connected to the aX multi-user, multi-agent network through the local Gateway.
+
+Identity and runtime:
+
+- Agent name: `@{agent_name}`
+- Agent type: `claude_code_channel`
+- Runtime folder: `{workdir}`
+- Gateway URL: `http://127.0.0.1:8765`
+
+How to use aX from this folder:
+
+```bash
+ax gateway local connect --workdir .
+ax gateway local inbox --workdir .
+ax gateway local send --workdir . "@agent_name message"
+```
+
+Guidelines:
+
+- You receive live direct mentions through the Claude Code channel.
+- Use the Gateway CLI from this folder for aX messages, inbox checks, tasks, and context.
+- Do not ask the user for a PAT and do not store user tokens in this folder.
+- If Gateway says approval is required, tell the user to open `http://127.0.0.1:8765` and approve the pending binding.
+- Treat aX as your shared agent network: messages may come from users, service accounts, or other agents.
+- Keep replies concise unless the task needs detail, and surface useful progress through the runtime when possible.
+"""
+
+
+def _write_channel_context_hint(path: Path, *, agent_name: str, context_path: Path) -> None:
+    if path.exists():
+        return
+    path.write_text(
+        "\n".join(
+            [
+                f"# {agent_name} on aX",
+                "",
+                "This workspace is connected to aX through the local Gateway.",
+                f"Read `{context_path}` before using aX tools.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _write_channel_workspace_readme(path: Path, *, agent_name: str, workdir: Path) -> None:
     path.write_text(
         f"""# aX Claude Code Channel
@@ -152,8 +200,11 @@ def _write_channel_workspace_readme(path: Path, *, agent_name: str, workdir: Pat
 This folder is registered with the local aX Gateway as `@{agent_name}`.
 
 - Gateway CLI identity: `.ax/config.toml`
+- Agent context: `.ax/AGENT_CONTEXT.md`
 - Claude Code MCP channel: `.mcp.json`
 - Runtime folder: `{workdir}`
+
+Read `.ax/AGENT_CONTEXT.md` first. It explains your aX identity and the Gateway CLI path.
 
 Start Claude Code from this folder:
 
@@ -173,6 +224,15 @@ Do not add a user PAT here. Gateway owns credential minting, and the channel
 uses the generated per-agent env file referenced by `.mcp.json`.
 """
     )
+
+
+def _write_channel_workspace_context(workdir: Path, *, agent_name: str) -> Path:
+    context_path = workdir / ".ax" / "AGENT_CONTEXT.md"
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    context_path.write_text(_channel_agent_context_text(agent_name=agent_name, workdir=workdir), encoding="utf-8")
+    _write_channel_context_hint(workdir / "AGENTS.md", agent_name=agent_name, context_path=Path(".ax") / "AGENT_CONTEXT.md")
+    _write_channel_context_hint(workdir / "CLAUDE.md", agent_name=agent_name, context_path=Path(".ax") / "AGENT_CONTEXT.md")
+    return context_path
 
 
 def _default_local_channel_command() -> str:
@@ -332,6 +392,7 @@ def write_channel_setup(
     )
     cli_readme_path = target_workdir / ".ax" / "README.md"
     _write_channel_workspace_readme(cli_readme_path, agent_name=agent_name, workdir=target_workdir)
+    context_path = _write_channel_workspace_context(target_workdir, agent_name=agent_name)
 
     launch_command = (
         f"claude --strict-mcp-config --mcp-config {mcp_path} "
@@ -346,6 +407,7 @@ def write_channel_setup(
         "env_path": str(resolved_env_path),
         "cli_config_path": str(cli_config_path),
         "cli_readme_path": str(cli_readme_path),
+        "agent_context_path": str(context_path),
         "server_name": server_name,
         "launch_command": launch_command,
     }

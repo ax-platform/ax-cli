@@ -708,6 +708,14 @@
       if (confidence === "BLOCKED") {
         return { label: "Blocked", tone: "warning", detail: detail || "Gateway has blocked this runtime." };
       }
+      const currentStatus = String(agent.current_status || "").toLowerCase();
+      if (currentStatus.includes("attach") && !agent.connected) {
+        return {
+          label: "Starting",
+          tone: "warning",
+          detail: agent.current_activity || "Starting Claude Code.",
+        };
+      }
       if (isMailboxRuntime(agent)) {
         if (unread > 0 || tasks > 0) {
           const parts = [];
@@ -719,9 +727,9 @@
       }
       if (isAttachedRuntime(agent) && presence === "STALE") {
         return {
-          label: "Waiting for attach",
-          tone: "warning",
-          detail: detail || "Start the attached runtime from its workspace before sending messages.",
+          label: "Stopped",
+          tone: "muted",
+          detail: "Claude Code is not running. Start it to receive messages.",
         };
       }
       if (presence === "STALE") return { label: "Stale", tone: "warning", detail: detail || "Heartbeat is overdue." };
@@ -757,15 +765,17 @@
         effective.includes("reconnect") ||
         effective.includes("rebind") ||
         effective.includes("start") ||
+        status.includes("attach") ||
+        activity.includes("attach") ||
         activity.includes("reconnect") ||
         activity.includes("rebind");
       if (reconnecting) {
-        return { disabled: true, reason: "Gateway is reconnecting this agent. Try again in a few seconds." };
+        return { disabled: true, reason: "Gateway is connecting this agent. Try again in a few seconds." };
       }
       const presence = String(agent.presence || "").toUpperCase();
       const reachability = String(agent.reachability || "").toLowerCase();
       if (isAttachedRuntime(agent) && (presence === "STALE" || reachability === "attach_required")) {
-        return { disabled: true, reason: "Open the attached session from this agent's workspace before sending." };
+        return { disabled: true, reason: "Start this Claude Code session before sending." };
       }
       if (!isMailboxRuntime(agent) && (presence === "OFFLINE" || presence === "ERROR" || presence === "STALE")) {
         return { disabled: true, reason: "Agent is not connected right now." };
@@ -949,6 +959,28 @@
           showToast("Copy failed — select the command manually", "err");
         }
       };
+    }
+
+    async function attachAgent(agent, button) {
+      if (!agent || !agent.name) return;
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Starting…";
+      }
+      try {
+        const result = await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/attach", {});
+        showToast(result.message || "Starting @" + agent.name, "ok");
+        window.setTimeout(() => {
+          loadStatus();
+          loadAgentDetail(agent.name);
+        }, 1200);
+      } catch (err) {
+        showToast(err.message || "Start failed", "err");
+        if (button) {
+          button.disabled = false;
+          button.textContent = "Start";
+        }
+      }
     }
 
     function ensureListMode() {
@@ -1276,6 +1308,9 @@
       if (currentTool) return relativeActivity(`Tool: ${currentTool}`, agent.last_seen_at || agent.last_work_received_at || agent.added_at);
       const currentActivity = String(agent.current_activity || "").trim();
       if (currentActivity) return relativeActivity(currentActivity, agent.last_seen_at || agent.last_work_received_at || agent.added_at);
+      if (isAttachedRuntime(agent) && String(agent.reachability || "").toLowerCase() === "attach_required") {
+        return relativeActivity("Start required", agent.last_seen_at || agent.last_started_at || agent.added_at);
+      }
       // (label, timestamp) candidates ordered so operationally meaningful
       // actions (replied, received) win ties over generic ones.
       const candidates = [
@@ -1500,6 +1535,7 @@
     const ACTIVITY_LIVE_EVENTS = new Set([
       "message_received",
       "message_queued",
+      "channel_message_delivered",
       "message_claimed",
       "runtime_status",
       "runtime_activity",
@@ -1521,8 +1557,8 @@
 
     function eventTone(activity) {
       const event = String(activity.event || "");
-      if (event === "reply_sent") return "reply";
-      if (event === "gateway_test_sent" || event === "message_received" || event === "message_queued") return "send";
+      if (event === "reply_sent" || event === "channel_reply_sent") return "reply";
+      if (event === "gateway_test_sent" || event === "message_received" || event === "message_queued" || event === "channel_message_delivered") return "send";
       if (event === "runtime_error" || event === "runtime_timeout" || event === "blocked" || event === "invocation_blocked" || event === "crashed") return "error";
       if (event === "message_claimed" || event === "thinking" || event === "runtime_activity" || event === "tool_started" || event === "tool_finished") return "work";
       return "";
@@ -1534,13 +1570,17 @@
         case "gateway_test_sent": return "Test message sent";
         case "message_received": return "Message sent";
         case "message_queued": return "Queued";
+        case "channel_message_delivered": return "Delivered";
         case "message_claimed": return "Picked up";
         case "thinking": return "Thinking";
         case "runtime_started": return "Runtime started";
         case "runtime_stopped": return "Runtime stopped";
+        case "attached_session_launch_requested": return "Start requested";
+        case "channel_attached": return "Started";
         case "runtime_error": return "Runtime error";
         case "runtime_timeout": return "Timed out";
         case "reply_sent": return "Replied";
+        case "channel_reply_sent": return "Replied";
         case "tool_started": return "Tool started";
         case "tool_finished": return "Tool finished";
         case "tool_call_recorded": return "Tool recorded";
@@ -1556,13 +1596,19 @@
 
     function eventDetail(activity) {
       const event = String(activity.event || "");
-      if (event === "reply_sent") return String(activity.reply_preview || activity.preview || "").trim();
+      if (event === "reply_sent" || event === "channel_reply_sent") return String(activity.reply_preview || activity.preview || "").trim();
       if (event === "gateway_test_sent") {
         const preview = String(activity.reply_preview || "").trim();
         const sender = String(activity.sender_agent_name || "").trim();
         return sender ? `From @${sender}: ${preview}` : preview;
       }
       if (event === "message_received") return String(activity.preview || activity.content_preview || "").trim();
+      if (event === "channel_message_delivered") return "Message delivered to Claude Code.";
+      if (event === "attached_session_launch_requested") {
+        const workdir = String(activity.workdir || "").trim();
+        return workdir ? `Gateway started Claude Code from ${workdir}.` : "Gateway started Claude Code.";
+      }
+      if (event === "channel_attached") return "Claude Code is listening for Gateway messages.";
       if (event === "runtime_error" || event === "runtime_timeout") return String(activity.error || activity.detail || "").trim();
       if (event === "tool_started") return String(activity.tool_action || activity.activity_message || "").trim();
       if (event === "tool_finished") return String(activity.status || activity.activity_message || "").trim();
@@ -1738,6 +1784,7 @@
           if (idx >= 0) state.agents[idx] = payload.agent;
           const row = state.rowsByName.get(payload.agent.name);
           if (row) updateRow(row, payload.agent);
+          updateDrawerChrome(payload.agent);
         }
         const activity = Array.isArray(payload.recent_activity) ? payload.recent_activity : [];
         renderDrawerActivity(activity);
@@ -1807,7 +1854,11 @@
       const statusBox = makeEl("div", { class: "status-detail " + (status.tone === "error" ? "error" : status.tone === "warning" ? "warning" : "") }, [status.detail || ""]);
       drawerBody.appendChild(makeEl("section", { class: "drawer-section" }, [
         makeEl("div", { class: "drawer-label" }, ["Status"]),
-        makeEl("div", { class: "drawer-value", style: { color: "var(--text)", fontWeight: "500" } }, [status.label]),
+        makeEl("div", {
+          class: "drawer-value",
+          id: "drawer-status-label",
+          style: { color: "var(--text)", fontWeight: "500" },
+        }, [status.label]),
         statusBox,
       ]));
 
@@ -1952,7 +2003,7 @@
             btn.disabled = sendLock.disabled;
           }
         },
-      }, [sendLock.disabled && sendLock.reason.includes("reconnect") ? "Reconnecting" : "Send message"]);
+      }, [sendLock.disabled && sendLock.reason.toLowerCase().includes("start") ? "Start first" : sendLock.disabled && sendLock.reason.includes("reconnect") ? "Reconnecting" : "Send message"]);
       const resetButton = makeEl("button", {
         class: "btn btn-ghost",
         disabled: sendLock.disabled,
@@ -1972,36 +2023,32 @@
       ]));
       if (desiredRunning) {
         if (isAttachedRuntime(agent) && String(agent.presence || "").toUpperCase() === "STALE") {
-          const launchCommand = attachedLaunchCommand(agent);
-          const gatewayCommand = attachedGatewayCommand(agent);
-          actions.appendChild(makeEl("div", { class: "hint" }, [
-            "Waiting for the attached session. Stop/start only changes desired state. Attach Claude Code from ",
-            makeEl("strong", {}, [String(agent.workdir || "this agent's workspace")]),
-            " with the generated channel config.",
-          ]));
-          if (gatewayCommand) {
-            actions.appendChild(makeEl("div", { class: "message-composer-actions" }, [
-              makeEl("button", { class: "btn btn-primary", onclick: copyHandler(gatewayCommand) }, ["Copy attach command"]),
-            ]));
-            actions.appendChild(makeEl("code", { class: "command-pill" }, [gatewayCommand]));
-          }
-          if (launchCommand) {
-            actions.appendChild(makeEl("code", { class: "command-pill" }, [launchCommand]));
-          }
+          const startButton = makeEl("button", {
+            class: "btn btn-primary",
+            onclick: (event) => attachAgent(agent, event.currentTarget),
+          }, ["Start"]);
+          actions.appendChild(makeEl("div", { class: "message-composer-actions" }, [startButton]));
+        } else {
+          actions.appendChild(makeEl("button", {
+            class: "btn btn-ghost",
+            onclick: async () => {
+              try {
+                await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/stop", {});
+                showToast("Stopped @" + agent.name, "ok");
+                await loadStatus();
+              } catch (err) {
+                showToast(err.message || "Stop failed", "err");
+              }
+            },
+          }, ["Stop"]));
         }
-        actions.appendChild(makeEl("button", {
-          class: "btn btn-ghost",
-          onclick: async () => {
-            try {
-              await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/stop", {});
-              showToast("Stopped @" + agent.name, "ok");
-              await loadStatus();
-            } catch (err) {
-              showToast(err.message || "Stop failed", "err");
-            }
-          },
-        }, ["Stop"]));
       } else {
+        if (isAttachedRuntime(agent)) {
+          actions.appendChild(makeEl("button", {
+            class: "btn btn-primary",
+            onclick: (event) => attachAgent(agent, event.currentTarget),
+          }, ["Start"]));
+        } else {
         actions.appendChild(makeEl("button", {
           class: "btn btn-ghost",
           onclick: async (event) => {
@@ -2009,10 +2056,7 @@
             btn.disabled = true;
             try {
               await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/start", {});
-              const message = isAttachedRuntime(agent)
-                ? "Waiting for @" + agent.name + " to attach…"
-                : "Starting @" + agent.name + "…";
-              showToast(message, "ok");
+              showToast("Starting @" + agent.name + "…", "ok");
               await loadStatus();
             } catch (err) {
               showToast(err.message || "Start failed", "err");
@@ -2021,6 +2065,7 @@
             }
           },
         }, ["Start"]));
+        }
       }
       drawerBody.appendChild(makeEl("section", { class: "drawer-section" }, [
         makeEl("div", { class: "drawer-label" }, ["Actions"]),
@@ -2035,6 +2080,20 @@
       ]));
       // If we already have cached activity (e.g. from previous polls), render it.
       renderDrawerActivity(state.drawerActivity);
+    }
+
+    function updateDrawerChrome(agent) {
+      if (!agent || String(agent.name || "") !== String(state.drawerAgentName || "")) return;
+      const status = friendlyStatus(agent);
+      drawerName.textContent = String(agent.name || "");
+      drawerDot.className = "dot tone-" + status.tone;
+      const statusLabel = document.getElementById("drawer-status-label");
+      if (statusLabel) statusLabel.textContent = status.label;
+      const statusBox = drawerBody.querySelector(".status-detail");
+      if (statusBox) {
+        statusBox.className = "status-detail " + (status.tone === "error" ? "error" : status.tone === "warning" ? "warning" : "");
+        statusBox.textContent = status.detail || "";
+      }
     }
 
     function renderDrawerActivity(activity) {
@@ -2060,7 +2119,7 @@
       const mailbox = mailboxStateLabel(agent);
       const mailboxKey = mailbox ? `${mailbox.title}|${mailbox.tone}` : "";
       const sigKey = sig + "|p=" + (processing ? 1 : 0) + "|m=" + mailboxKey;
-      if (sigKey === state.drawerActivityKey) return;
+      if (sigKey === state.drawerActivityKey && region.childElementCount > 0) return;
       state.drawerActivityKey = sigKey;
 
       clearChildren(region);

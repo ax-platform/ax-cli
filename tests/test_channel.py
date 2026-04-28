@@ -752,6 +752,7 @@ def test_channel_setup_writes_per_agent_mcp_and_env(tmp_path):
     assert payload["mcp_path"] == str(workdir / ".mcp.json")
     assert payload["cli_config_path"] == str(workdir / ".ax" / "config.toml")
     assert payload["cli_readme_path"] == str(workdir / ".ax" / "README.md")
+    assert payload["agent_context_path"] == str(workdir / ".ax" / "AGENT_CONTEXT.md")
     mcp = json.loads((workdir / ".mcp.json").read_text())
     server = mcp["mcpServers"]["ax-channel"]
     assert server["command"] == "axctl"
@@ -769,6 +770,11 @@ def test_channel_setup_writes_per_agent_mcp_and_env(tmp_path):
     cli_readme = (workdir / ".ax" / "README.md").read_text()
     assert "aX Claude Code Channel" in cli_readme
     assert "ax gateway local connect --workdir ." in cli_readme
+    agent_context = (workdir / ".ax" / "AGENT_CONTEXT.md").read_text()
+    assert "multi-user, multi-agent network" in agent_context
+    assert "Do not ask the user for a PAT" in agent_context
+    assert (workdir / "AGENTS.md").exists()
+    assert (workdir / "CLAUDE.md").exists()
 
 
 def test_channel_setup_uses_gateway_registry_defaults(monkeypatch, tmp_path):

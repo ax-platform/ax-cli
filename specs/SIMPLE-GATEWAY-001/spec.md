@@ -145,6 +145,21 @@ For pass-through/mailbox rows, use the more specific contract from
 
 Refreshing `/api/status` must not reset a queued message to `just now`.
 
+## Drawer refresh and local activity
+
+The local Gateway dashboard may poll local APIs instead of using SSE, but polling
+must feel stable:
+
+- opening a drawer may build the full drawer once;
+- subsequent `/api/agents/<name>` refreshes must update status, row state, and
+  activity in place instead of clearing/rebuilding the full drawer body;
+- users must be able to select and copy stable details such as workdir,
+  fingerprint chips, and command/path text while the drawer is open;
+- the activity section must retain existing cards while a refresh is in flight
+  and must only re-render when the activity signature actually changes;
+- row last-activity text must continue to summarize the latest meaningful
+  action while the drawer is open.
+
 ## System-agent visibility
 
 - `switchboard-*` agents are gateway internals (per-space inboxes), hidden by default.
