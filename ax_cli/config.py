@@ -13,6 +13,7 @@ import re
 import tomllib  # stdlib 3.11+
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import UUID
 
 import typer
 
@@ -803,10 +804,77 @@ def resolve_agent_name(*, explicit: str | None = None, client: AxClient | None =
     return None
 
 
+def _space_items(result: object) -> list[dict]:
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    if not isinstance(result, dict):
+        return []
+    for key in ("spaces", "items", "results"):
+        items = result.get(key)
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def _space_lookup_key(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    normalized = re.sub(r"[\s_]+", "-", normalized)
+    return re.sub(r"-+", "-", normalized).strip("-")
+
+
+def _is_uuid_like(value: str) -> bool:
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
 def resolve_space_id(client: AxClient, *, explicit: str | None = None) -> str:
     """Resolve space: explicit > env > config > bound agent default > auto-detect."""
     if explicit:
-        return explicit
+        ref = explicit.strip()
+        if not ref:
+            typer.echo("Error: Empty space value. Use a space id, slug, or name.", err=True)
+            raise typer.Exit(1)
+        if _is_uuid_like(ref):
+            return ref
+
+        spaces = _space_items(client.list_spaces())
+        needle = _space_lookup_key(ref)
+        matches = []
+        for space in spaces:
+            values = (
+                space.get("id"),
+                space.get("space_id"),
+                space.get("slug"),
+                space.get("name"),
+            )
+            if any(_space_lookup_key(value) == needle for value in values if value):
+                matches.append(space)
+
+        if not matches:
+            typer.echo(
+                f"Error: No visible space matched '{explicit}'. Use a space UUID or run `axctl spaces list`.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if len(matches) > 1:
+            candidates = ", ".join(
+                str(space.get("slug") or space.get("name") or space.get("id") or space.get("space_id"))
+                for space in matches[:5]
+            )
+            typer.echo(
+                f"Error: Space '{explicit}' matched multiple spaces ({candidates}). Use the space UUID.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        space_id = matches[0].get("id") or matches[0].get("space_id")
+        if not space_id:
+            typer.echo(f"Error: Matched space '{explicit}' did not include an id.", err=True)
+            raise typer.Exit(1)
+        return str(space_id)
     env = os.environ.get("AX_SPACE_ID")
     if env:
         return env
@@ -825,14 +893,14 @@ def resolve_space_id(client: AxClient, *, explicit: str | None = None) -> str:
 
     # Fallback: auto-detect from user's spaces
     spaces = client.list_spaces()
-    space_list = spaces if isinstance(spaces, list) else spaces.get("spaces", [])
+    space_list = _space_items(spaces)
     if len(space_list) == 1:
         return str(space_list[0].get("id", space_list[0].get("space_id")))
     if len(space_list) == 0:
         typer.echo("Error: No spaces found for this user.", err=True)
         raise typer.Exit(1)
     typer.echo(
-        "Error: Multiple spaces found. Use --space-id or set AX_SPACE_ID.",
+        "Error: Multiple spaces found. Use --space/--space-id or set AX_SPACE_ID.",
         err=True,
     )
     raise typer.Exit(1)

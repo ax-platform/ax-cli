@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+from click.exceptions import Exit
+
 from ax_cli import config as config_module
 from ax_cli.config import (
     _find_project_root,
@@ -12,6 +15,7 @@ from ax_cli.config import (
     resolve_agent_id,
     resolve_agent_name,
     resolve_base_url,
+    resolve_space_id,
     resolve_token,
     resolve_user_base_url,
     resolve_user_token,
@@ -196,9 +200,7 @@ class TestLoadConfig:
         assert cfg["principal_type"] == "agent"
         assert cfg["agent_name"] == "orion"
 
-    def test_unsafe_local_user_pat_agent_config_does_not_override_active_profile(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    def test_unsafe_local_user_pat_agent_config_does_not_override_active_profile(self, tmp_path, monkeypatch, capsys):
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         monkeypatch.setenv("AX_CONFIG_DIR", str(global_dir))
@@ -487,6 +489,57 @@ class TestResolveAgentName:
     def test_returns_none_when_not_set(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert resolve_agent_name() is None
+
+
+class TestResolveSpaceId:
+    def test_explicit_uuid_returns_without_listing_spaces(self):
+        class FakeClient:
+            def list_spaces(self):
+                raise AssertionError("UUID space refs should not require list_spaces")
+
+        assert resolve_space_id(FakeClient(), explicit="ed81ae98-50cb-4268-b986-1b9fe76df742") == (
+            "ed81ae98-50cb-4268-b986-1b9fe76df742"
+        )
+
+    def test_explicit_slug_resolves_to_space_id(self, monkeypatch):
+        monkeypatch.delenv("AX_SPACE_ID", raising=False)
+
+        class FakeClient:
+            def list_spaces(self):
+                return {
+                    "spaces": [
+                        {"id": "private-space", "slug": "madtank-workspace", "name": "madtank's Workspace"},
+                        {"id": "team-space", "slug": "ax-cli-dev", "name": "ax-cli-dev"},
+                    ]
+                }
+
+        assert resolve_space_id(FakeClient(), explicit="ax-cli-dev") == "team-space"
+
+    def test_explicit_name_resolves_case_insensitively(self, monkeypatch):
+        monkeypatch.delenv("AX_SPACE_ID", raising=False)
+
+        class FakeClient:
+            def list_spaces(self):
+                return {"spaces": [{"id": "team-space", "slug": "ax-cli-dev", "name": "aX CLI Dev"}]}
+
+        assert resolve_space_id(FakeClient(), explicit="AX CLI DEV") == "team-space"
+
+    def test_explicit_space_ref_fails_when_ambiguous(self, monkeypatch, capsys):
+        monkeypatch.delenv("AX_SPACE_ID", raising=False)
+
+        class FakeClient:
+            def list_spaces(self):
+                return {
+                    "spaces": [
+                        {"id": "space-1", "slug": "team", "name": "Team"},
+                        {"id": "space-2", "slug": "other", "name": "Team"},
+                    ]
+                }
+
+        with pytest.raises(Exit):
+            resolve_space_id(FakeClient(), explicit="team")
+
+        assert "matched multiple spaces" in capsys.readouterr().err
 
 
 class TestResolveToken:

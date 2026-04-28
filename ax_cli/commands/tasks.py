@@ -11,6 +11,7 @@ from ..config import get_client, resolve_space_id
 from ..output import JSON_OPTION, console, handle_error, mention_prefix, print_json, print_kv, print_table
 
 app = typer.Typer(name="tasks", help="Task operations", no_args_is_help=True)
+SPACE_OPTION = typer.Option(None, "--space", "--space-id", "-s", help="Target space id, slug, or name")
 
 
 def _agent_items(result: object) -> list[dict]:
@@ -32,6 +33,48 @@ def _agent_names(agent: dict) -> set[str]:
         if isinstance(value, str) and value.strip():
             names.add(value.strip().lower().removeprefix("@"))
     return names
+
+
+def _space_items(result: object) -> list[dict]:
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    if not isinstance(result, dict):
+        return []
+    for key in ("spaces", "items", "results"):
+        items = result.get(key)
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def _space_summary(client, space_id: str) -> dict[str, str]:
+    try:
+        spaces = _space_items(client.list_spaces())
+    except Exception:
+        return {"id": space_id, "label": space_id}
+
+    for space in spaces:
+        sid = str(space.get("id") or space.get("space_id") or "")
+        if sid == space_id:
+            slug = space.get("slug")
+            name = space.get("name")
+            label = str(slug or name or sid)
+            result = {"id": sid, "label": label}
+            if slug:
+                result["slug"] = str(slug)
+            if name:
+                result["name"] = str(name)
+            return result
+    return {"id": space_id, "label": space_id}
+
+
+def _annotate_task_space(task: dict[str, Any], space: dict[str, str]) -> dict[str, Any]:
+    task.setdefault("space_id", space["id"])
+    if space.get("slug"):
+        task.setdefault("space_slug", space["slug"])
+    if space.get("name"):
+        task.setdefault("space_name", space["name"])
+    return task
 
 
 def _resolve_assignee_id(client, assignee: str | None, *, space_id: str) -> str | None:
@@ -173,12 +216,13 @@ def create(
         True, "--notify/--no-notify", help="Send a message notifying the team about the new task"
     ),
     mention: Optional[str] = typer.Option(None, "--mention", help="@mention a user or agent in the task notification"),
-    space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
+    space: Optional[str] = SPACE_OPTION,
     as_json: bool = JSON_OPTION,
 ):
     """Create a task and optionally notify the team."""
     client = get_client()
-    sid = resolve_space_id(client, explicit=space_id)
+    sid = resolve_space_id(client, explicit=space)
+    space_info = _space_summary(client, sid)
     assignee_id = _resolve_assignee_id(client, assign_to, space_id=sid)
     try:
         data = client.create_task(
@@ -191,11 +235,16 @@ def create(
     except httpx.HTTPStatusError as e:
         handle_error(e)
     task = data.get("task", data)
+    if isinstance(task, dict):
+        task = _annotate_task_space(task, space_info)
     tid = str(task.get("id", ""))[:8]
     if as_json:
         print_json(task)
     else:
-        console.print(f'[green]Created:[/green] "{task.get("title")}" (id={tid}…, priority={task.get("priority")})')
+        console.print(
+            f'[green]Created:[/green] "{task.get("title")}" '
+            f"(id={tid}…, priority={task.get('priority')}) in {space_info['label']} ({sid})"
+        )
 
     if notify:
         try:
@@ -227,20 +276,26 @@ def create(
 @app.command("list")
 def list_tasks(
     limit: int = typer.Option(20, "--limit", help="Max tasks to return"),
-    space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
+    space: Optional[str] = SPACE_OPTION,
     as_json: bool = JSON_OPTION,
 ):
     """List tasks."""
     client = get_client()
-    sid = resolve_space_id(client, explicit=space_id)
+    sid = resolve_space_id(client, explicit=space)
+    space_info = _space_summary(client, sid)
     try:
         data = client.list_tasks(limit=limit, space_id=sid)
     except httpx.HTTPStatusError as e:
         handle_error(e)
     tasks = data if isinstance(data, list) else data.get("tasks", [])
     if as_json:
+        if isinstance(tasks, list):
+            for task in tasks:
+                if isinstance(task, dict):
+                    _annotate_task_space(task, space_info)
         print_json(tasks)
     else:
+        console.print(f"[dim]Space: {space_info['label']} ({sid})[/dim]")
         print_table(
             ["ID", "Title", "Status", "Priority"],
             tasks,
