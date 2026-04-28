@@ -34,6 +34,8 @@ except ImportError:
     print("Error: httpx required. pip install httpx")
     sys.exit(1)
 
+from ax_cli.mentions import merge_explicit_mentions_metadata
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -259,6 +261,7 @@ class AxAPI:
         }
         if parent_id:
             body["parent_id"] = parent_id
+        metadata = merge_explicit_mentions_metadata(metadata, content, exclude=[self.agent_name])
         if metadata is not None:
             body["metadata"] = metadata
         try:
