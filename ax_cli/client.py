@@ -741,8 +741,7 @@ class AxClient:
         if actual_space_id:
             if str(actual_space_id) != str(expected_space_id):
                 raise RuntimeError(
-                    "Task was created in the wrong space: "
-                    f"expected {expected_space_id}, got {actual_space_id}."
+                    f"Task was created in the wrong space: expected {expected_space_id}, got {actual_space_id}."
                 )
             return
 
