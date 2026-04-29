@@ -125,7 +125,17 @@ def test_channel_sends_with_agent_bound_pat():
         )
     )
 
-    assert client.sent == [{"space_id": "space-123", "content": "hello", "parent_id": "incoming-123"}]
+    assert client.sent == [
+        {
+            "space_id": "space-123",
+            "content": "hello",
+            "parent_id": "incoming-123",
+            "metadata": {
+                "top_level_ingress": False,
+                "routing": {"mode": "reply_target", "source": "channel_reply"},
+            },
+        }
+    ]
     assert client.processing_statuses == [
         {
             "message_id": "incoming-123",
@@ -137,6 +147,21 @@ def test_channel_sends_with_agent_bound_pat():
     result = bridge.writes[0]["result"]
     assert result["content"][0]["text"] == "sent reply to incoming-123 (msg-123)"
     assert "msg-123" in bridge._reply_anchor_ids
+
+
+def test_channel_reply_preserves_explicit_mentions_for_routing():
+    client = FakeClient("axp_a_AgentKey.Secret")
+    bridge = CaptureBridge(client)
+    bridge._last_message_id = "incoming-123"
+
+    asyncio.run(
+        bridge.handle_tool_call(
+            1,
+            {"name": "reply", "arguments": {"text": "@nemotron can you check this with @peer-agent?"}},
+        )
+    )
+
+    assert client.sent[0]["metadata"]["mentions"] == ["nemotron"]
 
 
 def test_channel_can_publish_working_status_on_delivery():
