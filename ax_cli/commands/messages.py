@@ -146,9 +146,7 @@ def _gateway_local_call(
                     action=f"call {method}",
                 )
             )
-        raise typer.BadParameter(
-            f"Gateway local session is {status}; approve the agent before calling {method}."
-        )
+        raise typer.BadParameter(f"Gateway local session is {status}; approve the agent before calling {method}.")
     body = {"method": method, "args": dict(args or {})}
     try:
         response = httpx.post(
@@ -978,9 +976,7 @@ def list_messages(
             args["unread_only"] = True
         if mark_read:
             args["mark_read"] = True
-        data = _gateway_local_call(
-            gateway_cfg=gateway_cfg, method="list_messages", args=args, space_id=space_id
-        )
+        data = _gateway_local_call(gateway_cfg=gateway_cfg, method="list_messages", args=args, space_id=space_id)
     else:
         client = get_client()
         sid = resolve_space_id(client, explicit=space_id)
