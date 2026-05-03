@@ -71,4 +71,10 @@ def handle_error(e: httpx.HTTPStatusError):
             detail = body
     typer.echo(f"Error {e.response.status_code}: {detail}", err=True)
     typer.echo(f"  URL: {url}", err=True)
+    if e.response.status_code in (401, 429) and url.endswith("/auth/exchange"):
+        typer.echo(
+            "  Hint: run `ax auth doctor` to inspect the resolved credential and "
+            "follow the suggested next step (often `ax login --env <env>`).",
+            err=True,
+        )
     raise typer.Exit(1)
