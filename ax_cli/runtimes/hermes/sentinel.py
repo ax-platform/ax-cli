@@ -453,6 +453,7 @@ def _build_claude_cmd(message: str, workdir: str, args,
     cmd = [
         "claude", "-p",
         "--output-format", "stream-json",
+        "--verbose",
         "--dangerously-skip-permissions",
         "--add-dir", "/home/ax-agent/shared/repos",
     ]

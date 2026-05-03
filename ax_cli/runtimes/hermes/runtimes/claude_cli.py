@@ -34,6 +34,7 @@ class ClaudeCLIRuntime(BaseRuntime):
         cmd = [
             "claude", "-p",
             "--output-format", "stream-json",
+            "--verbose",
             "--dangerously-skip-permissions",
         ]
         if extra.get("add_dir"):
