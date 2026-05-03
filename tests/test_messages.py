@@ -114,6 +114,9 @@ def test_send_uses_gateway_native_identity_without_space_override(monkeypatch):
         posts.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         if url.endswith("/local/connect"):
             return FakeResponse({"session_token": "gw-session", "status": "approved", "agent": {"name": "mac-backend"}})
+        if url.endswith("/local/proxy"):
+            # Pre-send pending-reply check goes through /local/proxy; return empty.
+            return FakeResponse({"result": {"messages": []}})
         if url.endswith("/local/send"):
             assert headers == {"X-Gateway-Session": "gw-session"}
             return FakeResponse(
@@ -139,8 +142,12 @@ def test_send_uses_gateway_native_identity_without_space_override(monkeypatch):
     result = runner.invoke(app, ["send", "hello from backend", "--no-wait", "--json"])
 
     assert result.exit_code == 0, result.output
-    assert posts[0]["json"] == {"fingerprint": {"fingerprint": "fp"}, "agent_name": "mac-backend"}
-    assert posts[1]["json"] == {"content": "hello from backend", "space_id": None, "parent_id": None}
+    connects = [p for p in posts if p["url"].endswith("/local/connect")]
+    sends = [p for p in posts if p["url"].endswith("/local/send")]
+    assert connects, "expected at least one /local/connect call"
+    assert connects[0]["json"] == {"fingerprint": {"fingerprint": "fp"}, "agent_name": "mac-backend"}
+    assert len(sends) == 1
+    assert sends[0]["json"] == {"content": "hello from backend", "space_id": None, "parent_id": None}
     payload = json.loads(result.output)
     assert payload["message"]["id"] == "msg-1"
 

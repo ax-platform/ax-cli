@@ -4459,18 +4459,26 @@ def test_gateway_local_send_auto_connects_with_agent(monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert calls[0]["url"].endswith("/local/connect")
-    assert calls[0]["json"]["agent_name"] == "codex-pass-through"
-    assert calls[1]["url"].endswith("/local/send")
-    assert calls[1]["headers"] == {"X-Gateway-Session": "axgw_s_test.session"}
-    assert calls[1]["json"]["content"] == "@night-owl please QA PR 114"
-    assert calls[2]["method"] == "GET"
-    assert calls[2]["url"].endswith("/local/inbox")
-    assert calls[2]["params"]["mark_read"] == "true"
+    connects = [c for c in calls if c.get("url", "").endswith("/local/connect")]
+    sends = [c for c in calls if c.get("url", "").endswith("/local/send")]
+    inbox_gets = [c for c in calls if c.get("method") == "GET" and c.get("url", "").endswith("/local/inbox")]
+    assert connects and connects[0]["json"]["agent_name"] == "codex-pass-through"
+    assert len(sends) == 1
+    assert sends[0]["headers"] == {"X-Gateway-Session": "axgw_s_test.session"}
+    assert sends[0]["json"]["content"] == "@night-owl please QA PR 114"
+    # Pre-send pending-reply check must NOT mark messages read; post-send inbox poll must.
+    pre_send = [g for g in inbox_gets if g["params"].get("mark_read") == "false"]
+    post_send = [g for g in inbox_gets if g["params"].get("mark_read") == "true"]
+    assert pre_send, "expected pre-send pending-reply check via /local/inbox with mark_read=false"
+    assert post_send, "expected post-send inbox poll via /local/inbox with mark_read=true"
     payload = json.loads(result.output)
     assert payload["agent"] == "codex-pass-through"
     assert payload["connect"]["agent"] == "codex-pass-through"
     assert payload["inbox"]["messages"][0]["content"] == "@codex-pass-through received"
+    # Pending-reply receipt fields are present (zero in this test since fake_get returns one msg only after send).
+    assert "pending_reply_count" in payload
+    assert "pending_reply_message_ids" in payload
+    assert "pending_reply_newest_senders" in payload
 
 
 def test_gateway_local_send_can_skip_inbox_check(monkeypatch):

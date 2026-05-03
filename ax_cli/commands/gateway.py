@@ -6082,6 +6082,87 @@ def _resolve_local_gateway_session(
     return token, payload
 
 
+def _print_pending_reply_warning_local(
+    pending: dict,
+    *,
+    target_inbox_cmd: str = "ax gateway local inbox",
+) -> None:
+    """Surface a non-blocking warning if pending unread messages exist for the local sender."""
+    if not isinstance(pending, dict):
+        return
+    count = pending.get("count", 0) or 0
+    if not count:
+        return
+    senders = pending.get("newest_senders", []) or []
+    sender_blurb = ""
+    if senders:
+        if len(senders) == 1:
+            sender_blurb = f", newest from @{senders[0]}"
+        else:
+            extras = len(senders) - 1
+            sender_blurb = f", newest from @{senders[0]} (+{extras} other{'s' if extras != 1 else ''})"
+    plural = "y" if count == 1 else "ies"
+    console.print(
+        f"[yellow]\u26a0 {count} pending repl{plural} addressed to you{sender_blurb}. "
+        f"Review with: {target_inbox_cmd}[/yellow]"
+    )
+
+
+def _check_local_pending_replies(
+    *,
+    gateway_url: str,
+    session_token: str,
+    space_id: str | None = None,
+    limit: int = 5,
+) -> dict:
+    """Non-blocking pre-send check via /local/inbox; mirrors messages.check_pending_replies shape.
+
+    Always returns the empty/zero shape on any error — never raises. The local
+    inbox check uses ``mark_read=False`` so the user's unread state is unchanged
+    by the warning surface.
+    """
+    empty: dict = {"count": 0, "message_ids": [], "newest_senders": []}
+    try:
+        payload = _poll_local_inbox_over_http(
+            gateway_url=gateway_url,
+            session_token=session_token,
+            limit=limit,
+            space_id=space_id,
+            mark_read=False,
+            wait_seconds=0,
+        )
+    except Exception:
+        return empty
+    if not isinstance(payload, dict):
+        return empty
+    messages = payload.get("messages") or []
+    if not isinstance(messages, list) or not messages:
+        return empty
+    ids: list[str] = []
+    senders: list[str] = []
+    seen: set[str] = set()
+    for m in messages[:limit]:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or "").strip()
+        if mid:
+            ids.append(mid)
+        sender = (
+            m.get("display_name")
+            or m.get("agent_name")
+            or m.get("sender")
+            or m.get("sender_name")
+            or ""
+        )
+        sender = str(sender).strip()
+        if sender and sender not in seen:
+            senders.append(sender)
+            seen.add(sender)
+    raw_count = payload.get("unread_count")
+    count = raw_count if isinstance(raw_count, int) else len(messages)
+    return {"count": count, "message_ids": ids, "newest_senders": senders}
+
+
 def _poll_local_inbox_over_http(
     *,
     gateway_url: str,
@@ -6159,6 +6240,13 @@ def local_send(
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+    pending = _check_local_pending_replies(
+        gateway_url=gateway_url,
+        session_token=resolved_session_token,
+        space_id=space_id,
+    )
+
     body = {"content": content, "space_id": space_id, "parent_id": parent_id}
     try:
         response = httpx.post(
@@ -6197,6 +6285,9 @@ def local_send(
             payload["inbox_error"] = detail
         except Exception as exc:
             payload["inbox_error"] = str(exc)
+    payload["pending_reply_count"] = pending.get("count", 0)
+    payload["pending_reply_message_ids"] = list(pending.get("message_ids", []))
+    payload["pending_reply_newest_senders"] = list(pending.get("newest_senders", []))
     if as_json:
         if connect_payload:
             payload["connect"] = {
@@ -6209,6 +6300,7 @@ def local_send(
         print_json(payload)
         return
     console.print(f"[green]Sent through Gateway[/green] as @{payload.get('agent')}")
+    _print_pending_reply_warning_local(pending)
     inbox_payload = payload.get("inbox") if isinstance(payload.get("inbox"), dict) else {}
     messages = inbox_payload.get("messages") if isinstance(inbox_payload, dict) else []
     if messages:
