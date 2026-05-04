@@ -45,6 +45,7 @@ from ..gateway import (
     GatewayDaemon,
     _format_daemon_log_line,
     _is_passive_runtime,
+    _is_system_agent,
     active_gateway_pid,
     active_gateway_pids,
     active_gateway_ui_pid,
@@ -1237,10 +1238,56 @@ def _set_managed_agent_desired_state(name: str, desired_state: str) -> dict:
     return annotate_runtime_health(entry, registry=registry)
 
 
-def _remove_managed_agent(name: str) -> dict:
+def _build_session_client_silent() -> AxClient | None:
+    """Build a user-PAT session client without raising. Returns None when
+    the gateway is not logged in or the session token is missing/invalid.
+
+    Used for best-effort upstream calls during local cleanup paths where a
+    missing session must not abort the command.
+    """
+    session = load_gateway_session()
+    if not session:
+        return None
+    token = str(session.get("token") or "")
+    if not token:
+        return None
+    try:
+        return AxClient(
+            base_url=str(session.get("base_url") or auth_cmd.DEFAULT_LOGIN_BASE_URL),
+            token=token,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _remove_managed_agent(name: str, *, client_factory=None) -> dict:
     registry = load_gateway_registry()
+    peek = find_agent_entry(registry, name)
+    if not peek:
+        raise LookupError(f"Managed agent not found: {name}")
+    # Best-effort upstream delete BEFORE local removal so the platform-side
+    # record can be retired in lockstep. Missing session, 404, or network
+    # failure are recorded as audit events but never block the local
+    # removal — the local registry is authoritative for the gateway.
+    agent_id = str(peek.get("agent_id") or "").strip()
+    if agent_id:
+        user_client = (
+            client_factory()
+            if client_factory is not None
+            else _build_session_client_silent()
+        )
+        if user_client is not None:
+            try:
+                user_client.delete_agent(agent_id)
+            except Exception as exc:  # noqa: BLE001
+                record_gateway_activity(
+                    "managed_agent_remove_upstream_failed",
+                    entry=peek,
+                    error=str(exc)[:360],
+                )
     entry = remove_agent_entry(registry, name)
     if not entry:
+        # Should be unreachable since peek succeeded; defensive only.
         raise LookupError(f"Managed agent not found: {name}")
     save_gateway_registry(registry)
     archive_stale_gateway_approvals()
@@ -1492,15 +1539,28 @@ def _no_invoking_principal_error() -> ValueError:
     )
 
 
-def _status_payload(*, activity_limit: int = 10) -> dict:
+def _status_payload(*, activity_limit: int = 10, include_hidden: bool = False) -> dict:
     daemon = daemon_status()
     ui = ui_status()
     session = load_gateway_session()
     registry = daemon["registry"]
-    agents = [
+    all_agents = [
         _with_registry_refs(registry, annotate_runtime_health(agent, registry=registry))
         for agent in registry.get("agents", [])
     ]
+    # Partition out hidden + system agents so default surfaces stay tidy.
+    # System agents (switchboards, service accounts) are infrastructure
+    # plumbing; hidden agents are stale ones the daemon swept away.
+    hidden_agents_list = [
+        a for a in all_agents
+        if str(a.get("lifecycle_phase") or "active") == "hidden"
+    ]
+    system_agents_list = [a for a in all_agents if _is_system_agent(a)]
+    visible_agents = [
+        a for a in all_agents
+        if a not in hidden_agents_list and a not in system_agents_list
+    ]
+    agents = all_agents if include_hidden else visible_agents
     approvals = list_gateway_approvals()
     pending_approvals = [item for item in approvals if str(item.get("status") or "") == "pending"]
     live_agents = [a for a in agents if str(a.get("mode") or "") == "LIVE"]
@@ -1567,6 +1627,8 @@ def _status_payload(*, activity_limit: int = 10) -> dict:
             "errored_agents": len(errored_agents),
             "low_confidence_agents": len(low_confidence_agents),
             "blocked_agents": len(blocked_agents),
+            "hidden_agents": len(hidden_agents_list),
+            "system_agents": len(system_agents_list),
             "pending_approvals": len(pending_approvals),
         },
     }
@@ -4423,7 +4485,12 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                 self.wfile.write(body)
                 return
             if parsed.path == "/api/status":
-                _write_json_response(self, _status_payload(activity_limit=activity_limit))
+                query = parse_qs(parsed.query)
+                include_hidden = str((query.get("all") or ["0"])[0] or "0").lower() in {"1", "true", "yes"}
+                _write_json_response(
+                    self,
+                    _status_payload(activity_limit=activity_limit, include_hidden=include_hidden),
+                )
                 return
             if parsed.path == "/local/inbox":
                 query = parse_qs(parsed.query)
@@ -5145,9 +5212,17 @@ def activity(
 
 
 @app.command("status")
-def status(as_json: bool = JSON_OPTION):
+def status(
+    as_json: bool = JSON_OPTION,
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Include hidden (auto-swept stale) and system (switchboard / service-account) agents.",
+    ),
+):
     """Show Gateway status, daemon state, and managed runtimes."""
-    payload = _status_payload()
+    payload = _status_payload(include_hidden=show_all)
     if as_json:
         print_json(payload)
         return
@@ -5171,6 +5246,12 @@ def status(as_json: bool = JSON_OPTION):
     err_console.print(f"  live        = {payload['summary']['live_agents']}")
     err_console.print(f"  on_demand   = {payload['summary']['on_demand_agents']}")
     err_console.print(f"  inbox       = {payload['summary']['inbox_agents']}")
+    hidden_n = payload["summary"].get("hidden_agents", 0)
+    system_n = payload["summary"].get("system_agents", 0)
+    if hidden_n or system_n:
+        hint = "" if show_all else "  (run with --all to include)"
+        err_console.print(f"  hidden      = {hidden_n}{hint}")
+        err_console.print(f"  system      = {system_n}")
     err_console.print(f"  alerts      = {payload['summary'].get('alert_count', 0)}")
     err_console.print(f"  approvals   = {payload['summary'].get('pending_approvals', 0)} pending")
     if payload.get("alerts"):
@@ -5608,11 +5689,19 @@ def watch(
     interval: float = typer.Option(2.0, "--interval", "-n", help="Dashboard refresh interval in seconds"),
     activity_limit: int = typer.Option(8, "--activity-limit", help="Number of recent events to display"),
     once: bool = typer.Option(False, "--once", help="Render one dashboard frame and exit"),
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Include hidden (auto-swept stale) and system (switchboard / service-account) agents.",
+    ),
 ):
     """Watch the Gateway in a live terminal dashboard."""
 
     def render_dashboard() -> Group:
-        return _render_gateway_dashboard(_status_payload(activity_limit=activity_limit))
+        return _render_gateway_dashboard(
+            _status_payload(activity_limit=activity_limit, include_hidden=show_all)
+        )
 
     if once:
         console.print(render_dashboard())
@@ -6514,17 +6603,37 @@ def update_agent(
 
 
 @agents_app.command("list")
-def list_agents(as_json: bool = JSON_OPTION):
+def list_agents(
+    as_json: bool = JSON_OPTION,
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Include hidden (auto-swept stale) and system (switchboard / service-account) agents.",
+    ),
+):
     """List Gateway-managed agents."""
-    agents = _status_payload()["agents"]
+    payload = _status_payload(include_hidden=show_all)
+    agents = payload["agents"]
     if as_json:
-        print_json({"agents": agents, "count": len(agents)})
+        print_json({
+            "agents": agents,
+            "count": len(agents),
+            "hidden": payload["summary"].get("hidden_agents", 0),
+            "system": payload["summary"].get("system_agents", 0),
+        })
         return
     print_table(
         ["Ref", "Agent", "Type", "Mode", "Presence", "Output", "Confidence", "Space"],
         [{**agent, "type": _agent_type_label(agent), "output": _agent_output_label(agent)} for agent in agents],
         keys=["registry_ref", "name", "type", "mode", "presence", "output", "confidence", "space_id"],
     )
+    hidden_n = payload["summary"].get("hidden_agents", 0)
+    system_n = payload["summary"].get("system_agents", 0)
+    if not show_all and (hidden_n or system_n):
+        err_console.print(
+            f"[dim]({hidden_n} hidden, {system_n} system — pass --all to include)[/dim]"
+        )
 
 
 @agents_app.command("show")

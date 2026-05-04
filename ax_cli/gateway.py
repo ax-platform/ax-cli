@@ -53,6 +53,8 @@ DEFAULT_HANDLER_TIMEOUT_SECONDS = 900
 MIN_HANDLER_TIMEOUT_SECONDS = 1
 SSE_IDLE_TIMEOUT_SECONDS = 45.0
 RUNTIME_STALE_AFTER_SECONDS = 75.0
+RUNTIME_HIDDEN_AFTER_SECONDS = 15 * 60.0  # default: hide stale agents after 15 min
+_LIFECYCLE_PHASES = {"active", "hidden"}
 LOCAL_SESSION_TTL_SECONDS = 24 * 60 * 60
 GATEWAY_EVENT_PREFIX = "AX_GATEWAY_EVENT "
 DEFAULT_OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -438,6 +440,42 @@ def _template_operator_defaults(template_id: str | None, runtime_type: object) -
     return dict(
         defaults_by_template.get(template_key) or defaults_by_runtime.get(runtime_key) or defaults_by_runtime["exec"]
     )
+
+
+def _is_system_agent(entry: dict[str, Any]) -> bool:
+    """Identify infrastructure agents exempt from lifecycle cleanup.
+
+    Per-space switchboards and explicit service accounts are gateway
+    plumbing, not user-managed agents — they should be hidden from default
+    listings and never auto-archived.
+    """
+    template_id = str(entry.get("template_id") or "").strip().lower()
+    if template_id in {"service_account", "inbox"}:
+        return True
+    name = str(entry.get("name") or "")
+    if name.startswith("switchboard-"):
+        return True
+    return False
+
+
+def _hide_after_stale_seconds(registry: dict[str, Any] | None = None) -> float:
+    """Resolve the stale-to-hidden threshold (env > registry > default)."""
+    env_raw = os.environ.get("AX_GATEWAY_HIDE_AFTER_STALE_SECONDS", "").strip()
+    if env_raw:
+        try:
+            return max(0.0, float(env_raw))
+        except ValueError:
+            pass
+    if isinstance(registry, dict):
+        gw = registry.get("gateway") or {}
+        if isinstance(gw, dict):
+            raw = gw.get("hide_after_stale_seconds")
+            if raw is not None:
+                try:
+                    return max(0.0, float(raw))
+                except (TypeError, ValueError):
+                    pass
+    return RUNTIME_HIDDEN_AFTER_SECONDS
 
 
 def _template_asset_defaults(template_id: str | None, runtime_type: object) -> dict[str, Any]:
@@ -3349,6 +3387,35 @@ def _apply_placement_event(
     }
 
 
+def _post_lifecycle_signal(
+    client: Any,
+    entry: dict[str, Any],
+    *,
+    phase: str,
+    note: str | None = None,
+) -> bool:
+    """Best-effort POST /api/v1/agents/heartbeat with status=<phase>.
+
+    Used to inform the aX platform when a gateway-managed agent crosses a
+    lifecycle threshold (connected/stale/offline/setup_error). 404 means the
+    platform has no record of this agent_id — treat as success so we don't
+    retry forever. Returns True iff a signal was sent (or 404'd).
+    """
+    if client is None:
+        return False
+    agent_id = str(entry.get("agent_id") or "").strip()
+    if not agent_id:
+        return False
+    try:
+        client.send_heartbeat(agent_id=agent_id, status=phase, note=note)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code == 404:
+            return True
+        return False
+
+
 def _post_placement_ack(
     client: Any,
     entry: dict[str, Any],
@@ -5608,6 +5675,101 @@ class GatewayDaemon:
         )
         return registry
 
+    def _sweep_client(self, session: dict[str, Any] | None) -> Any | None:
+        """Build a session-bound client for upstream lifecycle signals.
+
+        Returns None if the session is missing or client construction fails;
+        local sweep work continues either way.
+        """
+        if not session:
+            return None
+        token = session.get("token")
+        if not token:
+            return None
+        try:
+            return self.client_factory(
+                base_url=session.get("base_url"),
+                token=token,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _sweep_lifecycle(
+        self,
+        registry: dict[str, Any],
+        *,
+        session: dict[str, Any] | None,
+    ) -> None:
+        """Per-tick sweep: hide stale agents, signal liveness transitions upstream.
+
+        - Skips system agents (switchboards, service accounts).
+        - Promotes active+stale entries past the hide threshold to lifecycle_phase=hidden.
+        - Auto-restores hidden entries that have come back online.
+        - On any liveness delta vs last_lifecycle_signal.phase, calls
+          send_heartbeat upstream best-effort. 404 counts as success.
+        """
+        agents = registry.get("agents") or []
+        if not agents:
+            return
+        threshold = _hide_after_stale_seconds(registry)
+        client = self._sweep_client(session)
+        for entry in agents:
+            if not isinstance(entry, dict):
+                continue
+            if _is_system_agent(entry):
+                continue
+            liveness = str(entry.get("liveness") or "").strip().lower()
+            age_raw = entry.get("last_seen_age_seconds")
+            try:
+                age = float(age_raw) if age_raw is not None else None
+            except (TypeError, ValueError):
+                age = None
+            phase = str(entry.get("lifecycle_phase") or "active").strip().lower()
+            if phase not in _LIFECYCLE_PHASES:
+                phase = "active"
+
+            # Hide transition: active → hidden once stale past threshold.
+            if (
+                phase == "active"
+                and liveness in {"stale", "offline", "setup_error"}
+                and age is not None
+                and age >= threshold
+            ):
+                entry["lifecycle_phase"] = "hidden"
+                entry["hidden_at"] = _now_iso()
+                entry["hidden_reason"] = liveness
+                record_gateway_activity(
+                    "managed_agent_hidden", entry=entry, reason=liveness
+                )
+                phase = "hidden"
+
+            # Auto-restore: hidden → active when reconnected and fresh.
+            elif (
+                phase == "hidden"
+                and liveness == "connected"
+                and (age is None or age <= RUNTIME_STALE_AFTER_SECONDS)
+            ):
+                entry["lifecycle_phase"] = "active"
+                entry.pop("hidden_at", None)
+                entry.pop("hidden_reason", None)
+                record_gateway_activity("managed_agent_unhidden", entry=entry)
+                phase = "active"
+
+            # Upstream signal on liveness delta. Sticky liveness rate-limits.
+            if liveness in {"connected", "stale", "offline", "setup_error"}:
+                last_signal = entry.get("last_lifecycle_signal") or {}
+                if not isinstance(last_signal, dict):
+                    last_signal = {}
+                prev_phase = str(last_signal.get("phase") or "").strip().lower()
+                if liveness != prev_phase:
+                    sent = _post_lifecycle_signal(client, entry, phase=liveness)
+                    if sent:
+                        entry["last_lifecycle_signal"] = {
+                            "phase": liveness,
+                            "at": _now_iso(),
+                            "agent_id": str(entry.get("agent_id") or ""),
+                        }
+
     def run(self, *, once: bool = False) -> None:
         session = load_gateway_session()
         if not session:
@@ -5642,6 +5804,7 @@ class GatewayDaemon:
             while not self._stop.is_set():
                 registry = load_gateway_registry()
                 registry = self._reconcile_registry(registry, session)
+                self._sweep_lifecycle(registry, session=session)
                 save_gateway_registry(registry)
                 if once:
                     break

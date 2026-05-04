@@ -4957,3 +4957,313 @@ def test_gateway_activity_command_does_not_emit_credentials(monkeypatch, tmp_pat
     )
     result = runner.invoke(app, ["gateway", "activity", "--message-id", "msg-1", "--json"])
     assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# Gateway lifecycle v1: hide-stale sweep + upstream transition signals.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingHeartbeatClient:
+    """Records send_heartbeat / delete_agent calls for assertion."""
+
+    def __init__(self, *, fail_with: Exception | None = None,
+                 fail_status_code: int | None = None):
+        self.heartbeats: list[dict] = []
+        self.deletes: list[str] = []
+        self._fail_with = fail_with
+        self._fail_status_code = fail_status_code
+
+    def send_heartbeat(self, *, agent_id=None, status=None, note=None,
+                       cadence_seconds=None):
+        self.heartbeats.append({
+            "agent_id": agent_id,
+            "status": status,
+            "note": note,
+            "cadence_seconds": cadence_seconds,
+        })
+        if self._fail_with is not None:
+            exc = self._fail_with
+            if self._fail_status_code is not None:
+                resp = type("R", (), {"status_code": self._fail_status_code})()
+                setattr(exc, "response", resp)
+            raise exc
+        return {"ok": True}
+
+    def delete_agent(self, identifier):
+        self.deletes.append(identifier)
+        if self._fail_with is not None:
+            raise self._fail_with
+        return {"ok": True, "id": identifier}
+
+
+def _stale_hermes_entry(name: str, *, age_seconds: float, liveness: str = "stale",
+                        agent_id: str = "agent-stale-1") -> dict:
+    return {
+        "name": name,
+        "agent_id": agent_id,
+        "space_id": "space-test",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": liveness,
+        "last_seen_age_seconds": age_seconds,
+        "last_seen_at": gateway_core._now_iso(),
+    }
+
+
+def _build_daemon(client) -> gateway_core.GatewayDaemon:
+    return gateway_core.GatewayDaemon(
+        client_factory=lambda **_: client,
+        poll_interval=0.0,
+    )
+
+
+def _isolate_gateway_paths(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+
+
+def test_sweep_hides_stale_agent_after_threshold(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("AX_GATEWAY_HIDE_AFTER_STALE_SECONDS", raising=False)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-old", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test", "base_url": "http://x"})
+    assert entry["lifecycle_phase"] == "hidden"
+    assert "hidden_at" in entry
+    assert entry["hidden_reason"] == "stale"
+    recent = gateway_core.load_recent_gateway_activity()
+    assert any(r.get("event") == "managed_agent_hidden" for r in recent)
+
+
+def test_sweep_idempotent_for_already_hidden(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-old", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    session = {"token": "axp_u_test", "base_url": "http://x"}
+    daemon._sweep_lifecycle(registry, session=session)
+    daemon._sweep_lifecycle(registry, session=session)
+    hidden_events = [
+        r for r in gateway_core.load_recent_gateway_activity()
+        if r.get("event") == "managed_agent_hidden"
+    ]
+    assert len(hidden_events) == 1
+    assert len(client.heartbeats) == 1
+
+
+def test_sweep_skips_switchboard(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = {
+        "name": "switchboard-deadbeef",
+        "agent_id": "agent-switchboard",
+        "template_id": "inbox",
+        "effective_state": "running",
+        "liveness": "stale",
+        "last_seen_age_seconds": 24 * 60 * 60,
+    }
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    assert entry.get("lifecycle_phase", "active") == "active"
+    assert client.heartbeats == []
+
+
+def test_sweep_skips_service_account(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = {
+        "name": "system-events",
+        "agent_id": "agent-service",
+        "template_id": "service_account",
+        "effective_state": "running",
+        "liveness": "offline",
+        "last_seen_age_seconds": 24 * 60 * 60,
+    }
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    assert entry.get("lifecycle_phase", "active") == "active"
+    assert client.heartbeats == []
+
+
+def test_sweep_unhides_on_reconnect(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-back", age_seconds=2.0, liveness="connected")
+    entry["lifecycle_phase"] = "hidden"
+    entry["hidden_at"] = gateway_core._now_iso()
+    entry["hidden_reason"] = "stale"
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    assert entry["lifecycle_phase"] == "active"
+    assert "hidden_at" not in entry
+    assert "hidden_reason" not in entry
+    recent = gateway_core.load_recent_gateway_activity()
+    assert any(r.get("event") == "managed_agent_unhidden" for r in recent)
+
+
+def test_status_payload_filters_hidden_by_default(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    hidden = _stale_hermes_entry("hermes-hidden", age_seconds=30 * 60, liveness="offline",
+                                 agent_id="agent-hidden")
+    hidden["lifecycle_phase"] = "hidden"
+    active = {
+        "name": "hermes-live",
+        "agent_id": "agent-live",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": "connected",
+        "last_seen_age_seconds": 5.0,
+        "last_seen_at": gateway_core._now_iso(),
+    }
+    gateway_core.save_gateway_registry({"agents": [hidden, active]})
+
+    payload = gateway_cmd._status_payload(activity_limit=0)
+    names = [a["name"] for a in payload["agents"]]
+    assert "hermes-hidden" not in names
+    assert "hermes-live" in names
+    assert payload["summary"]["hidden_agents"] == 1
+    assert payload["summary"]["managed_agents"] == 1
+
+
+def test_status_payload_include_hidden_returns_all(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    hidden = _stale_hermes_entry("hermes-hidden", age_seconds=30 * 60, liveness="offline",
+                                 agent_id="agent-hidden")
+    hidden["lifecycle_phase"] = "hidden"
+    active = {
+        "name": "hermes-live",
+        "agent_id": "agent-live",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": "connected",
+        "last_seen_age_seconds": 5.0,
+        "last_seen_at": gateway_core._now_iso(),
+    }
+    gateway_core.save_gateway_registry({"agents": [hidden, active]})
+
+    payload = gateway_cmd._status_payload(activity_limit=0, include_hidden=True)
+    names = [a["name"] for a in payload["agents"]]
+    assert "hermes-hidden" in names
+    assert "hermes-live" in names
+    assert payload["summary"]["hidden_agents"] == 1
+
+
+def test_lifecycle_signal_sent_on_connected_to_stale(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-flap", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test", "base_url": "http://x"})
+    assert len(client.heartbeats) == 1
+    assert client.heartbeats[0]["status"] == "stale"
+    assert client.heartbeats[0]["agent_id"] == entry["agent_id"]
+    assert entry["last_lifecycle_signal"]["phase"] == "stale"
+
+
+def test_lifecycle_signal_idempotent(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-flap", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    session = {"token": "axp_u_test", "base_url": "http://x"}
+    daemon._sweep_lifecycle(registry, session=session)
+    daemon._sweep_lifecycle(registry, session=session)
+    assert len(client.heartbeats) == 1
+
+
+def test_lifecycle_signal_404_tolerant(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    boom = httpx.HTTPStatusError(
+        "platform has no record",
+        request=httpx.Request("POST", "http://x/api/v1/agents/heartbeat"),
+        response=httpx.Response(404),
+    )
+    client = _RecordingHeartbeatClient(fail_with=boom, fail_status_code=404)
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-ghost", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test", "base_url": "http://x"})
+    # Hide still applied locally even though upstream said 404.
+    assert entry["lifecycle_phase"] == "hidden"
+    # Sticky last_lifecycle_signal updated → no infinite retry next tick.
+    assert entry["last_lifecycle_signal"]["phase"] == "stale"
+
+
+def test_remove_managed_agent_calls_delete_agent_then_local_remove(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    token_path = tmp_path / "tok"
+    token_path.write_text("axp_a_test\n")
+    entry = {
+        "name": "doomed-agent",
+        "agent_id": "agent-doomed",
+        "space_id": "space-x",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "token_file": str(token_path),
+    }
+    gateway_core.save_gateway_registry({"agents": [entry]})
+    client = _RecordingHeartbeatClient()
+    removed = gateway_cmd._remove_managed_agent("doomed-agent", client_factory=lambda: client)
+    assert removed["name"] == "doomed-agent"
+    assert client.deletes == ["agent-doomed"]
+    registry_after = gateway_core.load_gateway_registry()
+    assert all(a.get("name") != "doomed-agent" for a in registry_after.get("agents", []))
+    assert not token_path.exists()
+
+
+def test_remove_managed_agent_proceeds_on_upstream_failure(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    token_path = tmp_path / "tok"
+    token_path.write_text("axp_a_test\n")
+    entry = {
+        "name": "doomed-agent",
+        "agent_id": "agent-doomed",
+        "space_id": "space-x",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "token_file": str(token_path),
+    }
+    gateway_core.save_gateway_registry({"agents": [entry]})
+    boom = RuntimeError("network unreachable")
+    client = _RecordingHeartbeatClient(fail_with=boom)
+    removed = gateway_cmd._remove_managed_agent("doomed-agent", client_factory=lambda: client)
+    assert removed["name"] == "doomed-agent"
+    registry_after = gateway_core.load_gateway_registry()
+    assert all(a.get("name") != "doomed-agent" for a in registry_after.get("agents", []))
+    recent = gateway_core.load_recent_gateway_activity()
+    assert any(
+        r.get("event") == "managed_agent_remove_upstream_failed"
+        for r in recent
+    )
+
+
+def test_legacy_entry_without_lifecycle_phase_loads_as_active(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    # No lifecycle_phase field at all — represents pre-v1 on-disk entry.
+    entry = {
+        "name": "hermes-legacy",
+        "agent_id": "agent-legacy",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": "stale",
+        "last_seen_age_seconds": 30 * 60,
+    }
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    # Legacy entry got swept normally (treated as implicit active → hidden).
+    assert entry["lifecycle_phase"] == "hidden"
