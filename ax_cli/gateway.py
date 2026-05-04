@@ -3775,20 +3775,30 @@ def _build_hermes_sentinel_env(entry: dict[str, Any]) -> dict[str, str]:
     hermes_repo = str(entry.get("hermes_repo_path") or "").strip() or "/home/ax-agent/shared/repos/hermes-agent"
     repo_root = str(_gateway_repo_root())
 
+    # Per-agent HERMES_HOME so each hermes agent gets its own memories/ dir
+    # under ~/.ax/gateway/agents/<name>/hermes-home. Without this, every
+    # hermes agent on the host shares ~/.hermes/memories/MEMORY.md and
+    # clobbers each other.
+    agent_name = str(entry.get("name") or "")
+    hermes_home = agent_dir(agent_name) / "hermes-home" if agent_name else None
+
     env.update(
         {
             "AX_TOKEN": token,
             "AX_BASE_URL": str(entry.get("base_url") or ""),
-            "AX_AGENT_NAME": str(entry.get("name") or ""),
+            "AX_AGENT_NAME": agent_name,
             "AX_AGENT_ID": str(entry.get("agent_id") or ""),
             "AX_SPACE_ID": str(entry.get("space_id") or ""),
             "AX_CONFIG_DIR": str(workdir / ".ax"),
             "AX_PYTHON": _hermes_sentinel_python(entry),
             "HERMES_MAX_ITERATIONS": str(
-                entry.get("hermes_max_iterations") or os.environ.get("HERMES_MAX_ITERATIONS") or 30
+                entry.get("hermes_max_iterations") or os.environ.get("HERMES_MAX_ITERATIONS") or 60
             ),
         }
     )
+    if hermes_home is not None:
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        env["HERMES_HOME"] = str(hermes_home)
     env.setdefault("AGENT_RUNNER_API_KEY", "staging-dispatch-key")
     env.setdefault("INTERNAL_DISPATCH_API_KEY", env["AGENT_RUNNER_API_KEY"])
 
