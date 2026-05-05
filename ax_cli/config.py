@@ -228,6 +228,96 @@ def _warn_stale_workdir_local_config(mismatch: dict) -> None:
     )
 
 
+def _probe_gateway_binding(cwd: Path | None = None) -> dict:
+    """Probe local Gateway daemon state for the current cwd.
+
+    Doctor v2 uses this to know whether the operator is Gateway-brokered
+    BEFORE falling through to ``missing_token`` — a Gateway-brokered
+    agent correctly has no local token, and reporting that as a problem
+    is inverted in the post-Gateway model (the world this CLI now
+    operates in).
+
+    Reads the daemon PID file + ``registry.json`` directly from disk so
+    the probe still works when the daemon is briefly unreachable. The
+    registry on disk is the source of truth the daemon writes to;
+    reading it does not require auth, the daemon, or the network.
+
+    Honors ``AX_GATEWAY_DIR`` via the existing ``gateway_dir()`` helper
+    (late-imported to avoid a circular dep with ``ax_cli.gateway``).
+
+    Returns a dict with:
+      - ``daemon_running`` (bool): PID file present and the PID is alive.
+      - ``daemon_pid`` (int | None)
+      - ``registry_path`` (str): where we looked.
+      - ``bound_candidates`` (list[dict]): registry agents whose
+        ``workdir`` equals or is a parent of the current cwd. Each
+        candidate carries name / agent_id / template_id / runtime_type /
+        workdir / mode / liveness so doctor and whoami can render the
+        full picture without re-reading the registry.
+    """
+    # Late-imported to dodge circular dep — ax_cli.gateway imports config.
+    from .gateway import pid_path, registry_path
+
+    pid_file = pid_path()
+    registry_file = registry_path()
+
+    daemon_running = False
+    daemon_pid: int | None = None
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)  # zero-signal: alive-check only
+            daemon_running = True
+            daemon_pid = pid
+        except (ValueError, OSError, ProcessLookupError):
+            daemon_running = False
+            daemon_pid = None
+
+    bound_candidates: list[dict] = []
+    if registry_file.exists():
+        import json
+
+        try:
+            registry = json.loads(registry_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            registry = {}
+        if isinstance(registry, dict):
+            try:
+                cwd_resolved = (cwd or Path.cwd()).resolve()
+            except (OSError, RuntimeError):
+                cwd_resolved = None
+            if cwd_resolved is not None:
+                for agent in registry.get("agents", []):
+                    if not isinstance(agent, dict):
+                        continue
+                    workdir_raw = agent.get("workdir")
+                    if not workdir_raw:
+                        continue
+                    try:
+                        workdir_resolved = Path(str(workdir_raw)).expanduser().resolve()
+                    except (OSError, RuntimeError):
+                        continue
+                    if cwd_resolved == workdir_resolved or workdir_resolved in cwd_resolved.parents:
+                        bound_candidates.append(
+                            {
+                                "name": agent.get("name"),
+                                "agent_id": agent.get("agent_id"),
+                                "template_id": agent.get("template_id"),
+                                "runtime_type": agent.get("runtime_type"),
+                                "workdir": str(workdir_resolved),
+                                "mode": agent.get("mode"),
+                                "liveness": agent.get("liveness"),
+                            }
+                        )
+
+    return {
+        "daemon_running": daemon_running,
+        "daemon_pid": daemon_pid,
+        "registry_path": str(registry_file),
+        "bound_candidates": bound_candidates,
+    }
+
+
 def _load_global_config() -> dict:
     """Load ~/.ax/config.toml.
 
@@ -738,6 +828,47 @@ def diagnose_auth_config(*, env_name: str | None = None, explicit_space_id: str 
     token_kind = _token_kind(str(token) if token else None)
     agent_identity_present = bool(effective.get("agent_id") or effective.get("agent_name"))
     principal_type = effective.get("principal_type")
+
+    # Doctor v2: probe the local Gateway daemon BEFORE classifying so a
+    # Gateway-brokered agent runtime — which correctly has no local token —
+    # is not false-flagged as ``missing_token``. The probe reads the
+    # daemon's on-disk state, so it works even when the daemon is briefly
+    # unreachable. See _probe_gateway_binding() docstring for the full
+    # rationale.
+    binding = _probe_gateway_binding()
+    bound_candidates = binding.get("bound_candidates") or []
+    daemon_running = bool(binding.get("daemon_running"))
+    has_gateway_binding = bool(bound_candidates)
+    # Two related but distinct signals about the workspace's Gateway intent:
+    #   - workspace_declares_gateway: the strict "Gateway-managed" shape — has
+    #     [gateway].url AND no local token. Used to detect the daemon-down
+    #     state for an opted-in workspace.
+    #   - workspace_has_gateway_block: looser — just "is there a [gateway]
+    #     block at all?". Used to flag the security smell of carrying a token
+    #     in a workspace that also declares Gateway brokering.
+    workspace_declares_gateway = _is_gateway_managed_local_config(local_cfg)
+    _gateway_block = local_cfg.get("gateway") if isinstance(local_cfg, dict) else None
+    workspace_has_gateway_block = isinstance(_gateway_block, dict) and bool(
+        str(_gateway_block.get("url") or "").strip()
+    )
+
+    # If the workspace has a token AND the Gateway has a binding for this
+    # workdir AND the workspace also declares a [gateway] block, the local
+    # token is a security smell — anything that reads the workspace config
+    # could author as the agent without going through the Gateway.
+    if token_kind != "missing" and has_gateway_binding and workspace_has_gateway_block:
+        warnings.append(
+            {
+                "code": "local_token_with_gateway_binding",
+                "path": str(local_path) if local_path else None,
+                "reason": (
+                    "workspace declares a Gateway block AND has a local token while "
+                    "the Gateway already has a binding for this workdir; the local "
+                    "token bypasses the Gateway trust boundary"
+                ),
+            }
+        )
+
     if token_kind == "user_pat" and agent_identity_present and principal_type != "user":
         principal_intent = "mixed_user_token_agent_identity"
         problems.append(
@@ -750,11 +881,67 @@ def diagnose_auth_config(*, env_name: str | None = None, explicit_space_id: str 
         principal_intent = "user"
     elif principal_type == "agent" or token_kind == "agent_pat" or agent_identity_present:
         principal_intent = "agent"
+    elif token_kind == "missing" and has_gateway_binding:
+        # Gateway-brokered: the daemon holds the credential out-of-band.
+        # NOT a problem — this is the correct state for an agent runtime
+        # in the post-Gateway world. Doctor must say so.
+        principal_intent = "agent_gateway_brokered"
+    elif token_kind == "missing" and workspace_declares_gateway and not daemon_running:
+        # Workspace opted into Gateway brokering, but the daemon is down.
+        # Different problem from missing_token; different fix (start daemon).
+        principal_intent = "missing"
+        problems.append(
+            {
+                "code": "gateway_unreachable",
+                "reason": (
+                    "workspace is configured for Gateway brokering but the local "
+                    "Gateway daemon is not running; start it with `ax gateway start`"
+                ),
+            }
+        )
     elif token_kind == "missing":
         principal_intent = "missing"
         problems.append({"code": "missing_token", "reason": "no token resolved"})
     else:
         principal_intent = "unknown"
+
+    # Promote the selected binding into effective fields when the only
+    # signal is the Gateway daemon. This lets `whoami` and the doctor
+    # output show the bound agent name/id without forcing the operator
+    # to inspect the registry by hand.
+    selected_binding: dict | None = None
+    if (
+        principal_intent == "agent_gateway_brokered"
+        and not effective.get("agent_name")
+        and not effective.get("agent_id")
+        and bound_candidates
+    ):
+        selected_binding = bound_candidates[0]
+        effective["agent_name"] = selected_binding.get("name")
+        effective["agent_id"] = selected_binding.get("agent_id")
+        field_sources["agent_name"] = "gateway_daemon"
+        field_sources["agent_id"] = "gateway_daemon"
+        field_sources.setdefault("token", "gateway_daemon")
+        if len(bound_candidates) > 1:
+            warnings.append(
+                {
+                    "code": "ambiguous_gateway_binding",
+                    "reason": (
+                        "multiple Gateway-managed agents are registered to this "
+                        "workdir; the first candidate was selected. Declare an "
+                        "expected agent in `.ax/config.toml` to disambiguate"
+                    ),
+                    "candidates": [c.get("name") for c in bound_candidates],
+                }
+            )
+
+    gateway_binding_payload = {
+        "daemon_running": daemon_running,
+        "daemon_pid": binding.get("daemon_pid"),
+        "registry_path": binding.get("registry_path"),
+        "bound_candidates": bound_candidates,
+        "selected": selected_binding,
+    }
 
     return {
         "ok": not problems,
@@ -776,6 +963,7 @@ def diagnose_auth_config(*, env_name: str | None = None, explicit_space_id: str 
             "agent_id_source": field_sources.get("agent_id"),
             "principal_type": principal_type,
             "principal_intent": principal_intent,
+            "gateway_binding": gateway_binding_payload,
         },
         "sources": sources,
         "warnings": warnings,

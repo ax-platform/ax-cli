@@ -291,6 +291,27 @@ def doctor(
             console.print(f"  selected_env     = {data['selected_env']}")
         if data.get("selected_profile"):
             console.print(f"  selected_profile = {data['selected_profile']}")
+        binding = effective.get("gateway_binding") or {}
+        if binding.get("daemon_running") or binding.get("bound_candidates"):
+            daemon_state = "running" if binding.get("daemon_running") else "stopped"
+            pid = binding.get("daemon_pid")
+            pid_str = f" (pid {pid})" if pid else ""
+            cands = binding.get("bound_candidates") or []
+            console.print(f"  gateway_daemon   = {daemon_state}{pid_str}")
+            if cands:
+                selected = binding.get("selected") or {}
+                selected_name = selected.get("name") if selected else None
+                lines = []
+                for c in cands:
+                    marker = "*" if c.get("name") == selected_name else " "
+                    lines.append(
+                        f"    {marker} @{c.get('name')} "
+                        f"({c.get('template_id')}, mode={c.get('mode')}, "
+                        f"liveness={c.get('liveness')})"
+                    )
+                console.print(f"  gateway_bindings = {len(cands)} for this workdir")
+                for line in lines:
+                    console.print(line)
         for warning in data.get("warnings", []):
             console.print(f"[yellow]warning:[/yellow] {warning['code']} - {warning.get('reason')}")
         for problem in data.get("problems", []):
