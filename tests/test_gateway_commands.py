@@ -3032,9 +3032,10 @@ def test_gateway_templates_command_json():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     ids = [item["id"] for item in payload["templates"]]
-    assert ids[:7] == [
+    assert ids[:8] == [
         "hermes",
         "ollama",
+        "langgraph",
         "echo_test",
         "service_account",
         "pass_through",
@@ -3042,7 +3043,7 @@ def test_gateway_templates_command_json():
         "claude_code_channel",
     ]
     assert "inbox" not in ids
-    assert payload["count"] == 7
+    assert payload["count"] == 8
     ollama = next(item for item in payload["templates"] if item["id"] == "ollama")
     assert ollama["runtime_type"] == "exec"
     assert ollama["launchable"] is True
@@ -3180,12 +3181,13 @@ def test_gateway_ui_handler_serves_status_and_agent_detail(monkeypatch, tmp_path
             assert templates.status_code == 200
             template_payload = templates.json()
             assert template_payload["templates"][0]["id"] == "hermes"
-            assert template_payload["templates"][3]["id"] == "service_account"
+            assert template_payload["templates"][2]["id"] == "langgraph"
+            assert template_payload["templates"][4]["id"] == "service_account"
             channel_template = next(
                 item for item in template_payload["templates"] if item["id"] == "claude_code_channel"
             )
             assert channel_template["runtime_type"] == "claude_code_channel"
-            assert template_payload["count"] == 7
+            assert template_payload["count"] == 8
 
             detail = client.get("/api/agents/echo-bot")
             assert detail.status_code == 200
