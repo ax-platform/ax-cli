@@ -5738,17 +5738,11 @@ class GatewayDaemon:
                 entry["lifecycle_phase"] = "hidden"
                 entry["hidden_at"] = _now_iso()
                 entry["hidden_reason"] = liveness
-                record_gateway_activity(
-                    "managed_agent_hidden", entry=entry, reason=liveness
-                )
+                record_gateway_activity("managed_agent_hidden", entry=entry, reason=liveness)
                 phase = "hidden"
 
             # Auto-restore: hidden → active when reconnected and fresh.
-            elif (
-                phase == "hidden"
-                and liveness == "connected"
-                and (age is None or age <= RUNTIME_STALE_AFTER_SECONDS)
-            ):
+            elif phase == "hidden" and liveness == "connected" and (age is None or age <= RUNTIME_STALE_AFTER_SECONDS):
                 entry["lifecycle_phase"] = "active"
                 entry.pop("hidden_at", None)
                 entry.pop("hidden_reason", None)

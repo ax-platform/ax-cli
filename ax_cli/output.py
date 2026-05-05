@@ -18,6 +18,7 @@ def _redact_secrets(text: str) -> str:
     """Redact axp_* PAT shapes from any user-facing string."""
     return _AXP_SECRET_RE.sub("axp_<redacted>", text)
 
+
 console = Console()
 # Dedicated stderr console for status/log lines that mustn't pollute stdout
 # (e.g. when the caller parses --json output or pipes the command).

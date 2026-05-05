@@ -302,9 +302,7 @@ def doctor(
             elif probe_result.get("skipped"):
                 console.print(f"[cyan]probe:[/cyan] skipped — {probe_result.get('reason')}")
             elif probe_result.get("ok") is False:
-                console.print(
-                    f"[red]probe:[/red] /auth/exchange rejected ({probe_result.get('code')})"
-                )
+                console.print(f"[red]probe:[/red] /auth/exchange rejected ({probe_result.get('code')})")
                 console.print(_invalid_credential_recovery_copy(probe_result.get("host")))
 
     if not data["ok"]:

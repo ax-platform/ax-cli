@@ -1271,11 +1271,7 @@ def _remove_managed_agent(name: str, *, client_factory=None) -> dict:
     # removal — the local registry is authoritative for the gateway.
     agent_id = str(peek.get("agent_id") or "").strip()
     if agent_id:
-        user_client = (
-            client_factory()
-            if client_factory is not None
-            else _build_session_client_silent()
-        )
+        user_client = client_factory() if client_factory is not None else _build_session_client_silent()
         if user_client is not None:
             try:
                 user_client.delete_agent(agent_id)
@@ -1551,15 +1547,9 @@ def _status_payload(*, activity_limit: int = 10, include_hidden: bool = False) -
     # Partition out hidden + system agents so default surfaces stay tidy.
     # System agents (switchboards, service accounts) are infrastructure
     # plumbing; hidden agents are stale ones the daemon swept away.
-    hidden_agents_list = [
-        a for a in all_agents
-        if str(a.get("lifecycle_phase") or "active") == "hidden"
-    ]
+    hidden_agents_list = [a for a in all_agents if str(a.get("lifecycle_phase") or "active") == "hidden"]
     system_agents_list = [a for a in all_agents if _is_system_agent(a)]
-    visible_agents = [
-        a for a in all_agents
-        if a not in hidden_agents_list and a not in system_agents_list
-    ]
+    visible_agents = [a for a in all_agents if a not in hidden_agents_list and a not in system_agents_list]
     agents = all_agents if include_hidden else visible_agents
     approvals = list_gateway_approvals()
     pending_approvals = [item for item in approvals if str(item.get("status") or "") == "pending"]
@@ -5200,10 +5190,7 @@ def activity(
                 "agent_name": item.get("agent_name") or "-",
                 "message_id": item.get("message_id") or "-",
                 "tool_name": item.get("tool_name") or "-",
-                "detail": item.get("activity_message")
-                or item.get("reply_preview")
-                or item.get("error")
-                or "",
+                "detail": item.get("activity_message") or item.get("reply_preview") or item.get("error") or "",
             }
             for item in filtered
         ],
@@ -5699,9 +5686,7 @@ def watch(
     """Watch the Gateway in a live terminal dashboard."""
 
     def render_dashboard() -> Group:
-        return _render_gateway_dashboard(
-            _status_payload(activity_limit=activity_limit, include_hidden=show_all)
-        )
+        return _render_gateway_dashboard(_status_payload(activity_limit=activity_limit, include_hidden=show_all))
 
     if once:
         console.print(render_dashboard())
@@ -6236,13 +6221,7 @@ def _check_local_pending_replies(
         mid = str(m.get("id") or "").strip()
         if mid:
             ids.append(mid)
-        sender = (
-            m.get("display_name")
-            or m.get("agent_name")
-            or m.get("sender")
-            or m.get("sender_name")
-            or ""
-        )
+        sender = m.get("display_name") or m.get("agent_name") or m.get("sender") or m.get("sender_name") or ""
         sender = str(sender).strip()
         if sender and sender not in seen:
             senders.append(sender)
@@ -6616,12 +6595,14 @@ def list_agents(
     payload = _status_payload(include_hidden=show_all)
     agents = payload["agents"]
     if as_json:
-        print_json({
-            "agents": agents,
-            "count": len(agents),
-            "hidden": payload["summary"].get("hidden_agents", 0),
-            "system": payload["summary"].get("system_agents", 0),
-        })
+        print_json(
+            {
+                "agents": agents,
+                "count": len(agents),
+                "hidden": payload["summary"].get("hidden_agents", 0),
+                "system": payload["summary"].get("system_agents", 0),
+            }
+        )
         return
     print_table(
         ["Ref", "Agent", "Type", "Mode", "Presence", "Output", "Confidence", "Space"],
@@ -6631,9 +6612,7 @@ def list_agents(
     hidden_n = payload["summary"].get("hidden_agents", 0)
     system_n = payload["summary"].get("system_agents", 0)
     if not show_all and (hidden_n or system_n):
-        err_console.print(
-            f"[dim]({hidden_n} hidden, {system_n} system — pass --all to include)[/dim]"
-        )
+        err_console.print(f"[dim]({hidden_n} hidden, {system_n} system — pass --all to include)[/dim]")
 
 
 @agents_app.command("show")
