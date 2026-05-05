@@ -353,6 +353,19 @@ def whoami(as_json: bool = JSON_OPTION):
     local = _local_config_dir()
     if local and (local / "config.toml").exists():
         data["local_config"] = str(local / "config.toml")
+        # Surface stale-workdir mismatch so operators see misattribution risk
+        # before they send. Same diagnosis the auth-doctor warnings carry.
+        import tomllib
+
+        from ..config import _find_project_root, _local_config_workdir_mismatch
+
+        try:
+            local_cfg = tomllib.loads((local / "config.toml").read_text())
+            mismatch = _local_config_workdir_mismatch(local_cfg, _find_project_root())
+        except Exception:  # noqa: BLE001
+            mismatch = None
+        if mismatch:
+            data["stale_workdir"] = mismatch
     runtime_config = os.environ.get("AX_CONFIG_FILE")
     if runtime_config:
         data["runtime_config"] = runtime_config
@@ -361,6 +374,13 @@ def whoami(as_json: bool = JSON_OPTION):
         print_json(data)
     else:
         print_kv(data)
+        if data.get("stale_workdir"):
+            sw = data["stale_workdir"]
+            console.print(
+                f"[yellow]⚠ stale local config:[/yellow] {sw['config_path']} "
+                f"declares workdir={sw['configured_workdir']} but cwd resolves to "
+                f"{sw['actual_workdir']}. Identity may bind to the wrong agent."
+            )
 
 
 @app.command("init")

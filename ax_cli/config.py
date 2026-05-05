@@ -123,10 +123,20 @@ def _save_user_config(cfg: dict, *, env_name: str | None = None, activate: bool 
 
 
 def _load_local_config() -> dict:
-    """Load project-local .ax/config.toml if it exists."""
+    """Load project-local .ax/config.toml if it exists.
+
+    Emits a one-time warning when the loaded config has a stale
+    ``[agent].workdir`` (config copied from another worktree). The config
+    is still returned — callers decide how to react — but the operator
+    is alerted before silent agent rebind happens.
+    """
     local = _local_config_dir()
     if local and (local / "config.toml").exists():
-        return tomllib.loads((local / "config.toml").read_text())
+        cfg = tomllib.loads((local / "config.toml").read_text())
+        mismatch = _local_config_workdir_mismatch(cfg, _find_project_root())
+        if mismatch is not None:
+            _warn_stale_workdir_local_config(mismatch)
+        return cfg
     return {}
 
 
@@ -156,6 +166,66 @@ def _read_token_file(raw_path: str | None) -> str | None:
 
 _global_config_warned = False
 _unsafe_local_config_warned = False
+_stale_workdir_warned: set[str] = set()
+
+
+def _local_config_workdir_mismatch(cfg: dict, project_root: Path | None) -> dict | None:
+    """Detect a stale `[agent].workdir` in a local `.ax/config.toml`.
+
+    Identity-collapse defense: if a worktree's local config declares a
+    workdir that does not match the directory we actually resolved from
+    cwd, the config is almost certainly stale (copied from another
+    worktree). Honoring it silently silently re-binds the invoking shell
+    to the wrong agent — exactly the misattribution incident on
+    2026-05-04 (msg `d97e0ad1`, codex_supervisor's own bug report at
+    `06bc04f0`). We surface the mismatch so the caller can warn or
+    refuse; we do not auto-rewrite the config.
+
+    Returns ``None`` on match / no opinion. Returns a dict with
+    ``configured_workdir``, ``actual_workdir``, and ``config_path`` keys
+    when stale.
+    """
+    if project_root is None or not isinstance(cfg, dict):
+        return None
+    agent_block = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    gateway_block = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+    configured_raw = agent_block.get("workdir") or gateway_block.get("workdir")
+    if not configured_raw:
+        # Legacy / minimal configs without a workdir field aren't stale —
+        # they just predate the field. Don't warn.
+        return None
+    try:
+        configured = Path(str(configured_raw)).expanduser().resolve()
+        actual = project_root.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if configured == actual:
+        return None
+    return {
+        "configured_workdir": str(configured),
+        "actual_workdir": str(actual),
+        "config_path": str(project_root / ".ax" / "config.toml"),
+    }
+
+
+def _warn_stale_workdir_local_config(mismatch: dict) -> None:
+    """Emit a one-time stderr warning per offending config_path."""
+    global _stale_workdir_warned
+    key = mismatch.get("config_path") or ""
+    if key in _stale_workdir_warned:
+        return
+    _stale_workdir_warned.add(key)
+    import sys
+
+    sys.stderr.write(
+        f"\033[33m⚠  Stale local aX config: {mismatch['config_path']}\033[0m\n"
+        f"   [agent].workdir = {mismatch['configured_workdir']}\n"
+        f"   actual cwd root = {mismatch['actual_workdir']}\n"
+        "   This config was likely copied from another worktree; identity\n"
+        "   resolution may bind to the wrong agent. Either fix the workdir\n"
+        "   field, remove the local .ax/config.toml, or run from the original\n"
+        "   workdir. (Run `ax auth whoami` to confirm the resolved identity.)\n\n"
+    )
 
 
 def _load_global_config() -> dict:
@@ -424,6 +494,21 @@ def diagnose_auth_config(*, env_name: str | None = None, explicit_space_id: str 
     local_path = (local_dir / "config.toml") if local_dir else None
     local_cfg = tomllib.loads(local_path.read_text()) if local_path and local_path.exists() else {}
     unsafe_local = bool(local_cfg and _is_unsafe_user_token_agent_config(local_cfg))
+    stale_workdir = _local_config_workdir_mismatch(local_cfg, _find_project_root())
+    if stale_workdir is not None:
+        warnings.append(
+            {
+                "code": "stale_workdir_local_config",
+                "path": stale_workdir["config_path"],
+                "configured_workdir": stale_workdir["configured_workdir"],
+                "actual_workdir": stale_workdir["actual_workdir"],
+                "reason": (
+                    "local config's [agent].workdir does not match the directory "
+                    "that resolved as the project root — config likely copied from "
+                    "another worktree; identity may bind to the wrong agent"
+                ),
+            }
+        )
 
     if normalized_env:
         sources.append(
