@@ -43,11 +43,14 @@ from ..commands.bootstrap import (
 from ..config import resolve_space_id, resolve_user_base_url, resolve_user_token
 from ..gateway import (
     GatewayDaemon,
+    _format_daemon_log_line,
     _is_passive_runtime,
+    _is_system_agent,
     active_gateway_pid,
     active_gateway_pids,
     active_gateway_ui_pid,
     active_gateway_ui_pids,
+    activity_log_path,
     agent_dir,
     agent_token_path,
     annotate_runtime_health,
@@ -243,7 +246,7 @@ def _local_process_fingerprint(
 ) -> dict:
     resolved_pid = int(pid or os.getpid())
     resolved_cwd = str(Path(cwd or os.getcwd()).expanduser().resolve())
-    resolved_exe = str(Path(exe_path or sys.executable).expanduser())
+    resolved_exe = str(Path(exe_path or sys.executable).expanduser().resolve())
     fingerprint = {
         "agent_name": agent_name,
         "pid": resolved_pid,
@@ -1235,10 +1238,52 @@ def _set_managed_agent_desired_state(name: str, desired_state: str) -> dict:
     return annotate_runtime_health(entry, registry=registry)
 
 
-def _remove_managed_agent(name: str) -> dict:
+def _build_session_client_silent() -> AxClient | None:
+    """Build a user-PAT session client without raising. Returns None when
+    the gateway is not logged in or the session token is missing/invalid.
+
+    Used for best-effort upstream calls during local cleanup paths where a
+    missing session must not abort the command.
+    """
+    session = load_gateway_session()
+    if not session:
+        return None
+    token = str(session.get("token") or "")
+    if not token:
+        return None
+    try:
+        return AxClient(
+            base_url=str(session.get("base_url") or auth_cmd.DEFAULT_LOGIN_BASE_URL),
+            token=token,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _remove_managed_agent(name: str, *, client_factory=None) -> dict:
     registry = load_gateway_registry()
+    peek = find_agent_entry(registry, name)
+    if not peek:
+        raise LookupError(f"Managed agent not found: {name}")
+    # Best-effort upstream delete BEFORE local removal so the platform-side
+    # record can be retired in lockstep. Missing session, 404, or network
+    # failure are recorded as audit events but never block the local
+    # removal — the local registry is authoritative for the gateway.
+    agent_id = str(peek.get("agent_id") or "").strip()
+    if agent_id:
+        user_client = client_factory() if client_factory is not None else _build_session_client_silent()
+        if user_client is not None:
+            try:
+                user_client.delete_agent(agent_id)
+            except Exception as exc:  # noqa: BLE001
+                record_gateway_activity(
+                    "managed_agent_remove_upstream_failed",
+                    entry=peek,
+                    error=str(exc)[:360],
+                )
     entry = remove_agent_entry(registry, name)
     if not entry:
+        # Should be unreachable since peek succeeded; defensive only.
         raise LookupError(f"Managed agent not found: {name}")
     save_gateway_registry(registry)
     archive_stale_gateway_approvals()
@@ -1434,6 +1479,15 @@ def _space_cache_with(space_rows: object, space_id: str, *, name: str | None = N
 
 
 def _ensure_gateway_test_sender(target_entry: dict) -> dict:
+    """Auto-register or fetch the per-space switchboard service account.
+
+    Service-account-only utility. Used by service-event flows (reminders, log
+    fan-outs, system notifications) that legitimately need a Gateway-managed
+    service identity. Must NOT be called from the default `agents test` path —
+    principal-invoked surfaces author as the invoking principal, not as a
+    service account. See `feedback_invoking_principal_default` (Madtank/
+    supervisor, 2026-05-02) for the conceptual model.
+    """
     target_space = str(target_entry.get("space_id") or "").strip()
     if not target_space:
         raise ValueError("Managed agent is missing a space id for Gateway test delivery.")
@@ -1446,20 +1500,57 @@ def _ensure_gateway_test_sender(target_entry: dict) -> dict:
         name=sender_name,
         template_id="inbox",
         space_id=target_space,
-        description="Gateway-managed passive sender for agent-authored tests.",
+        description="Gateway-managed passive sender for service-event sends.",
         start=True,
     )
 
 
-def _status_payload(*, activity_limit: int = 10) -> dict:
+def _resolve_invoking_principal() -> str | None:
+    """Return the workspace's bound Gateway-managed agent name, if any.
+
+    Resolves through `resolve_gateway_config()`, which reads the local
+    `.ax/config.toml` for `[gateway]` + `[agent]` blocks. Returns None when
+    the workspace has no Gateway-managed identity (no Gateway local config,
+    or `[agent].agent_name` missing). This is the source of truth for the
+    default sender on any principal-invoked send-message command.
+    """
+    from ..config import resolve_gateway_config
+
+    cfg = resolve_gateway_config()
+    if not cfg:
+        return None
+    name = str(cfg.get("agent_name") or "").strip()
+    return name or None
+
+
+def _no_invoking_principal_error() -> ValueError:
+    # Avoid literal square brackets so Rich console.print() does not strip
+    # them as markup tags when this message is echoed.
+    return ValueError(
+        "No invoking principal resolvable for this workspace. "
+        "Run from a Gateway-managed workdir/local session (a directory whose "
+        "`.ax/config.toml` declares the 'gateway' and 'agent' sections), or pass "
+        "`--sender-agent <name>` to author the message as a specific service "
+        "account for diagnostic service-event sends."
+    )
+
+
+def _status_payload(*, activity_limit: int = 10, include_hidden: bool = False) -> dict:
     daemon = daemon_status()
     ui = ui_status()
     session = load_gateway_session()
     registry = daemon["registry"]
-    agents = [
+    all_agents = [
         _with_registry_refs(registry, annotate_runtime_health(agent, registry=registry))
         for agent in registry.get("agents", [])
     ]
+    # Partition out hidden + system agents so default surfaces stay tidy.
+    # System agents (switchboards, service accounts) are infrastructure
+    # plumbing; hidden agents are stale ones the daemon swept away.
+    hidden_agents_list = [a for a in all_agents if str(a.get("lifecycle_phase") or "active") == "hidden"]
+    system_agents_list = [a for a in all_agents if _is_system_agent(a)]
+    visible_agents = [a for a in all_agents if a not in hidden_agents_list and a not in system_agents_list]
+    agents = all_agents if include_hidden else visible_agents
     approvals = list_gateway_approvals()
     pending_approvals = [item for item in approvals if str(item.get("status") or "") == "pending"]
     live_agents = [a for a in agents if str(a.get("mode") or "") == "LIVE"]
@@ -1526,6 +1617,8 @@ def _status_payload(*, activity_limit: int = 10) -> dict:
             "errored_agents": len(errored_agents),
             "low_confidence_agents": len(low_confidence_agents),
             "blocked_agents": len(blocked_agents),
+            "hidden_agents": len(hidden_agents_list),
+            "system_agents": len(system_agents_list),
             "pending_approvals": len(pending_approvals),
         },
     }
@@ -1976,8 +2069,17 @@ def _send_gateway_test_to_managed_agent(
     content: str | None = None,
     author: str = "agent",
     sender_agent: str | None = None,
-    allow_self_fallback: bool = True,
 ) -> dict:
+    """Send a Gateway-brokered test message to a managed agent.
+
+    Default sender = invoking principal resolved from the workspace's local
+    Gateway config (per Madtank/supervisor 2026-05-02: principal-invoked
+    surfaces author as user/agent, never as a service account). Pass an
+    explicit `sender_agent` to author as a named service account or other
+    Gateway-managed identity. Fails hard when no invoking principal resolves
+    AND no `sender_agent` override is provided — the alternative is silent
+    misattribution, which is the bug this signature replaces.
+    """
     entry = _load_managed_agent_or_exit(name)
     if str(entry.get("desired_state") or "").strip().lower() == "stopped":
         raise ValueError(f"@{name} is stopped. Start it before sending a test.")
@@ -2003,20 +2105,12 @@ def _send_gateway_test_to_managed_agent(
 
     sender_name = None
     if normalized_author == "agent":
-        target_for_sender = {**stored, "space_id": space_id}
-        sender_error: str | None = None
         if sender_agent:
             sender_name = str(sender_agent).strip()
         else:
-            try:
-                sender_name = str(_ensure_gateway_test_sender(target_for_sender).get("name") or "")
-            except Exception as exc:  # noqa: BLE001
-                sender_error = str(exc)
-                if not allow_self_fallback:
-                    raise ValueError(f"Gateway service sender is not ready for @{target}: {sender_error}") from exc
-                sender_name = target
-        if not sender_name:
-            raise ValueError("Gateway could not resolve a managed sender for the test message.")
+            sender_name = _resolve_invoking_principal()
+            if not sender_name:
+                raise _no_invoking_principal_error()
         result = _send_from_managed_agent(
             name=sender_name,
             content=prompt,
@@ -2030,8 +2124,7 @@ def _send_gateway_test_to_managed_agent(
                 "target_template": stored.get("template_id"),
                 "target_runtime_type": stored.get("runtime_type"),
                 "test_author": "agent",
-                "test_sender_fallback": "self" if sender_error else None,
-                "test_sender_error": sender_error,
+                "test_sender_explicit": bool(sender_agent),
             },
         )
         payload = result.get("message", result) if isinstance(result, dict) else result
@@ -4382,7 +4475,12 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                 self.wfile.write(body)
                 return
             if parsed.path == "/api/status":
-                _write_json_response(self, _status_payload(activity_limit=activity_limit))
+                query = parse_qs(parsed.query)
+                include_hidden = str((query.get("all") or ["0"])[0] or "0").lower() in {"1", "true", "yes"}
+                _write_json_response(
+                    self,
+                    _status_payload(activity_limit=activity_limit, include_hidden=include_hidden),
+                )
                 return
             if parsed.path == "/local/inbox":
                 query = parse_qs(parsed.query)
@@ -4602,12 +4700,15 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                     return
                 if parsed.path.endswith("/test") and parsed.path.startswith("/api/agents/"):
                     name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/test")).strip()
+                    # UI test button defaults to user-authored: per Madtank/supervisor
+                    # 2026-05-02, principal-invoked surfaces author as the invoking
+                    # principal, never as a service account. UI's principal is the
+                    # logged-in user (resolved via the Gateway user client).
                     payload = _send_gateway_test_to_managed_agent(
                         name,
                         content=str(body.get("content") or "").strip() or None,
-                        author=str(body.get("author") or "agent").strip() or "agent",
+                        author=str(body.get("author") or "user").strip() or "user",
                         sender_agent=str(body.get("sender_agent") or "").strip() or None,
-                        allow_self_fallback=bool(body.get("allow_self_fallback", True)),
                     )
                     _write_json_response(self, payload, status=HTTPStatus.CREATED)
                     return
@@ -5017,10 +5118,98 @@ def current_gateway_space(as_json: bool = JSON_OPTION):
     err_console.print(f"  space_id = {result.get('space_id') or '-'}")
 
 
+@app.command("activity")
+def activity(
+    message_id: str = typer.Option(None, "--message-id", help="Filter to a single source message_id"),
+    agent: str = typer.Option(None, "--agent", help="Filter to a single managed agent name"),
+    limit: int = typer.Option(0, "--limit", help="Cap rows returned (0 = no cap)"),
+    as_json: bool = JSON_OPTION,
+):
+    """Inspect Gateway-recorded activity for one message or agent.
+
+    Reads the local activity log Gateway already owns
+    (``~/.ax/gateway/activity.jsonl``) and emits the rows in chronological
+    order. Each row carries the canonical ``phase`` field for any registered
+    event so supervisor loops and the aX UI can consume a stable shape across
+    runtime types.
+
+    This command is read-only. It does not authenticate to the backend, does
+    not construct an ``AxClient``, and does not surface any new credential
+    path — Gateway remains the trust boundary.
+    """
+    log_path = activity_log_path()
+    rows: list[dict] = []
+    if log_path.exists():
+        try:
+            for raw in log_path.read_text(encoding="utf-8").splitlines():
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+                try:
+                    item = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                rows.append(item)
+        except OSError:
+            rows = []
+
+    msg_filter = (message_id or "").strip()
+    agent_filter = (agent or "").strip().lower()
+    filtered = []
+    for item in rows:
+        if msg_filter and str(item.get("message_id") or "") != msg_filter:
+            continue
+        if agent_filter and str(item.get("agent_name") or "").lower() != agent_filter:
+            continue
+        filtered.append(item)
+
+    filtered.sort(key=lambda r: str(r.get("ts") or ""))
+    if limit and limit > 0:
+        filtered = filtered[-limit:]
+
+    if as_json:
+        if msg_filter:
+            print_json({"message_id": msg_filter, "events": filtered})
+        else:
+            print_json({"events": filtered})
+        return
+
+    if not filtered:
+        target = msg_filter or agent_filter or "(any)"
+        err_console.print(f"No Gateway activity for {target}.")
+        return
+    print_table(
+        ["Time", "Phase", "Event", "Agent", "Message", "Tool", "Detail"],
+        [
+            {
+                "ts": item.get("ts"),
+                "phase": item.get("phase") or "-",
+                "event": item.get("event"),
+                "agent_name": item.get("agent_name") or "-",
+                "message_id": item.get("message_id") or "-",
+                "tool_name": item.get("tool_name") or "-",
+                "detail": item.get("activity_message") or item.get("reply_preview") or item.get("error") or "",
+            }
+            for item in filtered
+        ],
+        keys=["ts", "phase", "event", "agent_name", "message_id", "tool_name", "detail"],
+    )
+
+
 @app.command("status")
-def status(as_json: bool = JSON_OPTION):
+def status(
+    as_json: bool = JSON_OPTION,
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Include hidden (auto-swept stale) and system (switchboard / service-account) agents.",
+    ),
+):
     """Show Gateway status, daemon state, and managed runtimes."""
-    payload = _status_payload()
+    payload = _status_payload(include_hidden=show_all)
     if as_json:
         print_json(payload)
         return
@@ -5044,6 +5233,12 @@ def status(as_json: bool = JSON_OPTION):
     err_console.print(f"  live        = {payload['summary']['live_agents']}")
     err_console.print(f"  on_demand   = {payload['summary']['on_demand_agents']}")
     err_console.print(f"  inbox       = {payload['summary']['inbox_agents']}")
+    hidden_n = payload["summary"].get("hidden_agents", 0)
+    system_n = payload["summary"].get("system_agents", 0)
+    if hidden_n or system_n:
+        hint = "" if show_all else "  (run with --all to include)"
+        err_console.print(f"  hidden      = {hidden_n}{hint}")
+        err_console.print(f"  system      = {system_n}")
     err_console.print(f"  alerts      = {payload['summary'].get('alert_count', 0)}")
     err_console.print(f"  approvals   = {payload['summary'].get('pending_approvals', 0)} pending")
     if payload.get("alerts"):
@@ -5481,11 +5676,17 @@ def watch(
     interval: float = typer.Option(2.0, "--interval", "-n", help="Dashboard refresh interval in seconds"),
     activity_limit: int = typer.Option(8, "--activity-limit", help="Number of recent events to display"),
     once: bool = typer.Option(False, "--once", help="Render one dashboard frame and exit"),
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Include hidden (auto-swept stale) and system (switchboard / service-account) agents.",
+    ),
 ):
     """Watch the Gateway in a live terminal dashboard."""
 
     def render_dashboard() -> Group:
-        return _render_gateway_dashboard(_status_payload(activity_limit=activity_limit))
+        return _render_gateway_dashboard(_status_payload(activity_limit=activity_limit, include_hidden=show_all))
 
     if once:
         console.print(render_dashboard())
@@ -5500,6 +5701,17 @@ def watch(
         err_console.print("[yellow]Gateway watch stopped.[/yellow]")
 
 
+def _emit_daemon_log(message: str) -> None:
+    """GatewayDaemon log callback — writes one timestamped line to err_console.
+
+    When `ax gateway run` is launched in the background, err_console's stream
+    is redirected to `daemon_log_path()` (gateway.log). Each line carries an
+    ISO-8601 UTC timestamp matching activity.jsonl's `ts` shape so the two
+    streams correlate by their leading column.
+    """
+    err_console.print(f"[dim]{_format_daemon_log_line(message)}[/dim]")
+
+
 @app.command("run")
 def run(
     poll_interval: float = typer.Option(1.0, "--poll-interval", help="Registry reconcile interval in seconds"),
@@ -5511,7 +5723,7 @@ def run(
     err_console.print(f"  state_dir = {gateway_dir()}")
     err_console.print(f"  interval  = {poll_interval}s")
     err_console.print(f"  mode      = {'single-pass' if once else 'foreground'}")
-    daemon = GatewayDaemon(logger=lambda msg: err_console.print(f"[dim]{msg}[/dim]"), poll_interval=poll_interval)
+    daemon = GatewayDaemon(logger=_emit_daemon_log, poll_interval=poll_interval)
     try:
         daemon.run(once=once)
     except RuntimeError as exc:
@@ -5871,15 +6083,16 @@ def _request_local_connect(
     workdir: str | None = None,
     space_id: str | None = None,
 ) -> dict:
+    resolved_workdir = str(Path(workdir or Path.cwd()).expanduser().resolve())
     agent_name, registry_ref = _resolve_local_gateway_identity(
         agent_name=agent_name,
         registry_ref=registry_ref,
-        workdir=workdir,
+        workdir=resolved_workdir,
     )
     display_name = str(agent_name or registry_ref or "").strip()
     if not display_name:
         raise ValueError("Provide a local agent name or --registry/--ref.")
-    fingerprint = _local_process_fingerprint(agent_name=display_name, cwd=workdir)
+    fingerprint = _local_process_fingerprint(agent_name=display_name, cwd=resolved_workdir)
     body = {"fingerprint": fingerprint}
     if agent_name:
         body["agent_name"] = agent_name
@@ -5941,6 +6154,81 @@ def _resolve_local_gateway_session(
             )
         raise ValueError(f"Gateway local session is {status}; approve the agent before sending.")
     return token, payload
+
+
+def _print_pending_reply_warning_local(
+    pending: dict,
+    *,
+    target_inbox_cmd: str = "ax gateway local inbox",
+) -> None:
+    """Surface a non-blocking warning if pending unread messages exist for the local sender."""
+    if not isinstance(pending, dict):
+        return
+    count = pending.get("count", 0) or 0
+    if not count:
+        return
+    senders = pending.get("newest_senders", []) or []
+    sender_blurb = ""
+    if senders:
+        if len(senders) == 1:
+            sender_blurb = f", newest from @{senders[0]}"
+        else:
+            extras = len(senders) - 1
+            sender_blurb = f", newest from @{senders[0]} (+{extras} other{'s' if extras != 1 else ''})"
+    plural = "y" if count == 1 else "ies"
+    console.print(
+        f"[yellow]\u26a0 {count} pending repl{plural} addressed to you{sender_blurb}. "
+        f"Review with: {target_inbox_cmd}[/yellow]"
+    )
+
+
+def _check_local_pending_replies(
+    *,
+    gateway_url: str,
+    session_token: str,
+    space_id: str | None = None,
+    limit: int = 5,
+) -> dict:
+    """Non-blocking pre-send check via /local/inbox; mirrors messages.check_pending_replies shape.
+
+    Always returns the empty/zero shape on any error — never raises. The local
+    inbox check uses ``mark_read=False`` so the user's unread state is unchanged
+    by the warning surface.
+    """
+    empty: dict = {"count": 0, "message_ids": [], "newest_senders": []}
+    try:
+        payload = _poll_local_inbox_over_http(
+            gateway_url=gateway_url,
+            session_token=session_token,
+            limit=limit,
+            space_id=space_id,
+            mark_read=False,
+            wait_seconds=0,
+        )
+    except Exception:
+        return empty
+    if not isinstance(payload, dict):
+        return empty
+    messages = payload.get("messages") or []
+    if not isinstance(messages, list) or not messages:
+        return empty
+    ids: list[str] = []
+    senders: list[str] = []
+    seen: set[str] = set()
+    for m in messages[:limit]:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or "").strip()
+        if mid:
+            ids.append(mid)
+        sender = m.get("display_name") or m.get("agent_name") or m.get("sender") or m.get("sender_name") or ""
+        sender = str(sender).strip()
+        if sender and sender not in seen:
+            senders.append(sender)
+            seen.add(sender)
+    raw_count = payload.get("unread_count")
+    count = raw_count if isinstance(raw_count, int) else len(messages)
+    return {"count": count, "message_ids": ids, "newest_senders": senders}
 
 
 def _poll_local_inbox_over_http(
@@ -6020,6 +6308,13 @@ def local_send(
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+    pending = _check_local_pending_replies(
+        gateway_url=gateway_url,
+        session_token=resolved_session_token,
+        space_id=space_id,
+    )
+
     body = {"content": content, "space_id": space_id, "parent_id": parent_id}
     try:
         response = httpx.post(
@@ -6058,6 +6353,9 @@ def local_send(
             payload["inbox_error"] = detail
         except Exception as exc:
             payload["inbox_error"] = str(exc)
+    payload["pending_reply_count"] = pending.get("count", 0)
+    payload["pending_reply_message_ids"] = list(pending.get("message_ids", []))
+    payload["pending_reply_newest_senders"] = list(pending.get("newest_senders", []))
     if as_json:
         if connect_payload:
             payload["connect"] = {
@@ -6070,6 +6368,7 @@ def local_send(
         print_json(payload)
         return
     console.print(f"[green]Sent through Gateway[/green] as @{payload.get('agent')}")
+    _print_pending_reply_warning_local(pending)
     inbox_payload = payload.get("inbox") if isinstance(payload.get("inbox"), dict) else {}
     messages = inbox_payload.get("messages") if isinstance(inbox_payload, dict) else []
     if messages:
@@ -6283,17 +6582,37 @@ def update_agent(
 
 
 @agents_app.command("list")
-def list_agents(as_json: bool = JSON_OPTION):
+def list_agents(
+    as_json: bool = JSON_OPTION,
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Include hidden (auto-swept stale) and system (switchboard / service-account) agents.",
+    ),
+):
     """List Gateway-managed agents."""
-    agents = _status_payload()["agents"]
+    payload = _status_payload(include_hidden=show_all)
+    agents = payload["agents"]
     if as_json:
-        print_json({"agents": agents, "count": len(agents)})
+        print_json(
+            {
+                "agents": agents,
+                "count": len(agents),
+                "hidden": payload["summary"].get("hidden_agents", 0),
+                "system": payload["summary"].get("system_agents", 0),
+            }
+        )
         return
     print_table(
         ["Ref", "Agent", "Type", "Mode", "Presence", "Output", "Confidence", "Space"],
         [{**agent, "type": _agent_type_label(agent), "output": _agent_output_label(agent)} for agent in agents],
         keys=["registry_ref", "name", "type", "mode", "presence", "output", "confidence", "space_id"],
     )
+    hidden_n = payload["summary"].get("hidden_agents", 0)
+    system_n = payload["summary"].get("system_agents", 0)
+    if not show_all and (hidden_n or system_n):
+        err_console.print(f"[dim]({hidden_n} hidden, {system_n} system — pass --all to include)[/dim]")
 
 
 @agents_app.command("show")

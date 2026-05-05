@@ -155,6 +155,76 @@ def login_user(
     console.print("\n[cyan]You're ready.[/cyan] Try: ax auth whoami")
 
 
+def _probe_credential(effective: dict) -> dict:
+    """Run the live /auth/exchange to confirm the configured PAT is alive.
+
+    Returns a probe record describing success or classified failure. Never
+    raises — caller folds it back into the doctor envelope. No request body,
+    Authorization header, or PAT substring is ever surfaced.
+    """
+    auth_source = effective.get("auth_source")
+    token_kind = effective.get("token_kind")
+    base_url = effective.get("base_url")
+
+    if auth_source == "local_config:gateway":
+        return {
+            "skipped": True,
+            "reason": "credential is brokered by Gateway; runtime auth happens out-of-band",
+        }
+    if token_kind == "missing" or not base_url:
+        return {
+            "skipped": True,
+            "reason": "no token resolved to probe",
+        }
+
+    from ..config import resolve_token
+    from ..token_cache import TokenExchanger
+
+    pat = resolve_token()
+    if not pat:
+        return {"skipped": True, "reason": "no token resolved to probe"}
+
+    if token_kind == "agent_pat":
+        token_class = "agent_access"
+        agent_id = effective.get("agent_id")
+    else:
+        token_class = "user_access"
+        agent_id = None
+
+    exchanger = TokenExchanger(base_url, pat)
+    try:
+        exchanger.get_token(token_class, agent_id=agent_id, force_refresh=True)
+        return {"ok": True, "token_class": token_class, "host": effective.get("host")}
+    except httpx.HTTPStatusError as exc:
+        try:
+            body = exc.response.json()
+            detail = body.get("detail") if isinstance(body, dict) else None
+            error_code = detail.get("error") if isinstance(detail, dict) else None
+        except Exception:
+            error_code = None
+        status = exc.response.status_code if exc.response is not None else None
+        if status == 401 and (error_code == "invalid_credential" or error_code is None):
+            error_code = error_code or "invalid_credential"
+        return {
+            "ok": False,
+            "code": error_code or f"http_{status}" if status else "exchange_failed",
+            "host": effective.get("host"),
+            "token_class": token_class,
+        }
+    except Exception:
+        return {"ok": False, "code": "exchange_failed", "host": effective.get("host")}
+
+
+def _invalid_credential_recovery_copy(host: str | None) -> str:
+    target = host or "the configured host"
+    url_hint = f"https://{host}" if host else "<your-host>"
+    return (
+        f"Token rejected by {target} — likely minted in a different environment. "
+        f"Run `axctl login --url {url_hint}` to re-authenticate, or pick the right "
+        f"env with `--env <name>`."
+    )
+
+
 @app.command("doctor")
 def doctor(
     env_name: str = typer.Option(
@@ -163,22 +233,43 @@ def doctor(
         help="Diagnose a named user-login environment created with `axctl login --env`",
     ),
     space_id: str = typer.Option(None, "--space-id", help="Show this explicit space override in the resolution"),
+    probe: bool = typer.Option(
+        False,
+        "--probe/--no-probe",
+        help="Also call /auth/exchange to verify the configured PAT is alive (off by default)",
+    ),
     as_json: bool = JSON_OPTION,
 ):
-    """Explain effective auth/config resolution without calling the API."""
+    """Explain effective auth/config resolution; with --probe, also verify the PAT is alive."""
     data = diagnose_auth_config(env_name=env_name, explicit_space_id=space_id)
     effective = data["effective"]
+
+    if probe:
+        probe_result = _probe_credential(effective)
+        data["probe"] = probe_result
+        if probe_result.get("ok") is False:
+            data["ok"] = False
+            data.setdefault("problems", []).append(
+                {
+                    "code": probe_result.get("code") or "exchange_failed",
+                    "reason": _invalid_credential_recovery_copy(probe_result.get("host")),
+                }
+            )
+
+    summary = {
+        "command": "ax auth doctor",
+        "principal_intent": effective.get("principal_intent"),
+        "auth_source": effective.get("auth_source"),
+        "host": effective.get("host"),
+        "space_id": effective.get("space_id"),
+        "warnings": len(data.get("warnings", [])),
+        "problems": len(data.get("problems", [])),
+    }
+    if "probe" in data:
+        summary["probe"] = data["probe"]
     apply_envelope(
         data,
-        summary={
-            "command": "ax auth doctor",
-            "principal_intent": effective.get("principal_intent"),
-            "auth_source": effective.get("auth_source"),
-            "host": effective.get("host"),
-            "space_id": effective.get("space_id"),
-            "warnings": len(data.get("warnings", [])),
-            "problems": len(data.get("problems", [])),
-        },
+        summary=summary,
         details=data.get("problems") or data.get("warnings") or [],
     )
     if as_json:
@@ -200,10 +291,40 @@ def doctor(
             console.print(f"  selected_env     = {data['selected_env']}")
         if data.get("selected_profile"):
             console.print(f"  selected_profile = {data['selected_profile']}")
+        binding = effective.get("gateway_binding") or {}
+        if binding.get("daemon_running") or binding.get("bound_candidates"):
+            daemon_state = "running" if binding.get("daemon_running") else "stopped"
+            pid = binding.get("daemon_pid")
+            pid_str = f" (pid {pid})" if pid else ""
+            cands = binding.get("bound_candidates") or []
+            console.print(f"  gateway_daemon   = {daemon_state}{pid_str}")
+            if cands:
+                selected = binding.get("selected") or {}
+                selected_name = selected.get("name") if selected else None
+                lines = []
+                for c in cands:
+                    marker = "*" if c.get("name") == selected_name else " "
+                    lines.append(
+                        f"    {marker} @{c.get('name')} "
+                        f"({c.get('template_id')}, mode={c.get('mode')}, "
+                        f"liveness={c.get('liveness')})"
+                    )
+                console.print(f"  gateway_bindings = {len(cands)} for this workdir")
+                for line in lines:
+                    console.print(line)
         for warning in data.get("warnings", []):
             console.print(f"[yellow]warning:[/yellow] {warning['code']} - {warning.get('reason')}")
         for problem in data.get("problems", []):
             console.print(f"[red]problem:[/red] {problem['code']} - {problem.get('reason')}")
+        if probe:
+            probe_result = data.get("probe") or {}
+            if probe_result.get("ok") is True:
+                console.print(f"[green]probe:[/green] /auth/exchange ok ({probe_result.get('token_class')})")
+            elif probe_result.get("skipped"):
+                console.print(f"[cyan]probe:[/cyan] skipped — {probe_result.get('reason')}")
+            elif probe_result.get("ok") is False:
+                console.print(f"[red]probe:[/red] /auth/exchange rejected ({probe_result.get('code')})")
+                console.print(_invalid_credential_recovery_copy(probe_result.get("host")))
 
     if not data["ok"]:
         raise typer.Exit(EXIT_NOT_OK)
@@ -219,11 +340,35 @@ def whoami(as_json: bool = JSON_OPTION):
         data = _gateway_local_call(gateway_cfg=gateway_cfg, method="whoami")
         data.setdefault("control_plane", "gateway")
         data.setdefault("gateway_url", gateway_cfg.get("url"))
-        data.setdefault("local_config", gateway_cfg.get("local_config"))
+        # Surface the actual on-disk local config path under gateway-managed
+        # identity (the field comes from resolve_gateway_config but isn't
+        # populated there). Also detect stale [agent].workdir so the same
+        # warning shape appears whether or not we're gateway-brokered.
+        local = _local_config_dir()
+        if local and (local / "config.toml").exists():
+            data["local_config"] = str(local / "config.toml")
+            import tomllib
+
+            from ..config import _find_project_root, _local_config_workdir_mismatch
+
+            try:
+                local_cfg = tomllib.loads((local / "config.toml").read_text())
+                mismatch = _local_config_workdir_mismatch(local_cfg, _find_project_root())
+            except Exception:  # noqa: BLE001
+                mismatch = None
+            if mismatch:
+                data["stale_workdir"] = mismatch
         if as_json:
             print_json(data)
         else:
             print_kv(data)
+            if data.get("stale_workdir"):
+                sw = data["stale_workdir"]
+                console.print(
+                    f"[yellow]⚠ stale local config:[/yellow] {sw['config_path']} "
+                    f"declares workdir={sw['configured_workdir']} but cwd resolves to "
+                    f"{sw['actual_workdir']}. Identity may bind to the wrong agent."
+                )
         return
 
     client = get_client()
@@ -253,6 +398,19 @@ def whoami(as_json: bool = JSON_OPTION):
     local = _local_config_dir()
     if local and (local / "config.toml").exists():
         data["local_config"] = str(local / "config.toml")
+        # Surface stale-workdir mismatch so operators see misattribution risk
+        # before they send. Same diagnosis the auth-doctor warnings carry.
+        import tomllib
+
+        from ..config import _find_project_root, _local_config_workdir_mismatch
+
+        try:
+            local_cfg = tomllib.loads((local / "config.toml").read_text())
+            mismatch = _local_config_workdir_mismatch(local_cfg, _find_project_root())
+        except Exception:  # noqa: BLE001
+            mismatch = None
+        if mismatch:
+            data["stale_workdir"] = mismatch
     runtime_config = os.environ.get("AX_CONFIG_FILE")
     if runtime_config:
         data["runtime_config"] = runtime_config
@@ -261,6 +419,13 @@ def whoami(as_json: bool = JSON_OPTION):
         print_json(data)
     else:
         print_kv(data)
+        if data.get("stale_workdir"):
+            sw = data["stale_workdir"]
+            console.print(
+                f"[yellow]⚠ stale local config:[/yellow] {sw['config_path']} "
+                f"declares workdir={sw['configured_workdir']} but cwd resolves to "
+                f"{sw['actual_workdir']}. Identity may bind to the wrong agent."
+            )
 
 
 @app.command("init")
@@ -527,9 +692,11 @@ def exchange(
     scope: str = typer.Option(
         "messages tasks context agents spaces search", "--scope", "-s", help="Space-separated scopes"
     ),
-    agent_id: str = typer.Option(None, "--agent", "-a", help="Agent ID (required for agent_access)"),
+    agent_id: str = typer.Option(None, "--agent", "-a", help="Existing agent ID for agent_access"),
+    agent_name: str = typer.Option(None, "--agent-name", help="Agent name for first local enrollment/bind"),
     audience: str = typer.Option("ax-api", "--audience", help="Target audience: ax-api or ax-mcp"),
     resource: str = typer.Option(None, "--resource", help="RFC 8707 resource URI (e.g. https://paxai.app/mcp)"),
+    requested_ttl: int = typer.Option(None, "--ttl", help="Requested token TTL in seconds"),
     as_json: bool = JSON_OPTION,
 ):
     """Exchange PAT for a short-lived JWT (AUTH-SPEC-001 §9).
@@ -557,8 +724,11 @@ def exchange(
         jwt = exchanger.get_token(
             token_class,
             agent_id=agent_id,
+            agent_name=agent_name,
             audience=audience,
             scope=scope,
+            requested_ttl=requested_ttl,
+            resource=resource,
         )
     except httpx.HTTPStatusError as e:
         handle_error(e)

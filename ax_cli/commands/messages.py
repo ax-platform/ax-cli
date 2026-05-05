@@ -438,6 +438,102 @@ def _message_items(data) -> list[dict]:
     return []
 
 
+def check_pending_replies(
+    *,
+    client=None,
+    gateway_cfg=None,
+    space_id: str | None = None,
+    limit: int = 5,
+) -> dict:
+    """Non-blocking pre-send awareness check for unread messages addressed to the invoking principal.
+
+    Returns a dict with keys: count, message_ids (newest first), newest_senders
+    (deduped, newest first). Returns the empty/zero shape on any error — never
+    raises and never blocks send paths.
+    """
+    empty = {"count": 0, "message_ids": [], "newest_senders": []}
+    try:
+        if gateway_cfg is not None:
+            args: dict = {"limit": limit, "channel": "main", "unread_only": True}
+            if space_id:
+                args["space_id"] = space_id
+            data = _gateway_local_call(
+                gateway_cfg=gateway_cfg,
+                method="list_messages",
+                args=args,
+                space_id=space_id,
+            )
+        elif client is not None:
+            kwargs: dict = {"limit": limit, "channel": "main", "unread_only": True}
+            if space_id:
+                kwargs["space_id"] = space_id
+            data = client.list_messages(**kwargs)
+        else:
+            return empty
+    except Exception:
+        return empty
+
+    messages = _message_items(data)
+    if not messages:
+        return empty
+
+    ids: list[str] = []
+    senders: list[str] = []
+    seen_senders: set[str] = set()
+    for m in messages[:limit]:
+        mid = str(m.get("id") or "").strip()
+        if mid:
+            ids.append(mid)
+        sender = m.get("display_name") or m.get("sender_handle") or m.get("sender_name") or ""
+        sender = str(sender).strip()
+        if sender and sender not in seen_senders:
+            senders.append(sender)
+            seen_senders.add(sender)
+
+    raw_count = data.get("unread_count") if isinstance(data, dict) else None
+    if isinstance(raw_count, int):
+        count = raw_count
+    else:
+        count = len(messages)
+    return {"count": count, "message_ids": ids, "newest_senders": senders}
+
+
+def print_pending_reply_warning(
+    pending: dict,
+    *,
+    target_inbox_cmd: str = "ax messages list --unread",
+) -> None:
+    """Surface a non-blocking warning if pending unread messages addressed to the sender exist."""
+    count = pending.get("count", 0) if isinstance(pending, dict) else 0
+    if not count:
+        return
+    senders = pending.get("newest_senders", []) if isinstance(pending, dict) else []
+    sender_blurb = ""
+    if senders:
+        if len(senders) == 1:
+            sender_blurb = f", newest from @{senders[0]}"
+        else:
+            extras = len(senders) - 1
+            sender_blurb = f", newest from @{senders[0]} (+{extras} other{'s' if extras != 1 else ''})"
+    plural = "y" if count == 1 else "ies"
+    console.print(
+        f"[yellow]\u26a0 {count} pending repl{plural} addressed to you{sender_blurb}. "
+        f"Review with: {target_inbox_cmd}[/yellow]"
+    )
+
+
+def augment_send_receipt_with_pending(receipt: dict, pending: dict) -> dict:
+    """Add pending_reply_* fields to a JSON send receipt. Returns receipt for chaining."""
+    if not isinstance(receipt, dict):
+        return receipt
+    if not isinstance(pending, dict):
+        return receipt
+    receipt["pending_reply_count"] = pending.get("count", 0)
+    receipt["pending_reply_message_ids"] = list(pending.get("message_ids", []))
+    receipt["pending_reply_newest_senders"] = list(pending.get("newest_senders", []))
+    return receipt
+
+
 def _resolve_message_id(client, message_id: str, *, space_id: str | None = None) -> str:
     """Resolve table-friendly short message IDs against recent messages."""
     candidate = message_id.strip()
@@ -740,6 +836,7 @@ def send(
         if channel != "main":
             typer.echo("Error: custom --channel is not supported with Gateway-native local identity yet.", err=True)
             raise typer.Exit(1)
+        pending = check_pending_replies(gateway_cfg=gateway_cfg, space_id=space_id)
         data = _gateway_local_send(
             gateway_cfg=gateway_cfg,
             content=final_content,
@@ -749,6 +846,7 @@ def send(
         msg = data.get("message", data)
         msg_id = msg.get("id") or msg.get("message_id") or data.get("id")
         if as_json:
+            augment_send_receipt_with_pending(data, pending)
             print_json(data)
         else:
             sent_line = f"[green]Sent through Gateway.[/green] id={msg_id}"
@@ -756,6 +854,7 @@ def send(
             if sender:
                 sent_line += f" as {sender}"
             console.print(sent_line)
+            print_pending_reply_warning(pending)
             if wait:
                 console.print("[dim]Gateway-native send accepted; reply waiting for this path is not wired yet.[/dim]")
         return
@@ -877,6 +976,8 @@ def send(
         processing_watcher.start()
         processing_watcher.wait_ready()
 
+    pending = check_pending_replies(client=client, space_id=sid)
+
     try:
         parent_id = _resolve_message_id(client, parent, space_id=sid) if parent else None
         data = client.send_message(
@@ -900,6 +1001,7 @@ def send(
         if processing_watcher:
             processing_watcher.close()
         if as_json:
+            augment_send_receipt_with_pending(data, pending)
             print_json(data)
         else:
             sent_line = f"[green]Sent.[/green] id={msg_id}"
@@ -909,6 +1011,7 @@ def send(
             console.print(sent_line)
             if delivery_chip:
                 console.print(f"[dim]{delivery_chip}[/dim]")
+            print_pending_reply_warning(pending)
         return
 
     sent_line = f"[green]Sent.[/green] id={msg_id}"
@@ -918,6 +1021,7 @@ def send(
     console.print(sent_line)
     if delivery_chip:
         console.print(f"[dim]{delivery_chip}[/dim]")
+    print_pending_reply_warning(pending)
     wait_label = _target_mention("aX") if ask_ax else (_target_mention(to) if to else "reply")
     reply = _wait_for_reply(
         client,
@@ -932,7 +1036,9 @@ def send(
 
     if reply:
         if as_json:
-            print_json({"sent": data, "reply": reply, "processing_statuses": processing_statuses})
+            wait_payload = {"sent": data, "reply": reply, "processing_statuses": processing_statuses}
+            augment_send_receipt_with_pending(wait_payload, pending)
+            print_json(wait_payload)
         else:
             console.print(f"\n[bold cyan]aX:[/bold cyan] {reply.get('content', '')}")
             gateway_note = _gateway_reply_note(reply)
@@ -940,14 +1046,14 @@ def send(
                 console.print(f"[dim]{gateway_note}[/dim]")
     else:
         if as_json:
-            print_json(
-                {
-                    "sent": data,
-                    "reply": None,
-                    "timeout": True,
-                    "processing_statuses": processing_statuses,
-                }
-            )
+            wait_payload = {
+                "sent": data,
+                "reply": None,
+                "timeout": True,
+                "processing_statuses": processing_statuses,
+            }
+            augment_send_receipt_with_pending(wait_payload, pending)
+            print_json(wait_payload)
         else:
             if processing_statuses:
                 last_status = processing_statuses[-1].get("status")

@@ -1166,6 +1166,60 @@ def test_gateway_local_connect_infers_agent_from_workdir_config(monkeypatch, tmp
     assert captured["json"]["fingerprint"] == {"agent_name": "frontend_sentinel", "cwd": str(tmp_path)}
 
 
+def test_gateway_local_connect_infers_agent_from_cwd_config(monkeypatch, tmp_path):
+    ax_dir = tmp_path / ".ax"
+    ax_dir.mkdir()
+    (ax_dir / "config.toml").write_text(
+        "[gateway]\n"
+        'mode = "local"\n'
+        'url = "http://127.0.0.1:8765"\n'
+        "[agent]\n"
+        'agent_name = "frontend_sentinel"\n'
+    )
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "pending", "approval_id": "approval-frontend"}
+
+    def fake_post(url, *, json=None, timeout=None):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(gateway_cmd.httpx, "post", fake_post)
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_local_process_fingerprint",
+        lambda **kwargs: {"agent_name": kwargs["agent_name"], "cwd": kwargs["cwd"]},
+    )
+
+    payload = gateway_cmd._request_local_connect()
+
+    assert payload["approval_id"] == "approval-frontend"
+    assert captured["json"]["agent_name"] == "frontend_sentinel"
+    assert captured["json"]["fingerprint"] == {"agent_name": "frontend_sentinel", "cwd": str(tmp_path)}
+
+
+def test_local_process_fingerprint_resolves_executable_symlink(tmp_path):
+    exe_target = tmp_path / "python3.12"
+    exe_target.write_text("fake python")
+    exe_link = tmp_path / "python3"
+    exe_link.symlink_to(exe_target)
+
+    fingerprint = gateway_cmd._local_process_fingerprint(
+        agent_name="codex-local",
+        cwd=str(tmp_path),
+        exe_path=str(exe_link),
+    )
+
+    assert fingerprint["exe_path"] == str(exe_target.resolve())
+
+
 def test_gateway_local_connect_rejects_agent_workdir_mismatch(tmp_path):
     ax_dir = tmp_path / ".ax"
     ax_dir.mkdir()
@@ -3231,8 +3285,11 @@ def test_gateway_ui_handler_supports_agent_mutations(monkeypatch, tmp_path):
             assert tested.status_code == 201
             tested_payload = tested.json()
             assert tested_payload["target_agent"] == "ui-bot"
-            assert tested_payload["author"] == "agent"
-            assert tested_payload["sender_agent"].startswith("switchboard-")
+            # UI test endpoint defaults to user-authored per the invoking-principal
+            # model (Madtank/supervisor 2026-05-02). The user identity comes from
+            # the Gateway session; switchboard auto-creation is no longer reached.
+            assert tested_payload["author"] == "user"
+            assert tested_payload.get("sender_agent") in (None, "")
             assert (
                 tested_payload["content"]
                 == "@ui-bot Reply naturally that the Gateway round trip worked, then mention which local model answered."
@@ -3371,7 +3428,13 @@ def test_gateway_move_updates_routing_for_test_messages(monkeypatch, tmp_path):
     assert stored["space_id"] == "space-2"
     assert stored["active_space_name"] == "New Space"
 
-    tested = gateway_cmd._send_gateway_test_to_managed_agent("mover")
+    # Migration (Madtank/supervisor 2026-05-02): default sender is now the
+    # invoking principal, never the auto-created switchboard. This test runs
+    # outside a Gateway-managed workspace, so name the sender explicitly to
+    # exercise the routing-after-move semantics this test is about.
+    tested = gateway_cmd._send_gateway_test_to_managed_agent(
+        "mover", sender_agent="switchboard-space2"
+    )
 
     assert tested["target_agent"] == "mover"
     assert tested["message"]["space_id"] == "space-2"
@@ -3466,134 +3529,13 @@ def test_gateway_move_waits_for_listener_ready_after_runtime_start(monkeypatch, 
     assert calls["recent"] == 2
 
 
-def test_gateway_test_falls_back_when_space_sender_cannot_be_created(monkeypatch, tmp_path):
-    config_dir = tmp_path / "config"
-    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
-    gateway_core.save_gateway_session(
-        {
-            "token": "axp_u_test.token",
-            "base_url": "https://paxai.app",
-            "space_id": "space-1",
-            "username": "codex",
-        }
-    )
-
-    token_file = tmp_path / "mover.token"
-    token_file.write_text("axp_a_mover.secret")
-    registry = gateway_core.load_gateway_registry()
-    registry["agents"] = [
-        {
-            "name": "mover",
-            "agent_id": "agent-mover",
-            "space_id": "space-2",
-            "active_space_id": "space-2",
-            "default_space_id": "space-2",
-            "base_url": "https://paxai.app",
-            "runtime_type": "echo",
-            "template_id": "echo_test",
-            "desired_state": "running",
-            "effective_state": "running",
-            "transport": "gateway",
-            "credential_source": "gateway",
-            "allowed_spaces": [{"space_id": "space-2", "name": "New Space", "is_default": True}],
-            "token_file": str(token_file),
-        }
-    ]
-    gateway_core.ensure_gateway_identity_binding(
-        registry,
-        registry["agents"][0],
-        session=gateway_core.load_gateway_session(),
-    )
-    gateway_core.save_gateway_registry(registry)
-    sent_messages = []
-
-    class RecordingManagedClient:
-        def send_message(self, space_id, content, *, agent_id=None, parent_id=None, metadata=None):
-            sent_messages.append({"space_id": space_id, "content": content, "agent_id": agent_id, "metadata": metadata})
-            return {
-                "message": {
-                    "id": "gateway-test-1",
-                    "space_id": space_id,
-                    "content": content,
-                    "agent_id": agent_id,
-                    "metadata": metadata,
-                }
-            }
-
-    monkeypatch.setattr(gateway_cmd, "_load_managed_agent_client", lambda entry: RecordingManagedClient())
-    monkeypatch.setattr(
-        gateway_cmd,
-        "_register_managed_agent",
-        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("Backend rejected test sender PAT mint: 400")),
-    )
-
-    result = gateway_cmd._send_gateway_test_to_managed_agent("mover")
-
-    assert result["sender_agent"] == "mover"
-    assert result["message"]["space_id"] == "space-2"
-    assert sent_messages[-1]["agent_id"] == "agent-mover"
-    gateway_meta = sent_messages[-1]["metadata"]["gateway"]
-    assert gateway_meta["test_sender_fallback"] == "self"
-    assert "400" in gateway_meta["test_sender_error"]
-
-
-def test_gateway_test_can_disallow_self_fallback_for_custom_composer(monkeypatch, tmp_path):
-    config_dir = tmp_path / "config"
-    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
-    gateway_core.save_gateway_session(
-        {
-            "token": "axp_u_test.token",
-            "base_url": "https://paxai.app",
-            "space_id": "space-1",
-            "username": "codex",
-        }
-    )
-
-    registry = gateway_core.load_gateway_registry()
-    registry["agents"] = [
-        {
-            "name": "mover",
-            "agent_id": "agent-mover",
-            "space_id": "space-2",
-            "active_space_id": "space-2",
-            "default_space_id": "space-2",
-            "base_url": "https://paxai.app",
-            "runtime_type": "echo",
-            "template_id": "echo_test",
-            "desired_state": "running",
-            "effective_state": "running",
-            "transport": "gateway",
-            "credential_source": "gateway",
-        }
-    ]
-    gateway_core.ensure_gateway_identity_binding(
-        registry,
-        registry["agents"][0],
-        session=gateway_core.load_gateway_session(),
-    )
-    gateway_core.save_gateway_registry(registry)
-    sent_messages = []
-
-    class RecordingManagedClient:
-        def send_message(self, *args, **kwargs):
-            sent_messages.append({"args": args, "kwargs": kwargs})
-            return {"message": {"id": "unexpected"}}
-
-    monkeypatch.setattr(gateway_cmd, "_load_managed_agent_client", lambda entry: RecordingManagedClient())
-    monkeypatch.setattr(
-        gateway_cmd,
-        "_register_managed_agent",
-        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("Backend rejected test sender PAT mint: 400")),
-    )
-
-    with pytest.raises(ValueError, match="Gateway service sender is not ready"):
-        gateway_cmd._send_gateway_test_to_managed_agent(
-            "mover",
-            content="custom operator message",
-            allow_self_fallback=False,
-        )
-
-    assert sent_messages == []
+# REMOVED 2026-05-02 (Madtank/supervisor): two tests deleted here that exercised
+# the auto-switchboard fallback path and the `allow_self_fallback=False` flag.
+# Both tested behavior that has been removed: the default agents-test sender is
+# now the invoking principal (resolved from workspace local config), and
+# `allow_self_fallback` no longer exists. Replacement coverage lives in
+# tests/test_agents_test_invoking_principal.py — search for `fails_hard` and
+# `explicit_sender_agent_overrides_invoking_principal` for the new contract.
 
 
 def test_gateway_agents_update_changes_template_and_workdir(monkeypatch, tmp_path):
@@ -4025,6 +3967,23 @@ def test_gateway_agents_test_sends_gateway_authored_probe(monkeypatch, tmp_path)
             "username": "codex",
         }
     )
+    # Migration (Madtank/supervisor 2026-05-02): default sender = invoking
+    # principal. Set up a Gateway-managed workspace so the resolver returns
+    # codex_supervisor as the principal for this CLI invocation.
+    workspace_ax = tmp_path / ".ax"
+    workspace_ax.mkdir(exist_ok=True)
+    (workspace_ax / "config.toml").write_text(
+        "[gateway]\n"
+        'mode = "local"\n'
+        'url = "http://127.0.0.1:8765"\n'
+        "\n"
+        "[agent]\n"
+        'agent_name = "codex_supervisor"\n'
+        f'workdir = "{tmp_path}"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    invoker_token = tmp_path / "codex_supervisor.token"
+    invoker_token.write_text("axp_a_codex.secret")
     registry = gateway_core.load_gateway_registry()
     registry["agents"] = [
         {
@@ -4038,7 +3997,22 @@ def test_gateway_agents_test_sends_gateway_authored_probe(monkeypatch, tmp_path)
             "effective_state": "running",
             "transport": "gateway",
             "credential_source": "gateway",
-        }
+        },
+        {
+            "name": "codex_supervisor",
+            "agent_id": "agent-codex",
+            "space_id": "space-1",
+            "active_space_id": "space-1",
+            "default_space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "echo",
+            "template_id": "echo_test",
+            "desired_state": "running",
+            "effective_state": "running",
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "token_file": str(invoker_token),
+        },
     ]
     gateway_core.save_gateway_registry(registry)
     monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: _FakeUserClient())
@@ -4054,11 +4028,13 @@ def test_gateway_agents_test_sends_gateway_authored_probe(monkeypatch, tmp_path)
     payload = json.loads(result.stdout)
     assert payload["target_agent"] == "echo-bot"
     assert payload["author"] == "agent"
-    assert payload["sender_agent"] == "switchboard-space1"
+    assert payload["sender_agent"] == "codex_supervisor", "default sender must be invoking principal"
+    assert "switchboard" not in str(payload).lower()
     assert payload["recommended_prompt"] == "gateway test ping"
     assert payload["content"] == "@echo-bot gateway test ping"
     assert payload["message"]["metadata"]["gateway"]["sent_via"] == "gateway_test"
     assert payload["message"]["metadata"]["gateway"]["test_author"] == "agent"
+    assert payload["message"]["metadata"]["gateway"].get("test_sender_explicit") is False
     recent = gateway_core.load_recent_gateway_activity()
     assert recent[-1]["event"] == "gateway_test_sent"
 
@@ -4485,18 +4461,26 @@ def test_gateway_local_send_auto_connects_with_agent(monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert calls[0]["url"].endswith("/local/connect")
-    assert calls[0]["json"]["agent_name"] == "codex-pass-through"
-    assert calls[1]["url"].endswith("/local/send")
-    assert calls[1]["headers"] == {"X-Gateway-Session": "axgw_s_test.session"}
-    assert calls[1]["json"]["content"] == "@night-owl please QA PR 114"
-    assert calls[2]["method"] == "GET"
-    assert calls[2]["url"].endswith("/local/inbox")
-    assert calls[2]["params"]["mark_read"] == "true"
+    connects = [c for c in calls if c.get("url", "").endswith("/local/connect")]
+    sends = [c for c in calls if c.get("url", "").endswith("/local/send")]
+    inbox_gets = [c for c in calls if c.get("method") == "GET" and c.get("url", "").endswith("/local/inbox")]
+    assert connects and connects[0]["json"]["agent_name"] == "codex-pass-through"
+    assert len(sends) == 1
+    assert sends[0]["headers"] == {"X-Gateway-Session": "axgw_s_test.session"}
+    assert sends[0]["json"]["content"] == "@night-owl please QA PR 114"
+    # Pre-send pending-reply check must NOT mark messages read; post-send inbox poll must.
+    pre_send = [g for g in inbox_gets if g["params"].get("mark_read") == "false"]
+    post_send = [g for g in inbox_gets if g["params"].get("mark_read") == "true"]
+    assert pre_send, "expected pre-send pending-reply check via /local/inbox with mark_read=false"
+    assert post_send, "expected post-send inbox poll via /local/inbox with mark_read=true"
     payload = json.loads(result.output)
     assert payload["agent"] == "codex-pass-through"
     assert payload["connect"]["agent"] == "codex-pass-through"
     assert payload["inbox"]["messages"][0]["content"] == "@codex-pass-through received"
+    # Pending-reply receipt fields are present (zero in this test since fake_get returns one msg only after send).
+    assert "pending_reply_count" in payload
+    assert "pending_reply_message_ids" in payload
+    assert "pending_reply_newest_senders" in payload
 
 
 def test_gateway_local_send_can_skip_inbox_check(monkeypatch):
@@ -4808,3 +4792,480 @@ def test_gateway_spaces_current_shows_session_space(monkeypatch, tmp_path):
         "base_url": "https://paxai.app",
         "username": "codex",
     }
+
+
+# --- GATEWAY-ACTIVITY-VISIBILITY-001 Phase 1: canonical event vocabulary -----
+
+
+def test_gateway_activity_phase_set_covers_supervisor_lifecycle():
+    """The phase enum is the supervisor-loop / aX bubble contract; freezing
+    it here means a runtime change cannot silently drop a phase the
+    supervisor depends on."""
+    expected = {
+        "received",
+        "routed",
+        "delivered",
+        "claimed",
+        "working",
+        "tool",
+        "reply",
+        "result",
+        "blocked",
+        "stale",
+        "reminder",
+    }
+    assert set(gateway_core.GATEWAY_ACTIVITY_PHASES) == expected
+
+
+def test_gateway_activity_event_vocabulary_phase_mapping():
+    """Every registered event maps to a registered phase. New event names
+    that don't appear here should pass review with an explicit mapping."""
+    mapping = gateway_core.GATEWAY_ACTIVITY_EVENTS
+    assert mapping["message_received"] == "received"
+    assert mapping["message_queued"] == "received"
+    assert mapping["delivered_to_inbox"] == "delivered"
+    assert mapping["message_claimed"] == "claimed"
+    assert mapping["runtime_activity"] == "working"
+    assert mapping["tool_started"] == "tool"
+    assert mapping["tool_call_recorded"] == "tool"
+    assert mapping["tool_call_record_failed"] == "tool"
+    assert mapping["reply_sent"] == "reply"
+    assert mapping["runtime_error"] == "result"
+    assert mapping["agent_skipped"] == "result"
+    # All registered events use a registered phase.
+    for event_name, phase in mapping.items():
+        assert phase in gateway_core.GATEWAY_ACTIVITY_PHASES, (event_name, phase)
+
+
+def test_gateway_activity_phase_for_event_returns_none_for_unknown():
+    assert gateway_core.phase_for_event("not_a_real_event") is None
+    assert gateway_core.phase_for_event("") is None
+    assert gateway_core.phase_for_event("message_received") == "received"
+
+
+def test_record_gateway_activity_attaches_phase_for_known_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+    rec = gateway_core.record_gateway_activity(
+        "message_received",
+        message_id="msg-1",
+    )
+    assert rec["phase"] == "received"
+    rec2 = gateway_core.record_gateway_activity(
+        "tool_started",
+        message_id="msg-1",
+        tool_name="bash",
+    )
+    assert rec2["phase"] == "tool"
+
+
+def test_record_gateway_activity_omits_phase_for_unknown_event(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+    rec = gateway_core.record_gateway_activity(
+        "totally_made_up_event",
+        message_id="msg-1",
+    )
+    # Unknown events still record (legacy callers, future events) but carry
+    # no phase so consumers can spot drift instead of trusting a fake phase.
+    assert "phase" not in rec
+
+
+def test_gateway_activity_command_filters_by_message_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+    entry = {"name": "agent-a", "agent_id": "a-1", "runtime_type": "ollama"}
+
+    # Two messages interleaved.
+    gateway_core.record_gateway_activity("message_received", entry=entry, message_id="msg-A")
+    gateway_core.record_gateway_activity("message_received", entry=entry, message_id="msg-B")
+    gateway_core.record_gateway_activity("message_claimed", entry=entry, message_id="msg-A")
+    gateway_core.record_gateway_activity("tool_started", entry=entry, message_id="msg-A", tool_name="bash")
+    gateway_core.record_gateway_activity("reply_sent", entry=entry, message_id="msg-B")
+    gateway_core.record_gateway_activity("reply_sent", entry=entry, message_id="msg-A")
+
+    result = runner.invoke(app, ["gateway", "activity", "--message-id", "msg-A", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["message_id"] == "msg-A"
+    events = [item["event"] for item in payload["events"]]
+    assert events == ["message_received", "message_claimed", "tool_started", "reply_sent"]
+    phases = [item.get("phase") for item in payload["events"]]
+    assert phases == ["received", "claimed", "tool", "reply"]
+    # Every event row carries the message id we asked for.
+    assert all(item.get("message_id") == "msg-A" for item in payload["events"])
+
+
+def test_gateway_activity_command_orders_chronologically_under_jitter(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+    # Append unsorted to the JSONL — reader must order by ts, not file order.
+    log = gateway_core.activity_log_path()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"ts": "2026-04-29T10:00:02Z", "event": "message_claimed", "message_id": "msg-X", "phase": "claimed"},
+        {"ts": "2026-04-29T10:00:01Z", "event": "message_received", "message_id": "msg-X", "phase": "received"},
+        {"ts": "2026-04-29T10:00:03Z", "event": "reply_sent", "message_id": "msg-X", "phase": "reply"},
+    ]
+    log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    result = runner.invoke(app, ["gateway", "activity", "--message-id", "msg-X", "--json"])
+    assert result.exit_code == 0, result.output
+    events = [item["event"] for item in json.loads(result.output)["events"]]
+    assert events == ["message_received", "message_claimed", "reply_sent"]
+
+
+def test_gateway_activity_command_filters_by_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+    entry_a = {"name": "agent-a", "agent_id": "a-1"}
+    entry_b = {"name": "agent-b", "agent_id": "b-1"}
+    gateway_core.record_gateway_activity("message_received", entry=entry_a, message_id="msg-1")
+    gateway_core.record_gateway_activity("message_received", entry=entry_b, message_id="msg-2")
+
+    result = runner.invoke(app, ["gateway", "activity", "--agent", "agent-a", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert all(item.get("agent_name") == "agent-a" for item in payload["events"])
+    assert {item.get("message_id") for item in payload["events"]} == {"msg-1"}
+
+
+def test_gateway_activity_command_returns_empty_when_no_match(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+    result = runner.invoke(app, ["gateway", "activity", "--message-id", "nope", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {"message_id": "nope", "events": []}
+
+
+def test_gateway_activity_command_does_not_emit_credentials(monkeypatch, tmp_path):
+    """Defense-in-depth: if a runtime ever writes a token-shaped string into
+    the activity log, the inspector must surface it as the consumer would
+    see it without redaction (this is a read of disk content the daemon
+    already owns), AND the command must not introduce any new credential
+    surface — it must not require auth or call the backend."""
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("activity command must not construct an AxClient")
+
+    monkeypatch.setattr(gateway_cmd, "AxClient", _explode)
+    gateway_core.record_gateway_activity(
+        "message_received",
+        entry={"name": "agent-a", "agent_id": "a-1"},
+        message_id="msg-1",
+    )
+    result = runner.invoke(app, ["gateway", "activity", "--message-id", "msg-1", "--json"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# Gateway lifecycle v1: hide-stale sweep + upstream transition signals.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingHeartbeatClient:
+    """Records send_heartbeat / delete_agent calls for assertion."""
+
+    def __init__(self, *, fail_with: Exception | None = None,
+                 fail_status_code: int | None = None):
+        self.heartbeats: list[dict] = []
+        self.deletes: list[str] = []
+        self._fail_with = fail_with
+        self._fail_status_code = fail_status_code
+
+    def send_heartbeat(self, *, agent_id=None, status=None, note=None,
+                       cadence_seconds=None):
+        self.heartbeats.append({
+            "agent_id": agent_id,
+            "status": status,
+            "note": note,
+            "cadence_seconds": cadence_seconds,
+        })
+        if self._fail_with is not None:
+            exc = self._fail_with
+            if self._fail_status_code is not None:
+                resp = type("R", (), {"status_code": self._fail_status_code})()
+                setattr(exc, "response", resp)
+            raise exc
+        return {"ok": True}
+
+    def delete_agent(self, identifier):
+        self.deletes.append(identifier)
+        if self._fail_with is not None:
+            raise self._fail_with
+        return {"ok": True, "id": identifier}
+
+
+def _stale_hermes_entry(name: str, *, age_seconds: float, liveness: str = "stale",
+                        agent_id: str = "agent-stale-1") -> dict:
+    return {
+        "name": name,
+        "agent_id": agent_id,
+        "space_id": "space-test",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": liveness,
+        "last_seen_age_seconds": age_seconds,
+        "last_seen_at": gateway_core._now_iso(),
+    }
+
+
+def _build_daemon(client) -> gateway_core.GatewayDaemon:
+    return gateway_core.GatewayDaemon(
+        client_factory=lambda **_: client,
+        poll_interval=0.0,
+    )
+
+
+def _isolate_gateway_paths(monkeypatch, tmp_path):
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("AX_GATEWAY_DIR", str(tmp_path / "gw"))
+
+
+def test_sweep_hides_stale_agent_after_threshold(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("AX_GATEWAY_HIDE_AFTER_STALE_SECONDS", raising=False)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-old", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test", "base_url": "http://x"})
+    assert entry["lifecycle_phase"] == "hidden"
+    assert "hidden_at" in entry
+    assert entry["hidden_reason"] == "stale"
+    recent = gateway_core.load_recent_gateway_activity()
+    assert any(r.get("event") == "managed_agent_hidden" for r in recent)
+
+
+def test_sweep_idempotent_for_already_hidden(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-old", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    session = {"token": "axp_u_test", "base_url": "http://x"}
+    daemon._sweep_lifecycle(registry, session=session)
+    daemon._sweep_lifecycle(registry, session=session)
+    hidden_events = [
+        r for r in gateway_core.load_recent_gateway_activity()
+        if r.get("event") == "managed_agent_hidden"
+    ]
+    assert len(hidden_events) == 1
+    assert len(client.heartbeats) == 1
+
+
+def test_sweep_skips_switchboard(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = {
+        "name": "switchboard-deadbeef",
+        "agent_id": "agent-switchboard",
+        "template_id": "inbox",
+        "effective_state": "running",
+        "liveness": "stale",
+        "last_seen_age_seconds": 24 * 60 * 60,
+    }
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    assert entry.get("lifecycle_phase", "active") == "active"
+    assert client.heartbeats == []
+
+
+def test_sweep_skips_service_account(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = {
+        "name": "system-events",
+        "agent_id": "agent-service",
+        "template_id": "service_account",
+        "effective_state": "running",
+        "liveness": "offline",
+        "last_seen_age_seconds": 24 * 60 * 60,
+    }
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    assert entry.get("lifecycle_phase", "active") == "active"
+    assert client.heartbeats == []
+
+
+def test_sweep_unhides_on_reconnect(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-back", age_seconds=2.0, liveness="connected")
+    entry["lifecycle_phase"] = "hidden"
+    entry["hidden_at"] = gateway_core._now_iso()
+    entry["hidden_reason"] = "stale"
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    assert entry["lifecycle_phase"] == "active"
+    assert "hidden_at" not in entry
+    assert "hidden_reason" not in entry
+    recent = gateway_core.load_recent_gateway_activity()
+    assert any(r.get("event") == "managed_agent_unhidden" for r in recent)
+
+
+def test_status_payload_filters_hidden_by_default(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    hidden = _stale_hermes_entry("hermes-hidden", age_seconds=30 * 60, liveness="offline",
+                                 agent_id="agent-hidden")
+    hidden["lifecycle_phase"] = "hidden"
+    active = {
+        "name": "hermes-live",
+        "agent_id": "agent-live",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": "connected",
+        "last_seen_age_seconds": 5.0,
+        "last_seen_at": gateway_core._now_iso(),
+    }
+    gateway_core.save_gateway_registry({"agents": [hidden, active]})
+
+    payload = gateway_cmd._status_payload(activity_limit=0)
+    names = [a["name"] for a in payload["agents"]]
+    assert "hermes-hidden" not in names
+    assert "hermes-live" in names
+    assert payload["summary"]["hidden_agents"] == 1
+    assert payload["summary"]["managed_agents"] == 1
+
+
+def test_status_payload_include_hidden_returns_all(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    hidden = _stale_hermes_entry("hermes-hidden", age_seconds=30 * 60, liveness="offline",
+                                 agent_id="agent-hidden")
+    hidden["lifecycle_phase"] = "hidden"
+    active = {
+        "name": "hermes-live",
+        "agent_id": "agent-live",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": "connected",
+        "last_seen_age_seconds": 5.0,
+        "last_seen_at": gateway_core._now_iso(),
+    }
+    gateway_core.save_gateway_registry({"agents": [hidden, active]})
+
+    payload = gateway_cmd._status_payload(activity_limit=0, include_hidden=True)
+    names = [a["name"] for a in payload["agents"]]
+    assert "hermes-hidden" in names
+    assert "hermes-live" in names
+    assert payload["summary"]["hidden_agents"] == 1
+
+
+def test_lifecycle_signal_sent_on_connected_to_stale(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-flap", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test", "base_url": "http://x"})
+    assert len(client.heartbeats) == 1
+    assert client.heartbeats[0]["status"] == "stale"
+    assert client.heartbeats[0]["agent_id"] == entry["agent_id"]
+    assert entry["last_lifecycle_signal"]["phase"] == "stale"
+
+
+def test_lifecycle_signal_idempotent(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-flap", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    session = {"token": "axp_u_test", "base_url": "http://x"}
+    daemon._sweep_lifecycle(registry, session=session)
+    daemon._sweep_lifecycle(registry, session=session)
+    assert len(client.heartbeats) == 1
+
+
+def test_lifecycle_signal_404_tolerant(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    boom = httpx.HTTPStatusError(
+        "platform has no record",
+        request=httpx.Request("POST", "http://x/api/v1/agents/heartbeat"),
+        response=httpx.Response(404),
+    )
+    client = _RecordingHeartbeatClient(fail_with=boom, fail_status_code=404)
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("hermes-ghost", age_seconds=20 * 60)
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test", "base_url": "http://x"})
+    # Hide still applied locally even though upstream said 404.
+    assert entry["lifecycle_phase"] == "hidden"
+    # Sticky last_lifecycle_signal updated → no infinite retry next tick.
+    assert entry["last_lifecycle_signal"]["phase"] == "stale"
+
+
+def test_remove_managed_agent_calls_delete_agent_then_local_remove(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    token_path = tmp_path / "tok"
+    token_path.write_text("axp_a_test\n")
+    entry = {
+        "name": "doomed-agent",
+        "agent_id": "agent-doomed",
+        "space_id": "space-x",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "token_file": str(token_path),
+    }
+    gateway_core.save_gateway_registry({"agents": [entry]})
+    client = _RecordingHeartbeatClient()
+    removed = gateway_cmd._remove_managed_agent("doomed-agent", client_factory=lambda: client)
+    assert removed["name"] == "doomed-agent"
+    assert client.deletes == ["agent-doomed"]
+    registry_after = gateway_core.load_gateway_registry()
+    assert all(a.get("name") != "doomed-agent" for a in registry_after.get("agents", []))
+    assert not token_path.exists()
+
+
+def test_remove_managed_agent_proceeds_on_upstream_failure(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    token_path = tmp_path / "tok"
+    token_path.write_text("axp_a_test\n")
+    entry = {
+        "name": "doomed-agent",
+        "agent_id": "agent-doomed",
+        "space_id": "space-x",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "token_file": str(token_path),
+    }
+    gateway_core.save_gateway_registry({"agents": [entry]})
+    boom = RuntimeError("network unreachable")
+    client = _RecordingHeartbeatClient(fail_with=boom)
+    removed = gateway_cmd._remove_managed_agent("doomed-agent", client_factory=lambda: client)
+    assert removed["name"] == "doomed-agent"
+    registry_after = gateway_core.load_gateway_registry()
+    assert all(a.get("name") != "doomed-agent" for a in registry_after.get("agents", []))
+    recent = gateway_core.load_recent_gateway_activity()
+    assert any(
+        r.get("event") == "managed_agent_remove_upstream_failed"
+        for r in recent
+    )
+
+
+def test_legacy_entry_without_lifecycle_phase_loads_as_active(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    # No lifecycle_phase field at all — represents pre-v1 on-disk entry.
+    entry = {
+        "name": "hermes-legacy",
+        "agent_id": "agent-legacy",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": "stale",
+        "last_seen_age_seconds": 30 * 60,
+    }
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    # Legacy entry got swept normally (treated as implicit active → hidden).
+    assert entry["lifecycle_phase"] == "hidden"
