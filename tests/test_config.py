@@ -10,7 +10,10 @@ from ax_cli.config import (
     _find_project_root,
     _global_config_dir,
     _load_config,
+    _load_local_config,
+    _local_config_workdir_mismatch,
     _save_user_config,
+    _warn_stale_workdir_local_config,
     diagnose_auth_config,
     resolve_agent_id,
     resolve_agent_name,
@@ -702,3 +705,103 @@ class TestResolveBaseUrl:
     def test_default_is_localhost(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert resolve_base_url() == "http://localhost:8001"
+
+
+# ---------------------------------------------------------------------------
+# Stale-workdir guard — defense against the 2026-05-04 misattribution incident
+# where codex_supervisor's cwd in another worktree silently rebound the CLI to
+# widget_hermes_local because that worktree's .ax/config.toml had the wrong
+# [agent].workdir. Bug report: aX msg 06bc04f0.
+# ---------------------------------------------------------------------------
+
+class TestStaleWorkdirMismatch:
+    def test_returns_none_when_workdir_matches(self, tmp_path):
+        cfg = {"agent": {"workdir": str(tmp_path)}}
+        assert _local_config_workdir_mismatch(cfg, tmp_path) is None
+
+    def test_returns_dict_when_workdir_differs(self, tmp_path):
+        other = tmp_path / "other"
+        other.mkdir()
+        cfg = {"agent": {"workdir": str(other)}}
+        result = _local_config_workdir_mismatch(cfg, tmp_path)
+        assert result is not None
+        assert result["configured_workdir"] == str(other.resolve())
+        assert result["actual_workdir"] == str(tmp_path.resolve())
+        assert result["config_path"].endswith(".ax/config.toml")
+
+    def test_returns_none_when_workdir_field_missing(self, tmp_path):
+        # Legacy / minimal config without workdir field — no opinion.
+        cfg = {"agent": {"agent_name": "some-agent"}}
+        assert _local_config_workdir_mismatch(cfg, tmp_path) is None
+
+    def test_returns_none_when_no_agent_block(self, tmp_path):
+        cfg = {"gateway": {"url": "http://x"}}
+        assert _local_config_workdir_mismatch(cfg, tmp_path) is None
+
+    def test_returns_none_when_project_root_none(self):
+        cfg = {"agent": {"workdir": "/some/path"}}
+        assert _local_config_workdir_mismatch(cfg, None) is None
+
+    def test_returns_none_for_non_dict_cfg(self, tmp_path):
+        assert _local_config_workdir_mismatch(None, tmp_path) is None  # type: ignore[arg-type]
+
+    def test_warning_fires_once_per_config_path(self, tmp_path, capsys):
+        # Reset the warned set so this test is independent.
+        config_module._stale_workdir_warned.clear()
+        mismatch = {
+            "config_path": str(tmp_path / ".ax" / "config.toml"),
+            "configured_workdir": "/somewhere/else",
+            "actual_workdir": str(tmp_path),
+        }
+        _warn_stale_workdir_local_config(mismatch)
+        first = capsys.readouterr().err
+        _warn_stale_workdir_local_config(mismatch)
+        second = capsys.readouterr().err
+        assert "Stale local aX config" in first
+        assert second == ""  # second call suppressed
+
+    def test_load_local_config_warns_when_stale(self, tmp_path, monkeypatch, capsys):
+        config_module._stale_workdir_warned.clear()
+        ax_dir = tmp_path / ".ax"
+        ax_dir.mkdir()
+        (ax_dir / "config.toml").write_text(
+            '[gateway]\nmode = "local"\nurl = "http://127.0.0.1:8765"\n\n'
+            '[agent]\nagent_name = "widget_hermes_local"\n'
+            'workdir = "/some/other/worktree"\n'
+        )
+        monkeypatch.chdir(tmp_path)
+        cfg = _load_local_config()
+        assert cfg["agent"]["agent_name"] == "widget_hermes_local"
+        captured = capsys.readouterr().err
+        assert "Stale local aX config" in captured
+        assert "/some/other/worktree" in captured
+        assert str(tmp_path) in captured
+
+    def test_load_local_config_silent_when_workdir_matches(self, tmp_path, monkeypatch, capsys):
+        config_module._stale_workdir_warned.clear()
+        ax_dir = tmp_path / ".ax"
+        ax_dir.mkdir()
+        (ax_dir / "config.toml").write_text(
+            '[gateway]\nmode = "local"\nurl = "http://127.0.0.1:8765"\n\n'
+            '[agent]\nagent_name = "ok-agent"\n'
+            f'workdir = "{tmp_path}"\n'
+        )
+        monkeypatch.chdir(tmp_path)
+        _load_local_config()
+        assert "Stale local aX config" not in capsys.readouterr().err
+
+    def test_diagnose_includes_stale_workdir_warning(self, tmp_path, monkeypatch):
+        config_module._stale_workdir_warned.clear()
+        ax_dir = tmp_path / ".ax"
+        ax_dir.mkdir()
+        (ax_dir / "config.toml").write_text(
+            '[gateway]\nmode = "local"\nurl = "http://127.0.0.1:8765"\n\n'
+            '[agent]\nagent_name = "widget"\n'
+            'workdir = "/other/worktree"\n'
+        )
+        monkeypatch.chdir(tmp_path)
+        # Isolate global config dir so diagnose doesn't read a real ~/.ax
+        monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "global"))
+        report = diagnose_auth_config()
+        codes = [w.get("code") for w in report.get("warnings", [])]
+        assert "stale_workdir_local_config" in codes
