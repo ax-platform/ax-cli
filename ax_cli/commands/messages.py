@@ -484,12 +484,7 @@ def check_pending_replies(
         mid = str(m.get("id") or "").strip()
         if mid:
             ids.append(mid)
-        sender = (
-            m.get("display_name")
-            or m.get("sender_handle")
-            or m.get("sender_name")
-            or ""
-        )
+        sender = m.get("display_name") or m.get("sender_handle") or m.get("sender_name") or ""
         sender = str(sender).strip()
         if sender and sender not in seen_senders:
             senders.append(sender)
