@@ -379,7 +379,7 @@ class HermesSDKRuntime(BaseRuntime):
                 tool_delay=0.5,
                 quiet_mode=True,
                 skip_context_files=True,
-                skip_memory=True,
+                skip_memory=False,
                 disabled_toolsets=disabled,
                 enabled_toolsets=enabled,
                 tool_progress_callback=_on_tool_progress,
