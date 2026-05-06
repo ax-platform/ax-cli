@@ -1260,6 +1260,83 @@ def _build_session_client_silent() -> AxClient | None:
         return None
 
 
+def _archive_managed_agent(name: str, *, reason: str | None = None, client_factory=None) -> dict:
+    """Archive a managed agent. Sticky — sweep won't auto-restore.
+
+    Sets `lifecycle_phase=archived` and `desired_state=stopped` so the daemon
+    reconciler stops the runtime. Captures `desired_state_before_archive` so
+    `restore` can put it back. Best-effort upstream signal `archived`. The
+    local registry is authoritative; upstream failure is logged, never fatal.
+    """
+    registry = load_gateway_registry()
+    entry = find_agent_entry(registry, name)
+    if not entry:
+        raise LookupError(f"Managed agent not found: {name}")
+    if str(entry.get("lifecycle_phase") or "active") == "archived":
+        return annotate_runtime_health(entry, registry=registry)
+    prior_desired_state = str(entry.get("desired_state") or "running")
+    entry["lifecycle_phase"] = "archived"
+    entry["archived_at"] = _utc_now_iso()
+    if reason and str(reason).strip():
+        entry["archived_reason"] = str(reason).strip()[:240]
+    else:
+        entry.pop("archived_reason", None)
+    entry["desired_state_before_archive"] = prior_desired_state
+    entry["desired_state"] = "stopped"
+    save_gateway_registry(registry, merge_archive=False)
+    record_gateway_activity(
+        "managed_agent_archived",
+        entry=entry,
+        reason=str(reason).strip() if reason else None,
+    )
+    user_client = client_factory() if client_factory is not None else _build_session_client_silent()
+    if user_client is not None:
+        from ..gateway import _post_lifecycle_signal as _signal
+
+        try:
+            _signal(user_client, entry, phase="archived", note=str(reason or "")[:240] or None)
+        except Exception:  # noqa: BLE001
+            pass
+    return annotate_runtime_health(entry, registry=registry)
+
+
+def _restore_managed_agent(name: str, *, client_factory=None) -> dict:
+    """Restore an archived agent to active. Honors prior desired_state.
+
+    If `desired_state_before_archive` was captured at archive time, the
+    runtime restores to that state. Otherwise defaults to `stopped` (safer
+    than auto-resuming a runtime the operator may have intentionally
+    disabled). Best-effort upstream signal `connected`.
+    """
+    registry = load_gateway_registry()
+    entry = find_agent_entry(registry, name)
+    if not entry:
+        raise LookupError(f"Managed agent not found: {name}")
+    if str(entry.get("lifecycle_phase") or "active") != "archived":
+        return annotate_runtime_health(entry, registry=registry)
+    prior = str(entry.get("desired_state_before_archive") or "stopped")
+    entry["lifecycle_phase"] = "active"
+    entry.pop("archived_at", None)
+    entry.pop("archived_reason", None)
+    entry.pop("desired_state_before_archive", None)
+    entry["desired_state"] = prior if prior in {"running", "stopped"} else "stopped"
+    save_gateway_registry(registry, merge_archive=False)
+    record_gateway_activity("managed_agent_restored", entry=entry)
+    user_client = client_factory() if client_factory is not None else _build_session_client_silent()
+    if user_client is not None:
+        from ..gateway import _post_lifecycle_signal as _signal
+
+        try:
+            _signal(user_client, entry, phase="connected")
+        except Exception:  # noqa: BLE001
+            pass
+    return annotate_runtime_health(entry, registry=registry)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _remove_managed_agent(name: str, *, client_factory=None) -> dict:
     registry = load_gateway_registry()
     peek = find_agent_entry(registry, name)
@@ -1544,12 +1621,18 @@ def _status_payload(*, activity_limit: int = 10, include_hidden: bool = False) -
         _with_registry_refs(registry, annotate_runtime_health(agent, registry=registry))
         for agent in registry.get("agents", [])
     ]
-    # Partition out hidden + system agents so default surfaces stay tidy.
-    # System agents (switchboards, service accounts) are infrastructure
-    # plumbing; hidden agents are stale ones the daemon swept away.
+    # Partition out archived + hidden + system agents so default surfaces
+    # stay tidy. System agents (switchboards, service accounts) are
+    # infrastructure plumbing; hidden agents are stale ones the daemon swept
+    # away; archived agents are user-disabled entries that are sticky.
+    archived_agents_list = [a for a in all_agents if str(a.get("lifecycle_phase") or "active") == "archived"]
     hidden_agents_list = [a for a in all_agents if str(a.get("lifecycle_phase") or "active") == "hidden"]
     system_agents_list = [a for a in all_agents if _is_system_agent(a)]
-    visible_agents = [a for a in all_agents if a not in hidden_agents_list and a not in system_agents_list]
+    visible_agents = [
+        a
+        for a in all_agents
+        if a not in archived_agents_list and a not in hidden_agents_list and a not in system_agents_list
+    ]
     agents = all_agents if include_hidden else visible_agents
     approvals = list_gateway_approvals()
     pending_approvals = [item for item in approvals if str(item.get("status") or "") == "pending"]
@@ -1619,6 +1702,7 @@ def _status_payload(*, activity_limit: int = 10, include_hidden: bool = False) -
             "blocked_agents": len(blocked_agents),
             "hidden_agents": len(hidden_agents_list),
             "system_agents": len(system_agents_list),
+            "archived_agents": len(archived_agents_list),
             "pending_approvals": len(pending_approvals),
         },
     }
@@ -6588,17 +6672,25 @@ def list_agents(
         False,
         "--all",
         "-a",
-        help="Include hidden (auto-swept stale) and system (switchboard / service-account) agents.",
+        help="Include archived, hidden (auto-swept stale), and system (switchboard / service-account) agents.",
+    ),
+    archived_only: bool = typer.Option(
+        False,
+        "--archived",
+        help="Show only archived (user-disabled) agents — the inactive section.",
     ),
 ):
     """List Gateway-managed agents."""
-    payload = _status_payload(include_hidden=show_all)
+    payload = _status_payload(include_hidden=show_all or archived_only)
     agents = payload["agents"]
+    if archived_only:
+        agents = [a for a in agents if str(a.get("lifecycle_phase") or "active") == "archived"]
     if as_json:
         print_json(
             {
                 "agents": agents,
                 "count": len(agents),
+                "archived": payload["summary"].get("archived_agents", 0),
                 "hidden": payload["summary"].get("hidden_agents", 0),
                 "system": payload["summary"].get("system_agents", 0),
             }
@@ -6609,10 +6701,14 @@ def list_agents(
         [{**agent, "type": _agent_type_label(agent), "output": _agent_output_label(agent)} for agent in agents],
         keys=["registry_ref", "name", "type", "mode", "presence", "output", "confidence", "space_id"],
     )
+    archived_n = payload["summary"].get("archived_agents", 0)
     hidden_n = payload["summary"].get("hidden_agents", 0)
     system_n = payload["summary"].get("system_agents", 0)
-    if not show_all and (hidden_n or system_n):
-        err_console.print(f"[dim]({hidden_n} hidden, {system_n} system — pass --all to include)[/dim]")
+    if not show_all and not archived_only and (archived_n or hidden_n or system_n):
+        err_console.print(
+            f"[dim]({archived_n} archived, {hidden_n} hidden, {system_n} system — "
+            "pass --all to include, --archived to show only archived)[/dim]"
+        )
 
 
 @agents_app.command("show")
@@ -6908,6 +7004,70 @@ def stop_agent(name: str = typer.Argument(..., help="Managed agent name")):
         err_console.print(f"[red]Managed agent not found:[/red] {name}")
         raise typer.Exit(1)
     err_console.print(f"[green]Desired state set to stopped:[/green] @{name}")
+
+
+@agents_app.command("archive")
+def archive_agent(
+    names: list[str] = typer.Argument(..., help="One or more managed agent names to archive"),
+    reason: str = typer.Option(None, "--reason", "-r", help="Optional note describing why this is archived"),
+    as_json: bool = JSON_OPTION,
+):
+    """Archive (disable) one or more managed agents.
+
+    Archived agents are sticky-hidden — they don't appear in default views
+    and the daemon will not auto-restore them on reconnect. Use
+    `agents restore` to bring them back.
+    """
+    archived: list[dict] = []
+    not_found: list[str] = []
+    for name in names:
+        try:
+            archived.append(_archive_managed_agent(name, reason=reason))
+        except LookupError:
+            not_found.append(name)
+    if as_json:
+        print_json({"archived": archived, "not_found": not_found, "count": len(archived)})
+        if not_found and not archived:
+            raise typer.Exit(1)
+        return
+    for entry in archived:
+        err_console.print(f"[green]Archived:[/green] @{entry.get('name')}")
+    for name in not_found:
+        err_console.print(f"[red]Managed agent not found:[/red] {name}")
+    if not archived and not_found:
+        raise typer.Exit(1)
+
+
+@agents_app.command("restore")
+def restore_agent(
+    names: list[str] = typer.Argument(..., help="One or more archived agent names to restore"),
+    as_json: bool = JSON_OPTION,
+):
+    """Restore (re-enable) one or more archived agents.
+
+    Restores `lifecycle_phase=active`. The runtime returns to the desired
+    state captured at archive time; if none was captured, defaults to
+    stopped. Start the runtime explicitly with `agents start <name>`.
+    """
+    restored: list[dict] = []
+    not_found: list[str] = []
+    for name in names:
+        try:
+            restored.append(_restore_managed_agent(name))
+        except LookupError:
+            not_found.append(name)
+    if as_json:
+        print_json({"restored": restored, "not_found": not_found, "count": len(restored)})
+        if not_found and not restored:
+            raise typer.Exit(1)
+        return
+    for entry in restored:
+        ds = str(entry.get("desired_state") or "stopped")
+        err_console.print(f"[green]Restored:[/green] @{entry.get('name')} (desired_state={ds})")
+    for name in not_found:
+        err_console.print(f"[red]Managed agent not found:[/red] {name}")
+    if not restored and not_found:
+        raise typer.Exit(1)
 
 
 @agents_app.command("remove")

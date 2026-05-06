@@ -5269,3 +5269,234 @@ def test_legacy_entry_without_lifecycle_phase_loads_as_active(monkeypatch, tmp_p
     daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
     # Legacy entry got swept normally (treated as implicit active → hidden).
     assert entry["lifecycle_phase"] == "hidden"
+
+
+def test_archive_managed_agent_sets_phase_and_stops_runtime(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    entry = {
+        "name": "probe-doomed",
+        "agent_id": "agent-doomed",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "desired_state": "running",
+        "effective_state": "running",
+        "liveness": "connected",
+        "last_seen_age_seconds": 5.0,
+    }
+    gateway_core.save_gateway_registry({"agents": [entry]})
+    client = _RecordingHeartbeatClient()
+    result = gateway_cmd._archive_managed_agent(
+        "probe-doomed", reason="cleanup", client_factory=lambda: client
+    )
+    assert result["lifecycle_phase"] == "archived"
+    registry = gateway_core.load_gateway_registry()
+    stored = next(a for a in registry["agents"] if a["name"] == "probe-doomed")
+    assert stored["lifecycle_phase"] == "archived"
+    assert stored["archived_reason"] == "cleanup"
+    assert stored["desired_state"] == "stopped"
+    assert stored["desired_state_before_archive"] == "running"
+    assert "archived_at" in stored
+    # Upstream signal sent best-effort.
+    assert any(h["status"] == "archived" for h in client.heartbeats)
+    # Audit event recorded.
+    recent = gateway_core.load_recent_gateway_activity()
+    assert any(r.get("event") == "managed_agent_archived" for r in recent)
+
+
+def test_archive_managed_agent_idempotent(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    entry = {
+        "name": "probe-already",
+        "agent_id": "agent-already",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "lifecycle_phase": "archived",
+        "archived_at": gateway_core._now_iso(),
+        "archived_reason": "first call",
+        "desired_state": "stopped",
+        "desired_state_before_archive": "running",
+    }
+    gateway_core.save_gateway_registry({"agents": [entry]})
+    client = _RecordingHeartbeatClient()
+    gateway_cmd._archive_managed_agent(
+        "probe-already", reason="second call", client_factory=lambda: client
+    )
+    stored = next(
+        a for a in gateway_core.load_gateway_registry()["agents"] if a["name"] == "probe-already"
+    )
+    # Reason not overwritten on a no-op archive — first archived_reason preserved.
+    assert stored["archived_reason"] == "first call"
+    assert client.heartbeats == []
+
+
+def test_archive_then_restore_returns_to_prior_desired_state(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    entry = {
+        "name": "probe-roundtrip",
+        "agent_id": "agent-rt",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "desired_state": "running",
+        "effective_state": "running",
+        "liveness": "connected",
+        "last_seen_age_seconds": 5.0,
+    }
+    gateway_core.save_gateway_registry({"agents": [entry]})
+    client = _RecordingHeartbeatClient()
+    gateway_cmd._archive_managed_agent("probe-roundtrip", client_factory=lambda: client)
+    gateway_cmd._restore_managed_agent("probe-roundtrip", client_factory=lambda: client)
+    stored = next(
+        a for a in gateway_core.load_gateway_registry()["agents"] if a["name"] == "probe-roundtrip"
+    )
+    assert stored["lifecycle_phase"] == "active"
+    assert stored["desired_state"] == "running"
+    assert "archived_at" not in stored
+    assert "archived_reason" not in stored
+    assert "desired_state_before_archive" not in stored
+    recent = gateway_core.load_recent_gateway_activity()
+    assert any(r.get("event") == "managed_agent_restored" for r in recent)
+    # Restore signals 'connected' upstream.
+    assert any(h["status"] == "connected" for h in client.heartbeats)
+
+
+def test_restore_unarchived_agent_is_noop(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    entry = {
+        "name": "probe-active",
+        "agent_id": "agent-active",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "lifecycle_phase": "active",
+        "desired_state": "running",
+    }
+    gateway_core.save_gateway_registry({"agents": [entry]})
+    client = _RecordingHeartbeatClient()
+    gateway_cmd._restore_managed_agent("probe-active", client_factory=lambda: client)
+    # No upstream noise on a no-op restore.
+    assert client.heartbeats == []
+
+
+def test_sweep_does_not_unhide_archived_agent(monkeypatch, tmp_path):
+    """Archived is sticky — sweep must not auto-restore even when liveness=connected."""
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    client = _RecordingHeartbeatClient()
+    daemon = _build_daemon(client)
+    entry = _stale_hermes_entry("probe-archived", age_seconds=2.0, liveness="connected")
+    entry["lifecycle_phase"] = "archived"
+    entry["archived_at"] = gateway_core._now_iso()
+    registry = {"agents": [entry]}
+    daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
+    # Sticky — sweep must not flip back to active.
+    assert entry["lifecycle_phase"] == "archived"
+    # No upstream signaling for archived entries either.
+    assert client.heartbeats == []
+
+
+def test_save_registry_preserves_restore_written_during_daemon_tick(monkeypatch, tmp_path):
+    """Race regression (other direction): daemon's stale-archived view must
+    not clobber a CLI restore that landed mid-tick.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    initial = {
+        "agents": [
+            {
+                "name": "race-restore",
+                "agent_id": "agent-restore",
+                "template_id": "hermes",
+                "runtime_type": "hermes_sentinel",
+                "lifecycle_phase": "archived",
+                "archived_at": gateway_core._now_iso(),
+                "archived_reason": "earlier",
+                "desired_state": "stopped",
+                "desired_state_before_archive": "running",
+            }
+        ]
+    }
+    gateway_core.save_gateway_registry(initial, merge_archive=False)
+
+    # Daemon's stale in-memory copy: still sees the agent as archived.
+    daemon_view = gateway_core.load_gateway_registry()
+
+    # CLI restores between the daemon's load and the daemon's save.
+    gateway_cmd._restore_managed_agent("race-restore")
+
+    # Daemon now saves its (stale, still-archived) copy. Bidirectional merge
+    # should pull the disk's freshly-active state forward.
+    gateway_core.save_gateway_registry(daemon_view)
+
+    final = gateway_core.load_gateway_registry()
+    stored = next(a for a in final["agents"] if a["name"] == "race-restore")
+    assert stored["lifecycle_phase"] == "active"
+    assert "archived_at" not in stored
+    assert "archived_reason" not in stored
+
+
+def test_save_registry_preserves_archive_written_during_daemon_tick(monkeypatch, tmp_path):
+    """Race regression: daemon load → modify → save must not clobber a CLI
+    archive that landed between the daemon's load and the daemon's save.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    # Initial state: probe is active, runtime running.
+    initial = {
+        "agents": [
+            {
+                "name": "race-probe",
+                "agent_id": "agent-race",
+                "template_id": "hermes",
+                "runtime_type": "hermes_sentinel",
+                "lifecycle_phase": "active",
+                "desired_state": "running",
+                "liveness": "connected",
+            }
+        ]
+    }
+    gateway_core.save_gateway_registry(initial)
+
+    # Daemon's stale in-memory copy from the start of its tick.
+    daemon_view = gateway_core.load_gateway_registry()
+    daemon_view["agents"][0]["effective_state"] = "running"  # daemon-side update
+
+    # CLI archives between the daemon's load and the daemon's save.
+    gateway_cmd._archive_managed_agent("race-probe")
+
+    # Daemon now saves its (stale) copy. Race-safety merge should preserve
+    # the archive fields the CLI wrote.
+    gateway_core.save_gateway_registry(daemon_view)
+
+    final = gateway_core.load_gateway_registry()
+    stored = next(a for a in final["agents"] if a["name"] == "race-probe")
+    assert stored["lifecycle_phase"] == "archived"
+    assert stored["desired_state"] == "stopped"
+    assert "archived_at" in stored
+
+
+def test_status_payload_partitions_archived_separately(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    archived = _stale_hermes_entry("hermes-archived", age_seconds=5.0, liveness="connected",
+                                   agent_id="agent-archived")
+    archived["lifecycle_phase"] = "archived"
+    archived["archived_at"] = gateway_core._now_iso()
+    active = {
+        "name": "hermes-live",
+        "agent_id": "agent-live",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "effective_state": "running",
+        "liveness": "connected",
+        "last_seen_age_seconds": 5.0,
+        "last_seen_at": gateway_core._now_iso(),
+    }
+    gateway_core.save_gateway_registry({"agents": [archived, active]})
+
+    payload = gateway_cmd._status_payload(activity_limit=0)
+    names = [a["name"] for a in payload["agents"]]
+    assert "hermes-archived" not in names
+    assert "hermes-live" in names
+    assert payload["summary"]["archived_agents"] == 1
+    assert payload["summary"]["managed_agents"] == 1
+
+    # include_hidden=True surfaces archived alongside hidden + system.
+    payload_all = gateway_cmd._status_payload(activity_limit=0, include_hidden=True)
+    all_names = [a["name"] for a in payload_all["agents"]]
+    assert "hermes-archived" in all_names
+    assert payload_all["summary"]["archived_agents"] == 1

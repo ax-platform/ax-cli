@@ -54,7 +54,10 @@ MIN_HANDLER_TIMEOUT_SECONDS = 1
 SSE_IDLE_TIMEOUT_SECONDS = 45.0
 RUNTIME_STALE_AFTER_SECONDS = 75.0
 RUNTIME_HIDDEN_AFTER_SECONDS = 15 * 60.0  # default: hide stale agents after 15 min
-_LIFECYCLE_PHASES = {"active", "hidden"}
+# active = visible, normal operation
+# hidden = system auto-hid because of staleness; auto-restores on reconnect
+# archived = user explicitly disabled; sticky (no auto-restore); requires explicit `agents restore`
+_LIFECYCLE_PHASES = {"active", "hidden", "archived"}
 LOCAL_SESSION_TTL_SECONDS = 24 * 60 * 60
 GATEWAY_EVENT_PREFIX = "AX_GATEWAY_EVENT "
 DEFAULT_OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -2979,7 +2982,49 @@ def load_gateway_registry() -> dict[str, Any]:
     return registry
 
 
-def save_gateway_registry(registry: dict[str, Any]) -> Path:
+def save_gateway_registry(registry: dict[str, Any], *, merge_archive: bool = True) -> Path:
+    """Persist the registry to disk.
+
+    By default, performs a race-safety merge: re-reads disk and pulls
+    archive-related fields forward, so a CLI archive that landed between
+    the caller's load and this save is not clobbered. The daemon's
+    reconcile loop relies on this. Atomic CLI ops (archive/restore) that
+    are *the* authoritative writer for archive fields opt out via
+    `merge_archive=False` so they don't see-saw with their own writes.
+    """
+    if merge_archive:
+        try:
+            on_disk = _read_json(registry_path(), default=None)
+        except Exception:  # noqa: BLE001
+            on_disk = None
+        if isinstance(on_disk, dict):
+            disk_agents = on_disk.get("agents") or []
+            disk_by_name = {str(a.get("name") or ""): a for a in disk_agents if isinstance(a, dict) and a.get("name")}
+            for entry in registry.get("agents") or []:
+                if not isinstance(entry, dict):
+                    continue
+                disk_entry = disk_by_name.get(str(entry.get("name") or ""))
+                if not isinstance(disk_entry, dict):
+                    continue
+                # CLI is authoritative for the archived ↔ active transition.
+                # Take disk's archive fields whenever the disk OR the in-memory
+                # copy has archive state — covers both directions of the race
+                # (CLI archive into the daemon's active view, *and* CLI restore
+                # into the daemon's still-archived view).
+                disk_phase = str(disk_entry.get("lifecycle_phase") or "")
+                mem_phase = str(entry.get("lifecycle_phase") or "")
+                if disk_phase == "archived" or (mem_phase == "archived" and disk_phase != "archived"):
+                    for field in (
+                        "lifecycle_phase",
+                        "archived_at",
+                        "archived_reason",
+                        "desired_state_before_archive",
+                        "desired_state",
+                    ):
+                        if field in disk_entry:
+                            entry[field] = disk_entry[field]
+                        else:
+                            entry.pop(field, None)
     _write_json(registry_path(), registry)
     return registry_path()
 
@@ -5737,6 +5782,14 @@ class GatewayDaemon:
             phase = str(entry.get("lifecycle_phase") or "active").strip().lower()
             if phase not in _LIFECYCLE_PHASES:
                 phase = "active"
+
+            # Archived is sticky — sweep never transitions in or out of it. The
+            # only path in is `agents archive`; the only path out is
+            # `agents restore`. Skip both auto-hide and auto-restore for these
+            # entries, and skip upstream lifecycle signaling (the explicit
+            # archive call already signaled `archived` upstream).
+            if phase == "archived":
+                continue
 
             # Hide transition: active → hidden once stale past threshold.
             if (
