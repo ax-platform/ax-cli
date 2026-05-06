@@ -521,7 +521,6 @@ class TestCredentialManagement:
         with pytest.raises(RuntimeError, match="not visible in requested space"):
             client.create_task("space-123", "Review the spec", priority="high")
 
-
     def test_gateway_auth_contract_task_create_exchanges_then_posts_api_tasks(self, monkeypatch):
         import httpx
 
@@ -554,6 +553,10 @@ class TestCredentialManagement:
                 "status": "not_started",
                 "priority": "high",
                 "posted_by": {"id": "agent-123", "type": "agent"},
+                # Backend echoes space_id so the client can verify the task
+                # actually landed in the requested space (acceptance criterion
+                # for ax-cli-dev tasks 97e2f06c / cbb8f887 / 7fbd5d0f).
+                "space_id": "space-hint",
             },
             request=httpx.Request("POST", "https://example.com/api/tasks"),
         )
@@ -595,6 +598,123 @@ class TestCredentialManagement:
         assert "space_id" not in body
         assert "assigned_agent_id" not in body
         assert "assignee_id" not in body
+
+    def test_gateway_auth_contract_task_create_refuses_when_response_space_mismatches(self, monkeypatch):
+        """Regression for ax-cli-dev 97e2f06c / 7fbd5d0f: the auth-contract path
+        used to silently land tasks in the credential's default space when it
+        differed from --space-id. Verify that a mismatched response space_id
+        now raises RuntimeError instead of returning a false success.
+        """
+        import httpx
+
+        def fake_exchange(url, *, json=None, headers=None, timeout=None):
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "exchanged.jwt",
+                    "expires_in": 3600,
+                    "token_class": "agent_access",
+                    "agent_id": "agent-123",
+                    "agent_name": "cli-sentinel-local",
+                },
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx, "post", fake_exchange)
+        client = AxClient("https://example.com", "axp_a_AgentKey.AgentSecret", agent_name="cli-sentinel-local")
+        task_response = httpx.Response(
+            201,
+            json={
+                "id": "task-123",
+                "title": "Land gateway stub",
+                # Backend filed it in madtank's default workspace despite
+                # space_id_hint=ax-cli-dev-space — this is the silent-misfile
+                # scenario the bug reports describe.
+                "space_id": "madtank-space",
+            },
+            request=httpx.Request("POST", "https://example.com/api/tasks"),
+        )
+        client._http.post = MagicMock(return_value=task_response)
+
+        with pytest.raises(RuntimeError, match="created in the wrong space"):
+            client.create_task("ax-cli-dev-space", "Land gateway stub", priority="high")
+
+    def test_gateway_auth_contract_task_create_verifies_via_list_when_response_omits_space_id(self, monkeypatch):
+        """Backend doesn't always echo space_id today; client falls back to a
+        list_tasks probe in the requested space to confirm the new task is
+        actually there before returning success.
+        """
+        import httpx
+
+        def fake_exchange(url, *, json=None, headers=None, timeout=None):
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "exchanged.jwt",
+                    "expires_in": 3600,
+                    "token_class": "agent_access",
+                    "agent_id": "agent-123",
+                    "agent_name": "cli-sentinel-local",
+                },
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx, "post", fake_exchange)
+        client = AxClient("https://example.com", "axp_a_AgentKey.AgentSecret", agent_name="cli-sentinel-local")
+        task_response = httpx.Response(
+            201,
+            json={"id": "task-123", "title": "Land gateway stub"},
+            request=httpx.Request("POST", "https://example.com/api/tasks"),
+        )
+        list_response = httpx.Response(
+            200,
+            json={"tasks": [{"id": "task-123", "space_id": "ax-cli-dev-space"}]},
+            request=httpx.Request("GET", "https://example.com/api/v1/tasks"),
+        )
+        client._http.post = MagicMock(return_value=task_response)
+        client._http.get = MagicMock(return_value=list_response)
+
+        data = client.create_task("ax-cli-dev-space", "Land gateway stub", priority="high")
+
+        assert data["id"] == "task-123"
+        # Verification round-trip used the requested space, not the default.
+        assert client._http.get.call_args.kwargs["params"]["space_id"] == "ax-cli-dev-space"
+
+    def test_gateway_auth_contract_task_create_refuses_when_list_misses(self, monkeypatch):
+        """If the response omits space_id and the new task isn't visible in
+        the requested space, surface a clear failure instead of pretending."""
+        import httpx
+
+        def fake_exchange(url, *, json=None, headers=None, timeout=None):
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "exchanged.jwt",
+                    "expires_in": 3600,
+                    "token_class": "agent_access",
+                    "agent_id": "agent-123",
+                    "agent_name": "cli-sentinel-local",
+                },
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx, "post", fake_exchange)
+        client = AxClient("https://example.com", "axp_a_AgentKey.AgentSecret", agent_name="cli-sentinel-local")
+        task_response = httpx.Response(
+            201,
+            json={"id": "task-123", "title": "Land gateway stub"},
+            request=httpx.Request("POST", "https://example.com/api/tasks"),
+        )
+        list_response = httpx.Response(
+            200,
+            json={"tasks": [{"id": "some-other-task", "space_id": "ax-cli-dev-space"}]},
+            request=httpx.Request("GET", "https://example.com/api/v1/tasks"),
+        )
+        client._http.post = MagicMock(return_value=task_response)
+        client._http.get = MagicMock(return_value=list_response)
+
+        with pytest.raises(RuntimeError, match="not visible in requested space"):
+            client.create_task("ax-cli-dev-space", "Land gateway stub", priority="high")
 
     def test_issue_agent_pat_sends_requested_audience(self):
         client = AxClient("https://example.com", "axp_u_UserKey.UserSecret")

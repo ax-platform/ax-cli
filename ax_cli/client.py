@@ -697,6 +697,7 @@ class AxClient:
                     "space_id_hint": space_id,
                     "fingerprint": self._base_headers.get("X-AX-FP"),
                 },
+                expected_space_id=space_id,
             )
 
         body = {"title": title, "space_id": space_id, "priority": priority}
@@ -754,8 +755,17 @@ class AxClient:
         priority: str = "medium",
         requirements: dict | None = None,
         deadline: str | None = None,
+        expected_space_id: str | None = None,
     ) -> dict:
-        """POST /api/tasks using AX-GATEWAY-001 auth-contract draft shape."""
+        """POST /api/tasks using AX-GATEWAY-001 auth-contract draft shape.
+
+        The auth-contract draft uses the credential's session default space and
+        only carries ``space_id_hint`` in ``requirements``. When the caller knows
+        the requested space (``expected_space_id``), verify the task actually
+        landed there before returning success — otherwise an operator running
+        ``ax tasks create --space-id <X>`` could see a green checkmark while
+        the task silently filed into the credential's default space.
+        """
         body: dict = {
             "title": title,
             "requirements": requirements or {},
@@ -770,6 +780,8 @@ class AxClient:
         task = self._task_from_create_response(data)
         if not task.get("id"):
             raise RuntimeError("Task create response did not include an id.")
+        if expected_space_id:
+            self._verify_created_task_space(data, expected_space_id)
         return data
 
     def _task_from_create_response(self, data: object) -> dict:
