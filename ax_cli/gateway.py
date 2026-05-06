@@ -54,6 +54,7 @@ MIN_HANDLER_TIMEOUT_SECONDS = 1
 SSE_IDLE_TIMEOUT_SECONDS = 45.0
 RUNTIME_STALE_AFTER_SECONDS = 75.0
 RUNTIME_HIDDEN_AFTER_SECONDS = 15 * 60.0  # default: hide stale agents after 15 min
+SETUP_ERROR_BACKOFF_SECONDS = 30.0  # silence retry storm after a runtime setup error
 _LIFECYCLE_PHASES = {"active", "hidden"}
 LOCAL_SESSION_TTL_SECONDS = 24 * 60 * 60
 GATEWAY_EVENT_PREFIX = "AX_GATEWAY_EVENT "
@@ -4180,6 +4181,18 @@ class ManagedAgentRuntime:
             return
         if self._listener_thread and self._listener_thread.is_alive():
             return
+        # Setup-error backoff: if this runtime hit a setup error within the
+        # backoff window (missing token file, missing script, etc.), do not
+        # retry every reconcile tick. Retrying every 1s does not help — the
+        # operator must fix the precondition first — and each attempt fires
+        # a runtime_error activity event and can pressure upstream rate
+        # limits. Operator-driven `agents start <name>` clears the field
+        # via the explicit desired_state transition.
+        last_runtime_error_at = self.entry.get("last_runtime_error_at")
+        if last_runtime_error_at:
+            age = _age_seconds(last_runtime_error_at)
+            if age is not None and age < SETUP_ERROR_BACKOFF_SECONDS:
+                return
         self.stop_event.clear()
         self._queue = queue.Queue(maxsize=int(self.entry.get("queue_size") or DEFAULT_QUEUE_SIZE))
         self._reply_anchor_ids = set()
@@ -4275,8 +4288,13 @@ class ManagedAgentRuntime:
         if not script.exists():
             error = f"Hermes sentinel script not found: {script}"
             self._update_state(
-                effective_state="error", current_status="error", current_activity=error, last_error=error
+                effective_state="error",
+                current_status="error",
+                current_activity=error,
+                last_error=error,
+                last_runtime_error_at=_now_iso(),
             )
+            self.entry["last_runtime_error_at"] = self._state.get("last_runtime_error_at")
             record_gateway_activity("runtime_error", entry=self.entry, error=error)
             return
         try:
@@ -4284,8 +4302,13 @@ class ManagedAgentRuntime:
         except ValueError as exc:
             error = str(exc)
             self._update_state(
-                effective_state="error", current_status="error", current_activity=error, last_error=error
+                effective_state="error",
+                current_status="error",
+                current_activity=error,
+                last_error=error,
+                last_runtime_error_at=_now_iso(),
             )
+            self.entry["last_runtime_error_at"] = self._state.get("last_runtime_error_at")
             record_gateway_activity("runtime_error", entry=self.entry, error=error)
             return
 
@@ -4324,8 +4347,13 @@ class ManagedAgentRuntime:
         except Exception as exc:
             error = f"Failed to start Hermes sentinel: {str(exc)[:360]}"
             self._update_state(
-                effective_state="error", current_status="error", current_activity=error, last_error=error
+                effective_state="error",
+                current_status="error",
+                current_activity=error,
+                last_error=error,
+                last_runtime_error_at=_now_iso(),
             )
+            self.entry["last_runtime_error_at"] = self._state.get("last_runtime_error_at")
             record_gateway_activity("runtime_error", entry=self.entry, error=error)
             return
 
@@ -4337,10 +4365,12 @@ class ManagedAgentRuntime:
             current_tool=None,
             current_tool_call_id=None,
             last_error=None,
+            last_runtime_error_at=None,
             last_connected_at=_now_iso(),
             last_seen_at=_now_iso(),
             reconnect_backoff_seconds=0,
         )
+        self.entry["last_runtime_error_at"] = None
         record_gateway_activity(
             "runtime_started",
             entry=self.entry,
