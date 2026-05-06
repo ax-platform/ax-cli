@@ -2963,6 +2963,9 @@ def save_gateway_session(data: dict[str, Any]) -> Path:
     return session_path()
 
 
+_LOAD_SNAPSHOT_KEY = "_load_snapshot_agent_names"
+
+
 def load_gateway_registry() -> dict[str, Any]:
     registry = _read_json(registry_path(), default=_default_registry())
     registry.setdefault("version", 1)
@@ -2979,26 +2982,65 @@ def load_gateway_registry() -> dict[str, Any]:
     gateway.setdefault("pid", None)
     gateway.setdefault("last_started_at", None)
     gateway.setdefault("last_reconcile_at", None)
+    # Stamp the names present at load time so save_gateway_registry can
+    # tell "caller removed this row" apart from "another writer added this
+    # row after we loaded" when reconciling against disk at save time.
+    registry[_LOAD_SNAPSHOT_KEY] = sorted(
+        str(a.get("name") or "") for a in registry["agents"] if isinstance(a, dict) and a.get("name")
+    )
     return registry
 
 
 def save_gateway_registry(registry: dict[str, Any], *, merge_archive: bool = True) -> Path:
     """Persist the registry to disk.
 
-    By default, performs a race-safety merge: re-reads disk and pulls
-    archive-related fields forward, so a CLI archive that landed between
-    the caller's load and this save is not clobbered. The daemon's
-    reconcile loop relies on this. Atomic CLI ops (archive/restore) that
-    are *the* authoritative writer for archive fields opt out via
-    `merge_archive=False` so they don't see-saw with their own writes.
+    Performs two race-safety merges before writing:
+
+    1. **Row preservation** (always on): re-reads disk and appends any
+       agent rows that exist on disk but not in memory *and* were not in
+       the caller's load-time snapshot. This recovers writes from a
+       second writer (e.g. the UI server's POST /api/agents add) that
+       landed between this caller's load and save. The load-time
+       snapshot — stamped by load_gateway_registry — distinguishes
+       "caller removed this row" (in snapshot, not in memory; do not
+       resurrect) from "another writer added this row" (not in snapshot,
+       on disk; preserve).
+
+    2. **Archive-field merge** (gated on merge_archive=True, the default):
+       pulls archive lifecycle fields forward from disk so a CLI archive
+       that landed mid-tick is not clobbered. Atomic CLI ops that are
+       *the* authoritative writer for archive fields opt out via
+       merge_archive=False so they don't see-saw with their own writes.
     """
-    if merge_archive:
-        try:
-            on_disk = _read_json(registry_path(), default=None)
-        except Exception:  # noqa: BLE001
-            on_disk = None
-        if isinstance(on_disk, dict):
-            disk_agents = on_disk.get("agents") or []
+    # Pop the load snapshot so it never leaks to disk.
+    loaded_names = set(registry.pop(_LOAD_SNAPSHOT_KEY, []))
+
+    try:
+        on_disk = _read_json(registry_path(), default=None)
+    except Exception:  # noqa: BLE001
+        on_disk = None
+
+    if isinstance(on_disk, dict):
+        disk_agents = on_disk.get("agents") or []
+        in_memory_names = {
+            str(a.get("name") or "") for a in registry.get("agents") or [] if isinstance(a, dict) and a.get("name")
+        }
+
+        # (1) Preserve rows added by another writer after this caller loaded.
+        for disk_entry in disk_agents:
+            if not isinstance(disk_entry, dict):
+                continue
+            name = str(disk_entry.get("name") or "")
+            if not name:
+                continue
+            if name in in_memory_names:
+                continue  # already in memory; either updating or untouched
+            if name in loaded_names:
+                continue  # caller removed it (was in our snapshot, not in memory)
+            registry.setdefault("agents", []).append(disk_entry)
+
+        # (2) Existing archive-field merge.
+        if merge_archive:
             disk_by_name = {str(a.get("name") or ""): a for a in disk_agents if isinstance(a, dict) and a.get("name")}
             for entry in registry.get("agents") or []:
                 if not isinstance(entry, dict):

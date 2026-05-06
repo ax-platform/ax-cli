@@ -5431,6 +5431,91 @@ def test_save_registry_preserves_restore_written_during_daemon_tick(monkeypatch,
     assert "archived_reason" not in stored
 
 
+def test_save_registry_preserves_other_writer_added_row(monkeypatch, tmp_path):
+    """Race regression: daemon's load → modify → save must not clobber an
+    agent row added by another writer (e.g. the UI server's
+    POST /api/agents) between the daemon's load and the daemon's save.
+
+    Reproduces the cc-backend bug from 2026-05-06: managed_agent_added
+    activity recorded, registry write succeeded, then daemon's reconcile
+    tick wrote back without the new row.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    initial = {
+        "agents": [
+            {
+                "name": "incumbent",
+                "agent_id": "agent-incumbent",
+                "template_id": "hermes",
+                "runtime_type": "hermes_sentinel",
+                "lifecycle_phase": "active",
+                "desired_state": "running",
+            }
+        ]
+    }
+    gateway_core.save_gateway_registry(initial)
+
+    # Daemon's stale in-memory copy from the start of its tick — knows only
+    # about the incumbent.
+    daemon_view = gateway_core.load_gateway_registry()
+    daemon_view["agents"][0]["effective_state"] = "running"  # daemon-side update
+
+    # Another writer (UI server, channel setup, etc.) loads, adds a new
+    # agent, and saves between the daemon's load and the daemon's save.
+    other_writer = gateway_core.load_gateway_registry()
+    other_writer["agents"].append(
+        {
+            "name": "newcomer",
+            "agent_id": "agent-newcomer",
+            "template_id": "claude_code_channel",
+            "runtime_type": "claude_code_channel",
+            "lifecycle_phase": "active",
+            "desired_state": "running",
+        }
+    )
+    gateway_core.save_gateway_registry(other_writer)
+
+    # Daemon now saves its stale copy that never saw newcomer. Row
+    # preservation should keep newcomer.
+    gateway_core.save_gateway_registry(daemon_view)
+
+    final = gateway_core.load_gateway_registry()
+    names = {a["name"] for a in final["agents"]}
+    assert names == {"incumbent", "newcomer"}, (
+        "newcomer was clobbered by daemon save — registry write race regressed"
+    )
+    # Daemon's effective_state update on the incumbent should still apply.
+    incumbent = next(a for a in final["agents"] if a["name"] == "incumbent")
+    assert incumbent["effective_state"] == "running"
+
+
+def test_save_registry_honors_caller_remove(monkeypatch, tmp_path):
+    """Row preservation must distinguish "caller removed this" from
+    "another writer added this." A row that was present at load time and
+    is missing in memory at save time means the caller removed it; we
+    must not resurrect it from disk.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    initial = {
+        "agents": [
+            {"name": "to-remove", "agent_id": "a1", "template_id": "echo"},
+            {"name": "to-keep", "agent_id": "a2", "template_id": "echo"},
+        ]
+    }
+    gateway_core.save_gateway_registry(initial)
+
+    # Caller loads, removes one row, saves. Disk still had to-remove at
+    # the moment we re-read inside save — the load snapshot tells us we
+    # had it and the caller removed it intentionally.
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [a for a in registry["agents"] if a["name"] != "to-remove"]
+    gateway_core.save_gateway_registry(registry)
+
+    final = gateway_core.load_gateway_registry()
+    names = {a["name"] for a in final["agents"]}
+    assert names == {"to-keep"}, "to-remove was resurrected — remove was lost"
+
+
 def test_save_registry_preserves_archive_written_during_daemon_tick(monkeypatch, tmp_path):
     """Race regression: daemon load → modify → save must not clobber a CLI
     archive that landed between the daemon's load and the daemon's save.
