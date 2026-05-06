@@ -5431,6 +5431,143 @@ def test_save_registry_preserves_restore_written_during_daemon_tick(monkeypatch,
     assert "archived_reason" not in stored
 
 
+def test_save_registry_preserves_other_writer_added_row(monkeypatch, tmp_path):
+    """Race regression: daemon's load → modify → save must not clobber an
+    agent row added by another writer (e.g. the UI server's
+    POST /api/agents) between the daemon's load and the daemon's save.
+
+    Reproduces the cc-backend bug from 2026-05-06: managed_agent_added
+    activity recorded, registry write succeeded, then daemon's reconcile
+    tick wrote back without the new row.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    initial = {
+        "agents": [
+            {
+                "name": "incumbent",
+                "agent_id": "agent-incumbent",
+                "template_id": "hermes",
+                "runtime_type": "hermes_sentinel",
+                "lifecycle_phase": "active",
+                "desired_state": "running",
+            }
+        ]
+    }
+    gateway_core.save_gateway_registry(initial)
+
+    # Daemon's stale in-memory copy from the start of its tick — knows only
+    # about the incumbent.
+    daemon_view = gateway_core.load_gateway_registry()
+    daemon_view["agents"][0]["effective_state"] = "running"  # daemon-side update
+
+    # Another writer (UI server, channel setup, etc.) loads, adds a new
+    # agent, and saves between the daemon's load and the daemon's save.
+    other_writer = gateway_core.load_gateway_registry()
+    other_writer["agents"].append(
+        {
+            "name": "newcomer",
+            "agent_id": "agent-newcomer",
+            "template_id": "claude_code_channel",
+            "runtime_type": "claude_code_channel",
+            "lifecycle_phase": "active",
+            "desired_state": "running",
+        }
+    )
+    gateway_core.save_gateway_registry(other_writer)
+
+    # Daemon now saves its stale copy that never saw newcomer. Row
+    # preservation should keep newcomer.
+    gateway_core.save_gateway_registry(daemon_view)
+
+    final = gateway_core.load_gateway_registry()
+    names = {a["name"] for a in final["agents"]}
+    assert names == {"incumbent", "newcomer"}, (
+        "newcomer was clobbered by daemon save — registry write race regressed"
+    )
+    # Daemon's effective_state update on the incumbent should still apply.
+    incumbent = next(a for a in final["agents"] if a["name"] == "incumbent")
+    assert incumbent["effective_state"] == "running"
+
+
+def test_save_registry_preserves_other_writer_field_update(monkeypatch, tmp_path):
+    """Race regression (field-level): the daemon's stale `desired_state=running`
+    in-memory view must not clobber the CLI's freshly written
+    `desired_state=stopped` on disk.
+
+    Reproduces the agents-stop bug from 2026-05-06: `ax gateway agents stop`
+    set desired_state=stopped, activity log recorded
+    managed_agent_desired_stopped, but the daemon's next reconcile save
+    flipped it back to running within seconds — making demo-hermes
+    impossible to actually stop.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    initial = {
+        "agents": [
+            {
+                "name": "race-stop",
+                "agent_id": "agent-race-stop",
+                "template_id": "hermes",
+                "runtime_type": "hermes_sentinel",
+                "lifecycle_phase": "active",
+                "desired_state": "running",
+                "effective_state": "running",
+            }
+        ]
+    }
+    gateway_core.save_gateway_registry(initial)
+
+    # Daemon's stale in-memory copy from the start of its tick.
+    daemon_view = gateway_core.load_gateway_registry()
+    daemon_view["agents"][0]["effective_state"] = "running"  # daemon-side telemetry update
+
+    # CLI runs `agents stop` between the daemon's load and the daemon's
+    # save: writes desired_state=stopped to disk.
+    cli_view = gateway_core.load_gateway_registry()
+    cli_view["agents"][0]["desired_state"] = "stopped"
+    gateway_core.save_gateway_registry(cli_view)
+
+    # Daemon now saves its (stale) copy. Field-level preservation should
+    # take disk's freshly-written desired_state=stopped, not memory's
+    # stale desired_state=running.
+    gateway_core.save_gateway_registry(daemon_view)
+
+    final = gateway_core.load_gateway_registry()
+    stored = next(a for a in final["agents"] if a["name"] == "race-stop")
+    assert stored["desired_state"] == "stopped", (
+        "daemon clobbered CLI's desired_state=stopped — field-level race "
+        "preservation regressed"
+    )
+    # Daemon's effective_state telemetry update should still apply.
+    assert stored["effective_state"] == "running"
+
+
+def test_save_registry_honors_caller_remove(monkeypatch, tmp_path):
+    """Row preservation must distinguish "caller removed this" from
+    "another writer added this." A row that was present at load time and
+    is missing in memory at save time means the caller removed it; we
+    must not resurrect it from disk.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    initial = {
+        "agents": [
+            {"name": "to-remove", "agent_id": "a1", "template_id": "echo"},
+            {"name": "to-keep", "agent_id": "a2", "template_id": "echo"},
+        ]
+    }
+    gateway_core.save_gateway_registry(initial)
+
+    # Caller loads, removes one row, saves. Disk still had to-remove at
+    # the moment we re-read inside save — the load snapshot tells us we
+    # had it and the caller removed it intentionally.
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [a for a in registry["agents"] if a["name"] != "to-remove"]
+    gateway_core.save_gateway_registry(registry)
+
+    final = gateway_core.load_gateway_registry()
+    names = {a["name"] for a in final["agents"]}
+    assert names == {"to-keep"}, "to-remove was resurrected — remove was lost"
+
+
 def test_save_registry_preserves_archive_written_during_daemon_tick(monkeypatch, tmp_path):
     """Race regression: daemon load → modify → save must not clobber a CLI
     archive that landed between the daemon's load and the daemon's save.
@@ -5500,3 +5637,85 @@ def test_status_payload_partitions_archived_separately(monkeypatch, tmp_path):
     all_names = [a["name"] for a in payload_all["agents"]]
     assert "hermes-archived" in all_names
     assert payload_all["summary"]["archived_agents"] == 1
+
+
+def test_runtime_start_skips_when_in_setup_error_backoff(monkeypatch, tmp_path):
+    """Setup-error backoff: runtime.start() must early-return when a
+    runtime_error fired within the last SETUP_ERROR_BACKOFF_SECONDS,
+    so the daemon's per-tick reconcile (every ~1s) doesn't fire a
+    runtime_error storm and pressure upstream rate limits.
+
+    Reproduces the demo-hermes spam: missing token file + desired_state
+    running → 140 runtime_error events in 5 minutes.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    token_file = tmp_path / "token-does-not-exist"  # intentionally missing
+
+    runtime = gateway_core.ManagedAgentRuntime(
+        {
+            "name": "stuck-hermes",
+            "agent_id": "agent-stuck",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes_sentinel",
+            "token_file": str(token_file),
+            # Simulates the entry state after a setup error: error 1s ago,
+            # well within the 30s backoff window.
+            "last_runtime_error_at": gateway_core._now_iso(),
+        },
+        client_factory=lambda **kwargs: object(),
+    )
+
+    before = gateway_core.load_recent_gateway_activity()
+    runtime.start()
+    after = gateway_core.load_recent_gateway_activity()
+
+    # Gate must early-return without firing a fresh runtime_error event.
+    assert len(after) == len(before), (
+        "runtime.start() emitted a runtime_error event while in backoff "
+        "window — gate regressed"
+    )
+    # State must be untouched — no transition through "starting".
+    assert runtime._state.get("effective_state") != "starting"
+
+
+def test_runtime_start_proceeds_after_setup_error_backoff_expires(monkeypatch, tmp_path):
+    """Once the backoff window expires, the runtime is allowed to retry.
+    The retry will fire its own runtime_error if the precondition is
+    still broken — that fresh error stamps a new last_runtime_error_at,
+    re-arming the gate.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    token_file = tmp_path / "token-does-not-exist"  # still missing
+
+    # last_runtime_error_at older than the backoff window.
+    long_ago = (
+        datetime.now(timezone.utc) - timedelta(seconds=gateway_core.SETUP_ERROR_BACKOFF_SECONDS + 60)
+    ).isoformat()
+
+    runtime = gateway_core.ManagedAgentRuntime(
+        {
+            "name": "expired-hermes",
+            "agent_id": "agent-expired",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes_sentinel",
+            "token_file": str(token_file),
+            "last_runtime_error_at": long_ago,
+        },
+        client_factory=lambda **kwargs: object(),
+    )
+
+    before = gateway_core.load_recent_gateway_activity()
+    runtime.start()
+    after = gateway_core.load_recent_gateway_activity()
+
+    new_events = [e for e in after if e not in before]
+    runtime_errors = [e for e in new_events if e.get("event") == "runtime_error"]
+    assert len(runtime_errors) == 1, (
+        f"expected exactly one runtime_error after backoff expired, got {len(runtime_errors)}"
+    )
+    # Fresh error stamps a new last_runtime_error_at, re-arming the gate
+    # against repeat retries from the next reconcile tick.
+    assert runtime.entry.get("last_runtime_error_at") is not None
+    assert runtime.entry["last_runtime_error_at"] != long_ago
