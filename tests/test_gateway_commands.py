@@ -5269,3 +5269,223 @@ def test_legacy_entry_without_lifecycle_phase_loads_as_active(monkeypatch, tmp_p
     daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
     # Legacy entry got swept normally (treated as implicit active → hidden).
     assert entry["lifecycle_phase"] == "hidden"
+
+
+# ---------------------------------------------------------------------------
+# Spaces hygiene: registry repair, /api/spaces fallback, CLI list
+# ---------------------------------------------------------------------------
+
+
+_GOOD_SPACE_UUID = "49afd277-78d2-4a32-9858-3594cda684af"
+
+
+def test_reconcile_corrupt_space_ids_recovers_uuid_from_active_space():
+    registry = {
+        "agents": [
+            {
+                "name": "taskforge_backend",
+                "space_id": "madtank's Workspace",
+                "active_space_id": _GOOD_SPACE_UUID,
+                "active_space_name": "madtank's Workspace",
+                "default_space_id": _GOOD_SPACE_UUID,
+            }
+        ]
+    }
+    repaired = gateway_core.reconcile_corrupt_space_ids(registry)
+    assert repaired == 1
+    assert registry["agents"][0]["space_id"] == _GOOD_SPACE_UUID
+
+
+def test_reconcile_corrupt_space_ids_falls_back_to_allowed_spaces():
+    registry = {
+        "agents": [
+            {
+                "name": "x",
+                "space_id": "Workspace-Name",
+                "allowed_spaces": [{"space_id": _GOOD_SPACE_UUID, "name": "ws"}],
+            }
+        ]
+    }
+    assert gateway_core.reconcile_corrupt_space_ids(registry) == 1
+    assert registry["agents"][0]["space_id"] == _GOOD_SPACE_UUID
+
+
+def test_reconcile_corrupt_space_ids_idempotent_on_clean_registry():
+    registry = {
+        "agents": [
+            {"name": "a", "space_id": _GOOD_SPACE_UUID},
+            {"name": "b", "space_id": ""},  # empty is left alone
+            {"name": "c"},  # no space_id at all is left alone
+        ]
+    }
+    assert gateway_core.reconcile_corrupt_space_ids(registry) == 0
+    assert registry["agents"][0]["space_id"] == _GOOD_SPACE_UUID
+    assert registry["agents"][1]["space_id"] == ""
+    assert "space_id" not in registry["agents"][2]
+
+
+def test_reconcile_corrupt_space_ids_skips_when_no_uuid_anywhere():
+    registry = {
+        "agents": [
+            {"name": "lost", "space_id": "Some Name", "active_space_id": "Also Not A UUID"},
+        ]
+    }
+    # Nothing recoverable — leave the bad value in place rather than fabricate.
+    assert gateway_core.reconcile_corrupt_space_ids(registry) == 0
+    assert registry["agents"][0]["space_id"] == "Some Name"
+
+
+def test_load_gateway_registry_heals_corrupt_space_id_in_place(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_dir = gateway_core.gateway_dir()
+    gateway_dir.mkdir(parents=True, exist_ok=True)
+    raw = {
+        "version": 1,
+        "agents": [
+            {
+                "name": "taskforge_backend",
+                "space_id": "madtank's Workspace",
+                "active_space_id": _GOOD_SPACE_UUID,
+                "default_space_id": _GOOD_SPACE_UUID,
+            }
+        ],
+    }
+    gateway_core.registry_path().write_text(json.dumps(raw), encoding="utf-8")
+    loaded = gateway_core.load_gateway_registry()
+    assert loaded["agents"][0]["space_id"] == _GOOD_SPACE_UUID
+
+
+def test_resolve_gateway_agent_home_space_resolves_name_to_uuid(monkeypatch):
+    captured = {}
+
+    def fake_resolve(client, *, explicit):
+        captured["explicit"] = explicit
+        return _GOOD_SPACE_UUID
+
+    monkeypatch.setattr(gateway_cmd, "resolve_space_id", fake_resolve)
+
+    resolved = gateway_cmd._resolve_gateway_agent_home_space(
+        client=object(),
+        session={},
+        registry={"agents": []},
+        explicit_space_id="madtank's Workspace",
+    )
+    assert resolved == _GOOD_SPACE_UUID
+    assert captured["explicit"] == "madtank's Workspace"
+
+
+def test_resolve_gateway_agent_home_space_passthrough_for_uuid(monkeypatch):
+    def fake_resolve(*args, **kwargs):
+        raise AssertionError("UUID input should not require a backend round-trip")
+
+    monkeypatch.setattr(gateway_cmd, "resolve_space_id", fake_resolve)
+
+    resolved = gateway_cmd._resolve_gateway_agent_home_space(
+        client=object(),
+        session={},
+        registry={"agents": []},
+        explicit_space_id=_GOOD_SPACE_UUID,
+    )
+    assert resolved == _GOOD_SPACE_UUID
+
+
+def test_spaces_payload_returns_session_active_space_when_upstream_fails(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": _GOOD_SPACE_UUID,
+            "space_name": "madtank's Workspace",
+            "username": "madtank",
+        }
+    )
+
+    def fake_client_loader():
+        class Boom:
+            def list_spaces(self):
+                raise httpx.HTTPStatusError(
+                    "429 Too Many Requests",
+                    request=httpx.Request("GET", "https://paxai.app/api/v1/spaces"),
+                    response=httpx.Response(429),
+                )
+
+        return Boom()
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", fake_client_loader)
+
+    payload = gateway_cmd._spaces_payload()
+    assert payload["active_space_id"] == _GOOD_SPACE_UUID
+    assert payload["active_space_name"] == "madtank's Workspace"
+    # Active space surfaces in the spaces list even with no cache so the UI
+    # always has something to render.
+    assert any(s["id"] == _GOOD_SPACE_UUID for s in payload["spaces"])
+    assert "error" in payload
+
+
+def test_spaces_payload_uses_cached_spaces_after_upstream_failure(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": _GOOD_SPACE_UUID,
+            "space_name": "madtank's Workspace",
+        }
+    )
+
+    other_space = "78950af5-4d27-441b-9296-ec46de8ba35d"
+
+    class FirstClient:
+        def list_spaces(self):
+            return {
+                "spaces": [
+                    {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace"},
+                    {"id": other_space, "name": "Other Workspace"},
+                ]
+            }
+
+    class FailingClient:
+        def list_spaces(self):
+            raise RuntimeError("upstream rate limited")
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: FirstClient())
+    first = gateway_cmd._spaces_payload()
+    assert {s["id"] for s in first["spaces"]} == {_GOOD_SPACE_UUID, other_space}
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: FailingClient())
+    second = gateway_cmd._spaces_payload()
+    assert second.get("cached") is True
+    assert {s["id"] for s in second["spaces"]} == {_GOOD_SPACE_UUID, other_space}
+
+
+def test_gateway_spaces_list_command_renders_table(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": _GOOD_SPACE_UUID,
+            "space_name": "madtank's Workspace",
+        }
+    )
+
+    class StubClient:
+        def list_spaces(self):
+            return {
+                "spaces": [
+                    {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank"},
+                ]
+            }
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: StubClient())
+
+    result = runner.invoke(app, ["gateway", "spaces", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["active_space_id"] == _GOOD_SPACE_UUID
+    assert payload["spaces"][0]["id"] == _GOOD_SPACE_UUID

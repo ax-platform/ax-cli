@@ -2960,6 +2960,50 @@ def save_gateway_session(data: dict[str, Any]) -> Path:
     return session_path()
 
 
+_SPACE_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_space_uuid(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SPACE_UUID_RE.match(value.strip()))
+
+
+def reconcile_corrupt_space_ids(registry: dict[str, Any]) -> int:
+    """Heal agent rows where ``space_id`` holds a name/slug instead of a UUID.
+
+    Recovers the correct UUID from sibling fields (``active_space_id``,
+    ``default_space_id``, ``allowed_spaces[].space_id``). Idempotent — rows
+    whose ``space_id`` is already UUID-shaped or empty are left alone.
+    Returns the count of repaired rows.
+    """
+    repaired = 0
+    for entry in registry.get("agents", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("space_id")
+        if not isinstance(sid, str) or not sid.strip() or looks_like_space_uuid(sid):
+            continue
+        candidate = ""
+        for key in ("active_space_id", "default_space_id"):
+            v = entry.get(key)
+            if looks_like_space_uuid(v):
+                candidate = str(v).strip()
+                break
+        if not candidate:
+            allowed = entry.get("allowed_spaces") or []
+            if isinstance(allowed, list):
+                for row in allowed:
+                    if isinstance(row, dict) and looks_like_space_uuid(row.get("space_id")):
+                        candidate = str(row["space_id"]).strip()
+                        break
+        if candidate:
+            entry["space_id"] = candidate
+            repaired += 1
+    return repaired
+
+
 def load_gateway_registry() -> dict[str, Any]:
     registry = _read_json(registry_path(), default=_default_registry())
     registry.setdefault("version", 1)
@@ -2976,6 +3020,7 @@ def load_gateway_registry() -> dict[str, Any]:
     gateway.setdefault("pid", None)
     gateway.setdefault("last_started_at", None)
     gateway.setdefault("last_reconcile_at", None)
+    reconcile_corrupt_space_ids(registry)
     return registry
 
 
