@@ -5160,6 +5160,60 @@ def test_status_payload_include_hidden_returns_all(monkeypatch, tmp_path):
     assert payload["summary"]["hidden_agents"] == 1
 
 
+def test_operator_cleanup_hides_selected_agents(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    registry = {
+        "agents": [
+            {
+                "name": "stale-one",
+                "agent_id": "agent-stale-one",
+                "template_id": "claude_code_channel",
+                "runtime_type": "claude_code_channel",
+                "desired_state": "running",
+                "effective_state": "error",
+            },
+            {
+                "name": "stale-two",
+                "agent_id": "agent-stale-two",
+                "template_id": "pass_through",
+                "runtime_type": "inbox",
+                "desired_state": "running",
+                "effective_state": "stale",
+            },
+            {
+                "name": "keeper",
+                "agent_id": "agent-keeper",
+                "template_id": "echo",
+                "runtime_type": "echo",
+                "desired_state": "running",
+                "effective_state": "running",
+            },
+        ]
+    }
+    gateway_core.save_gateway_registry(registry)
+
+    payload = gateway_cmd._hide_managed_agents(
+        ["stale-one", "stale-two"],
+        reason="operator_cleanup",
+    )
+
+    assert payload["count"] == 2
+    assert payload["missing"] == []
+    stored = {agent["name"]: agent for agent in gateway_core.load_gateway_registry()["agents"]}
+    assert stored["stale-one"]["lifecycle_phase"] == "hidden"
+    assert stored["stale-one"]["desired_state"] == "stopped"
+    assert stored["stale-one"]["hidden_reason"] == "operator_cleanup"
+    assert stored["stale-two"]["lifecycle_phase"] == "hidden"
+    assert stored["keeper"].get("lifecycle_phase", "active") == "active"
+
+    visible_payload = gateway_cmd._status_payload(activity_limit=0)
+    visible_names = [agent["name"] for agent in visible_payload["agents"]]
+    assert visible_names == ["keeper"]
+    assert visible_payload["summary"]["hidden_agents"] == 2
+    recent = gateway_core.load_recent_gateway_activity()
+    assert [event["event"] for event in recent].count("managed_agent_hidden") == 2
+
+
 def test_lifecycle_signal_sent_on_connected_to_stale(monkeypatch, tmp_path):
     _isolate_gateway_paths(monkeypatch, tmp_path)
     client = _RecordingHeartbeatClient()

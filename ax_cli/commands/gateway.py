@@ -1356,6 +1356,52 @@ def _set_managed_agent_desired_state(name: str, desired_state: str) -> dict:
     return annotate_runtime_health(entry, registry=registry)
 
 
+def _hide_managed_agents(names: list[str], *, reason: str = "operator_cleanup") -> dict:
+    normalized_names = []
+    seen = set()
+    for raw_name in names:
+        name = str(raw_name or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        normalized_names.append(name)
+        seen.add(key)
+    if not normalized_names:
+        raise ValueError("Choose at least one managed agent to hide.")
+
+    registry = load_gateway_registry()
+    hidden: list[dict] = []
+    missing: list[str] = []
+    hidden_reason = str(reason or "").strip() or "operator_cleanup"
+    hidden_at = gateway_core._now_iso()
+    for name in normalized_names:
+        entry = find_agent_entry(registry, name)
+        if not entry:
+            missing.append(name)
+            continue
+        if str(entry.get("desired_state") or "").strip().lower() != "stopped":
+            entry["desired_state_before_hide"] = entry.get("desired_state") or "running"
+        entry["desired_state"] = "stopped"
+        entry["lifecycle_phase"] = "hidden"
+        entry["hidden_at"] = hidden_at
+        entry["hidden_reason"] = hidden_reason
+        hidden.append(entry)
+
+    save_gateway_registry(registry)
+    for entry in hidden:
+        record_gateway_activity(
+            "managed_agent_hidden",
+            entry=entry,
+            hidden_reason=hidden_reason,
+            operator_action=True,
+        )
+    return {
+        "count": len(hidden),
+        "missing": missing,
+        "hidden": [annotate_runtime_health(entry, registry=registry) for entry in hidden],
+    }
+
+
 def _build_session_client_silent() -> AxClient | None:
     """Build a user-PAT session client without raising. Returns None when
     the gateway is not logged in or the session token is missing/invalid.
@@ -4849,6 +4895,21 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                         if stored:
                             payload = _with_registry_refs(registry, annotate_runtime_health(stored, registry=registry))
                     _write_json_response(self, payload, status=HTTPStatus.CREATED)
+                    return
+                if parsed.path == "/api/agents/cleanup-hide":
+                    raw_names = body.get("names")
+                    if not isinstance(raw_names, list):
+                        _write_json_response(
+                            self,
+                            {"error": "names must be a list of managed agent names"},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    payload = _hide_managed_agents(
+                        [str(name or "").strip() for name in raw_names],
+                        reason=str(body.get("reason") or "operator_cleanup"),
+                    )
+                    _write_json_response(self, payload)
                     return
                 if parsed.path == "/local/connect":
                     agent_name = str(body.get("agent_name") or body.get("name") or "").strip()
