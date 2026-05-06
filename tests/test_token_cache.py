@@ -1,5 +1,7 @@
 """Tests for token exchange and caching (AUTH-SPEC-001 §13)."""
 
+import sys
+
 import pytest
 
 from ax_cli.token_cache import (
@@ -218,6 +220,7 @@ class TestTokenExchanger:
         assert token == "fake.jwt.token"
         assert mock_post.call_count == 1  # only the first exchange, second loaded from disk
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="NTFS uses ACLs, not POSIX mode bits")
     def test_disk_cache_permissions(self, tmp_path, monkeypatch, sample_pat, mock_exchange):
         mock_exchange()
         monkeypatch.chdir(tmp_path)
@@ -231,3 +234,30 @@ class TestTokenExchanger:
         assert cache_file.exists()
         mode = cache_file.stat().st_mode & 0o777
         assert mode == 0o600
+
+    def test_disk_cache_loads_on_windows_despite_loose_mode(
+        self, tmp_path, monkeypatch, sample_pat, mock_exchange
+    ):
+        """Regression: on Windows the cache file reports 0o666 via stat() and was
+        being deleted on every CLI invocation. With sys.platform == 'win32' the
+        loader must skip the mode check entirely and reuse the cache."""
+        mock_post = mock_exchange()
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".ax").mkdir()
+        (tmp_path / ".ax" / "config.toml").write_text("")
+        monkeypatch.setattr("ax_cli.token_cache.sys.platform", "win32")
+
+        exchanger1 = TokenExchanger("https://example.com", sample_pat)
+        exchanger1.get_token("user_access")
+        cache_file = tmp_path / ".ax" / "cache" / "tokens.json"
+        assert cache_file.exists()
+
+        if sys.platform != "win32":
+            cache_file.chmod(0o666)
+
+        exchanger2 = TokenExchanger("https://example.com", sample_pat)
+        token = exchanger2.get_token("user_access")
+
+        assert token == "fake.jwt.token"
+        assert mock_post.call_count == 1, "cache must persist; no second exchange call"
+        assert cache_file.exists(), "cache must not be deleted on Windows"

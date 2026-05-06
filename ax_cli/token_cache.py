@@ -10,6 +10,7 @@ Cache file: separate from PAT config, permissions 0600.
 import hashlib
 import json
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -98,12 +99,16 @@ class TokenExchanger:
         cache_file = self._cache_dir / "tokens.json"
         if cache_file.exists():
             try:
-                # Verify permissions
-                mode = cache_file.stat().st_mode & 0o777
-                if mode != 0o600:
-                    logger.warning("Token cache has wrong permissions %o, removing", mode)
-                    cache_file.unlink()
-                    return
+                # NTFS uses ACLs, not POSIX mode bits — `stat().st_mode` always
+                # reports 0o666/0o644 on Windows regardless of actual access,
+                # which would delete the cache on every call. ACL-based
+                # protection (icacls) is the user's responsibility on Windows.
+                if sys.platform != "win32":
+                    mode = cache_file.stat().st_mode & 0o777
+                    if mode != 0o600:
+                        logger.warning("Token cache has wrong permissions %o, removing", mode)
+                        cache_file.unlink()
+                        return
                 data = json.loads(cache_file.read_text())
                 # Only load entries for this PAT
                 if isinstance(data, dict):
