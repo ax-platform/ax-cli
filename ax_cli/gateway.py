@@ -2999,9 +2999,7 @@ def save_gateway_registry(registry: dict[str, Any], *, merge_archive: bool = Tru
             on_disk = None
         if isinstance(on_disk, dict):
             disk_agents = on_disk.get("agents") or []
-            disk_by_name = {
-                str(a.get("name") or ""): a for a in disk_agents if isinstance(a, dict) and a.get("name")
-            }
+            disk_by_name = {str(a.get("name") or ""): a for a in disk_agents if isinstance(a, dict) and a.get("name")}
             for entry in registry.get("agents") or []:
                 if not isinstance(entry, dict):
                     continue
