@@ -804,6 +804,7 @@
         const message = (payload && payload.error) || ("Request failed (" + res.status + ")");
         const err = new Error(message);
         err.status = res.status;
+        err.payload = payload;
         throw err;
       }
       return payload;
@@ -2310,7 +2311,16 @@
         state.submitting = false;
         wizardSubmit.disabled = false;
         formStatus.style.display = "none";
-        formError.textContent = err.message || "Connection failed.";
+        // Operator-actionable surface for upstream rate limits — show the
+        // retry-after window + operator_action hint from the structured
+        // 429 payload instead of the bare httpx error string.
+        if (err.status === 429 && err.payload && err.payload.error_class === "rate_limited") {
+          const retryAfter = err.payload.retry_after_seconds || 30;
+          const action = err.payload.operator_action || `Wait ${retryAfter} seconds and try again.`;
+          formError.textContent = `Rate-limited by paxai.app — retry in ${retryAfter}s. ${action}`;
+        } else {
+          formError.textContent = err.message || "Connection failed.";
+        }
         formError.style.display = "block";
       }
     });
