@@ -46,11 +46,15 @@ CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 def _read_token_file(path: Path) -> str:
     """Read a token file securely. Returns empty string on failure."""
     try:
-        stat = path.stat()
-        # Warn if token file is world-readable
-        if stat.st_mode & 0o077:
-            log.warning("Token file %s has loose permissions (mode %o). "
-                        "Run: chmod 600 %s", path, stat.st_mode & 0o777, path)
+        # NTFS uses ACLs, not POSIX mode bits — stat().st_mode always
+        # reports 0o666/0o644 on Windows regardless of actual access, so
+        # the world-readable check would fire on every read with no way
+        # for the user to satisfy it. icacls is the Windows alternative.
+        if sys.platform != "win32":
+            stat = path.stat()
+            if stat.st_mode & 0o077:
+                log.warning("Token file %s has loose permissions (mode %o). "
+                            "Run: chmod 600 %s", path, stat.st_mode & 0o777, path)
         return path.read_text().strip()
     except OSError:
         return ""
