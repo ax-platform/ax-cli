@@ -5271,6 +5271,7 @@ def test_legacy_entry_without_lifecycle_phase_loads_as_active(monkeypatch, tmp_p
     assert entry["lifecycle_phase"] == "hidden"
 
 
+
 def test_archive_managed_agent_sets_phase_and_stops_runtime(monkeypatch, tmp_path):
     _isolate_gateway_paths(monkeypatch, tmp_path)
     entry = {
@@ -5719,3 +5720,114 @@ def test_runtime_start_proceeds_after_setup_error_backoff_expires(monkeypatch, t
     # against repeat retries from the next reconcile tick.
     assert runtime.entry.get("last_runtime_error_at") is not None
     assert runtime.entry["last_runtime_error_at"] != long_ago
+
+
+# ---------------------------------------------------------------------------
+# Upstream 429 backoff + cache (b)
+# ---------------------------------------------------------------------------
+
+
+def _make_429_error() -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://paxai.app/api/v1/agents")
+    response = httpx.Response(429, headers={"retry-after": "12"}, request=request)
+    return httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+
+def test_with_upstream_429_retry_succeeds_on_second_attempt(monkeypatch):
+    """Helper retries on 429 and returns the success result of the next call."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_429_error()
+        return {"agent": "ok"}
+
+    result = gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0)
+    assert result == {"agent": "ok"}
+    assert calls["n"] == 2
+    assert sleeps == [1.0]  # one backoff before the successful retry
+
+
+def test_with_upstream_429_retry_exhausts_then_raises(monkeypatch):
+    """All attempts 429 → raises UpstreamRateLimitedError carrying the
+    parsed Retry-After hint.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
+
+    def call():
+        raise _make_429_error()
+
+    with pytest.raises(gateway_cmd.UpstreamRateLimitedError) as exc_info:
+        gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0)
+    assert exc_info.value.retries_attempted == 2
+    assert exc_info.value.retry_after_seconds == 12  # parsed from header
+    # 2 retries × exponential = 1s + 2s.
+    assert sleeps == [1.0, 2.0]
+
+
+def test_with_upstream_429_retry_propagates_other_errors(monkeypatch):
+    """Non-429 httpx errors propagate without retry."""
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: None)
+
+    request = httpx.Request("POST", "https://paxai.app/api/v1/agents")
+    server_error = httpx.HTTPStatusError(
+        "500 Internal Server Error",
+        request=request,
+        response=httpx.Response(500, request=request),
+    )
+
+    def call():
+        raise server_error
+
+    with pytest.raises(httpx.HTTPStatusError):
+        gateway_cmd._with_upstream_429_retry(call, max_retries=3, base_wait=0.1)
+
+
+def test_backend_agent_record_falls_back_to_cache_on_failure(monkeypatch, tmp_path):
+    """When list_agents raises (e.g. 429), _backend_agent_record returns
+    the agent from the local cache instead of None — so dashboard reads
+    survive transient upstream rate limits.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    # Seed the cache as if a previous successful call had populated it.
+    gateway_cmd._save_agents_cache(
+        [
+            {"name": "cached_agent", "agent_id": "agent-cached", "space_id": "space-1"},
+            {"name": "other_agent", "agent_id": "agent-other"},
+        ]
+    )
+
+    class FailingClient:
+        def list_agents(self):
+            raise _make_429_error()
+
+    found = gateway_cmd._backend_agent_record(FailingClient(), "cached_agent")
+    assert found is not None
+    assert found["agent_id"] == "agent-cached"
+
+
+def test_backend_agent_record_seeds_cache_on_successful_upstream(monkeypatch, tmp_path):
+    """Successful upstream list_agents writes to the cache so the next
+    failure has data to serve.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    assert gateway_cmd._load_agents_cache() == []  # empty pre-condition
+
+    class StubClient:
+        def list_agents(self):
+            return {
+                "agents": [
+                    {"name": "fresh_agent", "agent_id": "agent-fresh", "space_id": "space-1"},
+                ]
+            }
+
+    found = gateway_cmd._backend_agent_record(StubClient(), "fresh_agent")
+    assert found is not None
+    assert found["agent_id"] == "agent-fresh"
+
+    cached = gateway_cmd._load_agents_cache()
+    assert any(a.get("name") == "fresh_agent" for a in cached), "upstream success should seed cache"

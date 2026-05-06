@@ -182,6 +182,95 @@ def _load_gateway_session_or_exit() -> dict:
     return session
 
 
+# ---------------------------------------------------------------------------
+# Upstream rate-limit handling: retry with exponential backoff + structured
+# error so operator-visible flows (Connect agent modal, CLI commands) degrade
+# cleanly when paxai.app rate-limits us. Two retry budgets:
+#   - Interactive (Connect agent modal, CLI invocations): 2 retries × 1s/2s
+#     base_wait → ~3s ceiling so the operator's UI doesn't hang.
+#   - Background (reconcile loop, cache refresh): 5 retries × exponential.
+# ---------------------------------------------------------------------------
+
+INTERACTIVE_429_MAX_RETRIES = 2
+INTERACTIVE_429_BASE_WAIT = 1.0
+BACKGROUND_429_MAX_RETRIES = 5
+BACKGROUND_429_BASE_WAIT = 1.0
+
+
+class UpstreamRateLimitedError(RuntimeError):
+    """Raised when an upstream call returned 429 even after retries.
+
+    Carries the original ``httpx.HTTPStatusError`` plus a parsed
+    ``retry_after_seconds`` (from the Retry-After header, when present)
+    so callers can surface operator-actionable guidance without having
+    to re-parse the upstream response.
+    """
+
+    def __init__(self, last_exc: httpx.HTTPStatusError, retries_attempted: int) -> None:
+        self.last_exc = last_exc
+        self.retries_attempted = retries_attempted
+        retry_after: int | None = None
+        try:
+            response = last_exc.response
+            header_value = response.headers.get("retry-after") if response is not None else None
+            if header_value:
+                retry_after = int(float(header_value))
+        except (ValueError, AttributeError, TypeError):
+            retry_after = None
+        self.retry_after_seconds = retry_after
+        super().__init__(f"Upstream rate-limited after {retries_attempted} retries")
+
+
+def _with_upstream_429_retry(call, *, max_retries: int, base_wait: float = 1.0):
+    """Run ``call`` and retry on httpx 429 with exponential backoff.
+
+    Waits ``base_wait * 2**attempt`` between attempts. Other httpx
+    exceptions (4xx/5xx that aren't 429, network errors) propagate
+    immediately. After the configured retry budget is exhausted on a
+    persistent 429, raises ``UpstreamRateLimitedError`` carrying the
+    final exception and any Retry-After hint.
+    """
+    attempts = 0
+    while True:
+        try:
+            return call()
+        except httpx.HTTPStatusError as exc:
+            if exc.response is None or exc.response.status_code != 429:
+                raise
+            if attempts >= max_retries:
+                raise UpstreamRateLimitedError(exc, attempts) from exc
+            wait = base_wait * (2**attempts)
+            time.sleep(wait)
+            attempts += 1
+
+
+# Agents-list cache: serves last-good upstream response when paxai.app
+# rate-limits us, mirroring the spaces cache pattern in PR #148. The cache
+# is best-effort — write/read failures are swallowed; we never fail a
+# request because we couldn't update cache.
+
+
+def _agents_cache_path() -> Path:
+    return gateway_dir() / "agents.cache.json"
+
+
+def _load_agents_cache() -> list[dict]:
+    try:
+        raw = json.loads(_agents_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = raw.get("agents") if isinstance(raw, dict) else raw
+    return [item for item in (items or []) if isinstance(item, dict)]
+
+
+def _save_agents_cache(agents: list[dict]) -> None:
+    payload = {"agents": agents, "saved_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        _agents_cache_path().write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _save_agent_token(name: str, token: str) -> Path:
     token_path = agent_token_path(name)
     token_path.write_text(token.strip() + "\n")
@@ -803,11 +892,22 @@ def _agent_space_name_from_backend_record(agent: dict, space_id: str | None) -> 
 
 
 def _backend_agent_record(client: AxClient, name: str) -> dict | None:
+    """Look up an agent by name on the upstream backend.
+
+    Falls back to the local agents cache when upstream is unavailable
+    (e.g. paxai.app rate-limits us). Successful upstream responses
+    seed/refresh the cache so the next failure has stale-but-usable
+    data to serve.
+    """
+    agents: list[dict] = []
     try:
         agents_data = client.list_agents()
+        agents = agents_data if isinstance(agents_data, list) else (agents_data or {}).get("agents", []) or []
+        if agents:
+            _save_agents_cache([a for a in agents if isinstance(a, dict)])
     except Exception:
-        return None
-    agents = agents_data if isinstance(agents_data, list) else agents_data.get("agents", [])
+        # Upstream unavailable — fall back to last-good cache.
+        agents = _load_agents_cache()
     for agent in agents:
         if not isinstance(agent, dict):
             continue
@@ -906,30 +1006,48 @@ def _register_managed_agent(
         registry=registry,
         explicit_space_id=space_id or existing_home_space,
     )
-    existing = _find_agent_in_space(client, name, selected_space)
+    existing = _with_upstream_429_retry(
+        lambda: _find_agent_in_space(client, name, selected_space),
+        max_retries=INTERACTIVE_429_MAX_RETRIES,
+        base_wait=INTERACTIVE_429_BASE_WAIT,
+    )
     if existing:
         agent = existing
         if description or model:
-            client.update_agent(name, **{k: v for k, v in {"description": description, "model": model}.items() if v})
+            _with_upstream_429_retry(
+                lambda: client.update_agent(
+                    name, **{k: v for k, v in {"description": description, "model": model}.items() if v}
+                ),
+                max_retries=INTERACTIVE_429_MAX_RETRIES,
+                base_wait=INTERACTIVE_429_BASE_WAIT,
+            )
     else:
-        agent = _create_agent_in_space(
-            client,
-            name=name,
-            space_id=selected_space,
-            description=description,
-            model=model,
+        agent = _with_upstream_429_retry(
+            lambda: _create_agent_in_space(
+                client,
+                name=name,
+                space_id=selected_space,
+                description=description,
+                model=model,
+            ),
+            max_retries=INTERACTIVE_429_MAX_RETRIES,
+            base_wait=INTERACTIVE_429_BASE_WAIT,
         )
     _polish_metadata(client, name=name, bio=None, specialization=None, system_prompt=None)
 
     agent_id = str(agent.get("id") or agent.get("agent_id") or "")
-    token, pat_source = _mint_agent_pat(
-        client,
-        agent_id=agent_id,
-        agent_name=name,
-        audience=audience,
-        expires_in_days=90,
-        pat_name=f"gateway-{name}",
-        space_id=selected_space,
+    token, pat_source = _with_upstream_429_retry(
+        lambda: _mint_agent_pat(
+            client,
+            agent_id=agent_id,
+            agent_name=name,
+            audience=audience,
+            expires_in_days=90,
+            pat_name=f"gateway-{name}",
+            space_id=selected_space,
+        ),
+        max_retries=INTERACTIVE_429_MAX_RETRIES,
+        base_wait=INTERACTIVE_429_BASE_WAIT,
     )
     token_file = _save_agent_token(name, token)
 
@@ -4679,20 +4797,38 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                     _write_json_response(self, payload, status=status_code)
                     return
                 if parsed.path == "/api/agents":
-                    payload = _register_managed_agent(
-                        name=str(body.get("name") or "").strip(),
-                        template_id=str(body.get("template_id") or "").strip() or None,
-                        runtime_type=str(body.get("runtime_type") or "").strip() or None,
-                        exec_cmd=str(body.get("exec_command") or "").strip() or None,
-                        workdir=str(body.get("workdir") or "").strip() or None,
-                        ollama_model=str(body.get("ollama_model") or "").strip() or None,
-                        space_id=str(body.get("space_id") or "").strip() or None,
-                        audience=str(body.get("audience") or "both"),
-                        description=str(body.get("description") or "").strip() or None,
-                        model=str(body.get("model") or "").strip() or None,
-                        timeout_seconds=body.get("timeout_seconds", body.get("timeout")),
-                        start=bool(body.get("start", True)),
-                    )
+                    try:
+                        payload = _register_managed_agent(
+                            name=str(body.get("name") or "").strip(),
+                            template_id=str(body.get("template_id") or "").strip() or None,
+                            runtime_type=str(body.get("runtime_type") or "").strip() or None,
+                            exec_cmd=str(body.get("exec_command") or "").strip() or None,
+                            workdir=str(body.get("workdir") or "").strip() or None,
+                            ollama_model=str(body.get("ollama_model") or "").strip() or None,
+                            space_id=str(body.get("space_id") or "").strip() or None,
+                            audience=str(body.get("audience") or "both"),
+                            description=str(body.get("description") or "").strip() or None,
+                            model=str(body.get("model") or "").strip() or None,
+                            timeout_seconds=body.get("timeout_seconds", body.get("timeout")),
+                            start=bool(body.get("start", True)),
+                        )
+                    except UpstreamRateLimitedError as exc:
+                        retry_after = exc.retry_after_seconds or 30
+                        _write_json_response(
+                            self,
+                            {
+                                "error": "Upstream rate-limited (paxai.app returned 429).",
+                                "error_class": "rate_limited",
+                                "retry_after_seconds": retry_after,
+                                "operator_action": (
+                                    f"Wait {retry_after} seconds and try again. "
+                                    "Other agent runtimes may be holding the rate-limit budget; "
+                                    "stopping or archiving idle agents can reduce pressure."
+                                ),
+                            },
+                            status=HTTPStatus.TOO_MANY_REQUESTS,
+                        )
+                        return
                     profile = gateway_core.infer_operator_profile(payload)
                     if (
                         profile["placement"] == "attached"
