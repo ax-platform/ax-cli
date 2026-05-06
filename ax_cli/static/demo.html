@@ -101,6 +101,7 @@
     .section-title h2 { margin: 0; font-size: 18px; font-weight: 500; letter-spacing: -0.005em; }
     .section-title .count { color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.03); }
     .section-title .count[hidden] { display: none; }
+    .cleanup-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
 
     /* Connect card (disconnected state) */
     .connect-card { padding: 36px 32px; border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--panel); backdrop-filter: blur(10px); }
@@ -117,12 +118,17 @@
     /* Agent list (rows) */
     .agent-list { border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(10px); overflow: hidden; }
     .agent-grid-cols { display: grid; grid-template-columns: 38px minmax(220px, 1.15fr) minmax(150px, 0.72fr) minmax(210px, 1fr) minmax(40px, auto); gap: 14px; align-items: center; }
+    .agent-list.cleanup-mode .agent-grid-cols { grid-template-columns: 30px 38px minmax(220px, 1.15fr) minmax(150px, 0.72fr) minmax(210px, 1fr) minmax(40px, auto); }
     .agent-list-head { padding: 12px 20px; border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, 0.02); font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted-2); }
     .agent-row { padding: 16px 20px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer; transition: background 120ms ease; text-align: left; font: inherit; width: 100%; }
     .agent-row:last-child { border-bottom: 0; }
     .agent-row:hover { background: rgba(255, 255, 255, 0.03); }
     .agent-row:focus-visible { outline: 2px solid rgba(94, 234, 212, 0.5); outline-offset: -2px; }
     .agent-row.active-row { background: rgba(94, 234, 212, 0.06); }
+    .agent-list.cleanup-mode .agent-row { cursor: default; }
+    .cleanup-cell { display: none; justify-self: center; align-items: center; }
+    .agent-list.cleanup-mode .cleanup-cell { display: inline-flex; }
+    .cleanup-check { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
 
     .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; justify-self: center; background: var(--muted-2); transition: background 200ms ease, box-shadow 200ms ease; }
     .dot.tone-ok { background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
@@ -308,6 +314,7 @@
 
     @media (max-width: 960px) {
       .agent-grid-cols { grid-template-columns: 38px minmax(170px, 1fr) minmax(128px, 0.65fr) minmax(154px, 0.82fr) minmax(30px, auto); gap: 12px; }
+      .agent-list.cleanup-mode .agent-grid-cols { grid-template-columns: 30px 38px minmax(170px, 1fr) minmax(128px, 0.65fr) minmax(154px, 0.82fr) minmax(30px, auto); }
       .row-space { font-size: 12px; }
     }
     @media (max-width: 720px) {
@@ -317,6 +324,7 @@
       .hero-actions { margin-top: 20px; }
       .topbar { margin-bottom: 24px; }
       .agent-grid-cols { grid-template-columns: 34px minmax(0, 1fr) minmax(96px, 0.55fr) minmax(116px, 0.65fr) minmax(22px, auto); gap: 10px; }
+      .agent-list.cleanup-mode .agent-grid-cols { grid-template-columns: 28px 34px minmax(0, 1fr) minmax(96px, 0.55fr) minmax(116px, 0.65fr) minmax(22px, auto); }
       .type-mark { width: 30px; height: 30px; border-radius: 9px; }
       .type-mark svg { width: 18px; height: 18px; }
       .row-agent { gap: 9px; }
@@ -385,7 +393,10 @@
     <section>
       <div class="section-title">
         <h2 id="list-title">Your agents</h2>
-        <div style="display: flex; align-items: center; gap: 10px;">
+        <div class="cleanup-actions">
+          <button type="button" class="system-toggle" id="cleanup-hide-btn" hidden title="Hide selected agents from the list and stop their runtimes">Hide selected</button>
+          <span class="count" id="cleanup-selection" hidden></span>
+          <button type="button" class="system-toggle" id="cleanup-toggle" title="Bulk-clean stale agents from this list">Clean up</button>
           <button type="button" class="system-toggle" id="system-toggle" title="Show gateway-internal agents like switchboards">Show system agents</button>
           <span class="count" id="agent-count" hidden></span>
         </div>
@@ -502,6 +513,8 @@
       rowsByName: new Map(),
       lastRenderMode: null, // "disconnected" | "connect" | "list"
       showSystemAgents: false,
+      cleanupMode: false,
+      selectedNames: new Set(),
     };
 
     // Restore system-agent toggle state from localStorage so the choice persists across reloads.
@@ -1213,6 +1226,7 @@
         list = makeEl("div", { class: "agent-list" });
         // Header row (column labels)
         const head = makeEl("div", { class: "agent-list-head agent-grid-cols" }, [
+          makeEl("span", { class: "cleanup-cell" }),
           makeEl("span"),
           makeEl("span", null, ["Agent"]),
           makeEl("span", null, ["Space"]),
@@ -1254,6 +1268,15 @@
           const row = state.rowsByName.get(name);
           if (row) list.appendChild(row);
         }
+      }
+      // Reapply cleanup-mode class (list may have been recreated above) and
+      // restore checkbox states for any selected agents that survived a reorder.
+      if (state.cleanupMode) {
+        list.classList.add("cleanup-mode");
+        list.querySelectorAll(".cleanup-check").forEach((cb) => {
+          const name = cb.dataset.name;
+          if (name && state.selectedNames.has(name)) cb.checked = true;
+        });
       }
     }
 
@@ -1360,14 +1383,34 @@
         tabindex: "0",
         class: "agent-row agent-grid-cols",
         dataset: { name },
-        onclick: () => openDrawer(name),
+        onclick: (event) => {
+          if (state.cleanupMode) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          openDrawer(name);
+        },
         onkeydown: (event) => {
+          if (state.cleanupMode) return;
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             openDrawer(name);
           }
         },
       });
+      const cleanupCell = makeEl("span", { class: "cleanup-cell" }, [
+        makeEl("input", {
+          type: "checkbox",
+          class: "cleanup-check",
+          dataset: { name },
+          onclick: (event) => {
+            event.stopPropagation();
+            toggleAgentSelection(name, event.target.checked);
+          },
+        }),
+      ]);
+      row.appendChild(cleanupCell);
       row.appendChild(makeEl("span", { class: "dot tone-muted" }));
       row.appendChild(makeEl("span", { class: "row-agent" }, [
         makeEl("span", { class: "type-mark type-custom", title: "Custom", "aria-label": "Custom" }, [typeIcon("custom", "Custom")]),
@@ -2261,6 +2304,89 @@
       state.lastRenderMode = null;
       ensureListMode();
       renderAgentList();
+    });
+
+    function applyCleanupModeClass() {
+      const list = document.querySelector(".agent-list");
+      if (!list) return;
+      list.classList.toggle("cleanup-mode", state.cleanupMode);
+    }
+
+    function refreshCleanupToolbar() {
+      const toggleBtn = $("cleanup-toggle");
+      const hideBtn = $("cleanup-hide-btn");
+      const selCount = $("cleanup-selection");
+      if (state.cleanupMode) {
+        toggleBtn.textContent = "Cancel";
+        toggleBtn.classList.add("on");
+        const n = state.selectedNames.size;
+        hideBtn.hidden = n === 0;
+        hideBtn.textContent = n > 0 ? `Hide ${n} selected` : "Hide selected";
+        selCount.hidden = n === 0;
+        selCount.textContent = n > 0 ? `${n} selected` : "";
+      } else {
+        toggleBtn.textContent = "Clean up";
+        toggleBtn.classList.remove("on");
+        hideBtn.hidden = true;
+        selCount.hidden = true;
+      }
+    }
+
+    function toggleAgentSelection(name, checked) {
+      if (checked) state.selectedNames.add(name);
+      else state.selectedNames.delete(name);
+      refreshCleanupToolbar();
+    }
+
+    function exitCleanupMode() {
+      state.cleanupMode = false;
+      state.selectedNames.clear();
+      // Clear all checkboxes in the DOM.
+      const list = document.querySelector(".agent-list");
+      if (list) {
+        list.querySelectorAll(".cleanup-check").forEach((cb) => { cb.checked = false; });
+      }
+      applyCleanupModeClass();
+      refreshCleanupToolbar();
+    }
+
+    async function hideSelectedAgents() {
+      const names = Array.from(state.selectedNames);
+      if (!names.length) return;
+      const hideBtn = $("cleanup-hide-btn");
+      const original = hideBtn.textContent;
+      hideBtn.disabled = true;
+      hideBtn.textContent = "Hiding…";
+      try {
+        const result = await api("POST", "/api/agents/cleanup-hide", { names, reason: "operator_cleanup" });
+        const hidden = (result && result.count) || 0;
+        const missing = (result && result.missing) || [];
+        if (missing.length) {
+          showToast(`Hid ${hidden}, ${missing.length} not found`, "warn");
+        } else {
+          showToast(`Hid ${hidden} agent${hidden === 1 ? "" : "s"}`, "ok");
+        }
+        exitCleanupMode();
+        await loadStatus();
+      } catch (err) {
+        showToast(err.message || "Hide failed", "err");
+        hideBtn.disabled = false;
+        hideBtn.textContent = original;
+      }
+    }
+
+    $("cleanup-toggle").addEventListener("click", () => {
+      if (state.cleanupMode) {
+        exitCleanupMode();
+        return;
+      }
+      state.cleanupMode = true;
+      applyCleanupModeClass();
+      refreshCleanupToolbar();
+    });
+
+    $("cleanup-hide-btn").addEventListener("click", () => {
+      void hideSelectedAgents();
     });
 
     wizardSubmit.addEventListener("click", async () => {
