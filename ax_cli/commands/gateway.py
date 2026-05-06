@@ -96,6 +96,7 @@ from ..gateway_runtime_types import (
     runtime_type_definition,
     runtime_type_list,
 )
+from ..mentions import merge_explicit_mentions_metadata
 from ..output import JSON_OPTION, console, err_console, print_json, print_table
 
 app = typer.Typer(name="gateway", help="Run the local Gateway control plane", no_args_is_help=True)
@@ -480,6 +481,15 @@ def _send_local_session_message(*, session_token: str, body: dict) -> dict:
         "gateway_pass_through_fingerprint_signature": session.get("fingerprint_signature"),
     }
     parent_id = str(body.get("parent_id") or "").strip()
+    if parent_id:
+        metadata.setdefault("routing_intent", "reply_with_mentions")
+    # Defense for clients that skip mention extraction (third-party scripts,
+    # older CLI versions, etc.). The helper is idempotent — re-running on
+    # already-extracted metadata is a no-op.
+    sender_name = str(entry.get("name") or "").strip()
+    metadata = (
+        merge_explicit_mentions_metadata(metadata, content, exclude=[sender_name] if sender_name else ()) or metadata
+    )
     payload = client.send_message(
         space_id,
         content,

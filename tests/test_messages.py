@@ -749,3 +749,115 @@ def test_messages_edit_and_delete_resolve_short_id_prefix(monkeypatch):
     assert calls["delete_id"] == message_id
     assert calls["space_ids"] == ["space-1", "space-1"]
     assert json.loads(delete_result.output)["message_id"] == message_id
+
+
+def test_gateway_local_send_extracts_mentions_into_metadata(monkeypatch):
+    """The reply-routing fix: @mentions in content must reach Gateway's body.metadata."""
+    from ax_cli.commands.messages import _gateway_local_send
+
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"id": "msg-1"}}
+
+    def fake_post(url, *, json=None, headers=None, timeout=None):
+        if url.endswith("/local/connect"):
+            return FakeResponse()  # type: ignore[return-value]
+        if url.endswith("/local/send"):
+            captured["body"] = json
+            return FakeResponse()  # type: ignore[return-value]
+        raise AssertionError(url)
+
+    monkeypatch.setattr(
+        "ax_cli.commands.messages._gateway_local_connect",
+        lambda **kwargs: {"status": "approved", "session_token": "gw-session"},
+    )
+    monkeypatch.setattr("ax_cli.commands.messages.httpx.post", fake_post)
+
+    _gateway_local_send(
+        gateway_cfg={"url": "http://127.0.0.1:8765", "agent_name": "wishy"},
+        content="@nemotron @other_agent thanks for the review!",
+        space_id="space-1",
+        parent_id="parent-msg-7",
+    )
+
+    body = captured["body"]
+    assert body["parent_id"] == "parent-msg-7"
+    metadata = body.get("metadata") or {}
+    assert metadata.get("mentions") == ["nemotron", "other_agent"]
+    assert metadata.get("routing_intent") == "reply_with_mentions"
+
+
+def test_gateway_local_send_omits_metadata_when_no_mentions_or_parent(monkeypatch):
+    """Plain notify-only sends with no @mentions stay metadata-free."""
+    from ax_cli.commands.messages import _gateway_local_send
+
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"id": "msg-1"}}
+
+    def fake_post(url, *, json=None, headers=None, timeout=None):
+        if url.endswith("/local/send"):
+            captured["body"] = json
+        return FakeResponse()  # type: ignore[return-value]
+
+    monkeypatch.setattr(
+        "ax_cli.commands.messages._gateway_local_connect",
+        lambda **kwargs: {"status": "approved", "session_token": "gw-session"},
+    )
+    monkeypatch.setattr("ax_cli.commands.messages.httpx.post", fake_post)
+
+    _gateway_local_send(
+        gateway_cfg={"url": "http://127.0.0.1:8765", "agent_name": "wishy"},
+        content="checking in, status update only",
+        space_id="space-1",
+        parent_id=None,
+    )
+
+    body = captured["body"]
+    assert "metadata" not in body, f"unexpected metadata: {body.get('metadata')}"
+
+
+def test_gateway_local_send_excludes_sender_from_mentions(monkeypatch):
+    """If the sender's own handle appears in content, it must not be re-routed to itself."""
+    from ax_cli.commands.messages import _gateway_local_send
+
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"id": "msg-1"}}
+
+    def fake_post(url, *, json=None, headers=None, timeout=None):
+        if url.endswith("/local/send"):
+            captured["body"] = json
+        return FakeResponse()  # type: ignore[return-value]
+
+    monkeypatch.setattr(
+        "ax_cli.commands.messages._gateway_local_connect",
+        lambda **kwargs: {"status": "approved", "session_token": "gw-session"},
+    )
+    monkeypatch.setattr("ax_cli.commands.messages.httpx.post", fake_post)
+
+    _gateway_local_send(
+        gateway_cfg={"url": "http://127.0.0.1:8765", "agent_name": "wishy"},
+        content="@wishy @nemotron — back atcha",
+        space_id="space-1",
+        parent_id="parent-1",
+    )
+
+    metadata = captured["body"].get("metadata") or {}
+    assert metadata.get("mentions") == ["nemotron"], metadata.get("mentions")
+

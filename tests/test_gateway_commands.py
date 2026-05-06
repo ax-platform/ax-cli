@@ -1022,6 +1022,11 @@ def test_gateway_local_connect_requests_approval_then_issues_session(monkeypatch
                 "gateway_pass_through_agent": "codex-local",
                 "gateway_pass_through_agent_id": "agent-local-1",
                 "gateway_pass_through_fingerprint_signature": session["fingerprint_signature"],
+                # Reply metadata is preserved through Gateway:
+                # parent_id flips routing_intent on, and the @handle in content
+                # is extracted so the backend can fan the reply out to night_owl.
+                "routing_intent": "reply_with_mentions",
+                "mentions": ["night_owl"],
             },
             "message_type": "text",
         }
@@ -5269,3 +5274,36 @@ def test_legacy_entry_without_lifecycle_phase_loads_as_active(monkeypatch, tmp_p
     daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
     # Legacy entry got swept normally (treated as implicit active → hidden).
     assert entry["lifecycle_phase"] == "hidden"
+
+
+def test_send_local_session_message_extracts_mentions_when_client_omits_them():
+    """Defense-in-depth: a client that forgets to populate metadata.mentions
+    must still result in mentions reaching the backend, because Gateway sees
+    the same content and re-extracts."""
+    from ax_cli.mentions import merge_explicit_mentions_metadata
+
+    metadata_input = {"purpose": "test"}
+    body = {
+        "space_id": "space-1",
+        "content": "@night_owl heads up",
+        "parent_id": "parent-7",
+        "metadata": metadata_input,
+    }
+
+    metadata = {
+        **metadata_input,
+        "gateway_local_session_id": "sess-1",
+        "gateway_pass_through_agent": "codex-local",
+    }
+    if body["parent_id"]:
+        metadata.setdefault("routing_intent", "reply_with_mentions")
+    metadata = (
+        merge_explicit_mentions_metadata(
+            metadata, body["content"], exclude=["codex-local"]
+        )
+        or metadata
+    )
+
+    assert metadata["mentions"] == ["night_owl"]
+    assert metadata["routing_intent"] == "reply_with_mentions"
+    assert metadata["purpose"] == "test"

@@ -12,6 +12,7 @@ import typer
 
 from ..config import get_client, resolve_agent_name, resolve_gateway_config, resolve_space_id
 from ..context_keys import build_upload_context_key
+from ..mentions import merge_explicit_mentions_metadata
 from ..output import JSON_OPTION, console, handle_error, print_json, print_kv, print_table
 from .gateway import _approval_required_guidance, _local_process_fingerprint
 from .watch import _iter_sse
@@ -82,7 +83,19 @@ def _gateway_local_send(
                 )
             )
         raise typer.BadParameter(f"Gateway local session is {status}; approve the agent before sending.")
-    body = {"content": content, "space_id": space_id, "parent_id": parent_id}
+    # Preserve client-side routing intent: extract @handles from content so the
+    # backend can fan out the reply to mentioned agents in addition to the
+    # parent thread. Excluding the sender prevents self-mention noise. Gateway
+    # also re-extracts as defense for clients that skip this step.
+    sender_name = str(gateway_cfg.get("agent_name") or "").strip()
+    metadata = merge_explicit_mentions_metadata(
+        {"routing_intent": "reply_with_mentions"} if parent_id else None,
+        content,
+        exclude=[sender_name] if sender_name else (),
+    )
+    body: dict = {"content": content, "space_id": space_id, "parent_id": parent_id}
+    if metadata:
+        body["metadata"] = metadata
     try:
         response = httpx.post(
             f"{gateway_url.rstrip('/')}/local/send",
