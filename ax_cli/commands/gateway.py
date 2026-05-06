@@ -5974,6 +5974,47 @@ def _resolve_local_gateway_identity(
     return requested_agent or None, requested_ref or None
 
 
+def _local_route_failure_guidance(
+    *,
+    detail: str,
+    status_code: int | None,
+    gateway_url: str,
+    agent_name: str | None,
+    workdir: str | None,
+    action: str,
+) -> str:
+    """Build an actionable error message for /local/connect or /local/proxy failures.
+
+    The bare ``Gateway local connect failed: not found`` text from a 404 leaves
+    the operator with no idea what to try next — it doesn't even hint that the
+    workspace might be bound to a Live Listener (claude_code_channel, hermes)
+    that uses direct identity instead of the local-connect protocol.
+
+    For 404s we surface that and suggest the obvious recovery commands. For
+    other statuses we keep the message terse but still point at the Gateway UI.
+    """
+    name = (agent_name or "").strip()
+    subject = f"@{name}" if name else "this workspace"
+    base_url = gateway_url.rstrip("/")
+    detail_text = (detail or "").strip() or "no detail returned"
+    parts = [f"Gateway {action} failed for {subject}: {detail_text}."]
+    if status_code == 404:
+        parts.append(
+            "Either no Gateway binding is registered for this workspace, "
+            "or the workspace is bound to a Live Listener "
+            "(claude_code_channel, hermes, etc.) which uses direct identity, "
+            "not local-connect/proxy."
+        )
+        suggestions = ["ax gateway agents list --json"]
+        if name and workdir:
+            suggestions.append(f"ax gateway local connect {name} --workdir {workdir}")
+        elif name:
+            suggestions.append(f"ax gateway local connect {name}")
+        parts.append("Try: " + "; ".join(suggestions) + ".")
+    parts.append(f"Or open {base_url} to inspect Gateway agents.")
+    return " ".join(parts)
+
+
 def _approval_required_guidance(
     *,
     connect_payload: dict,
@@ -6114,9 +6155,27 @@ def _request_local_connect(
             detail = exc.response.json().get("error", detail)
         except Exception:
             pass
-        raise ValueError(f"Gateway local connect failed: {detail}") from exc
+        raise ValueError(
+            _local_route_failure_guidance(
+                detail=detail,
+                status_code=exc.response.status_code,
+                gateway_url=gateway_url,
+                agent_name=display_name,
+                workdir=resolved_workdir,
+                action="local connect",
+            )
+        ) from exc
     except Exception as exc:
-        raise ValueError(f"Gateway local connect failed: {exc}") from exc
+        raise ValueError(
+            _local_route_failure_guidance(
+                detail=str(exc),
+                status_code=None,
+                gateway_url=gateway_url,
+                agent_name=display_name,
+                workdir=resolved_workdir,
+                action="local connect",
+            )
+        ) from exc
     return payload
 
 

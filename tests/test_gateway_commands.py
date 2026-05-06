@@ -5269,3 +5269,74 @@ def test_legacy_entry_without_lifecycle_phase_loads_as_active(monkeypatch, tmp_p
     daemon._sweep_lifecycle(registry, session={"token": "axp_u_test"})
     # Legacy entry got swept normally (treated as implicit active → hidden).
     assert entry["lifecycle_phase"] == "hidden"
+
+
+def test_local_route_failure_guidance_404_suggests_recovery():
+    msg = gateway_cmd._local_route_failure_guidance(
+        detail="not found",
+        status_code=404,
+        gateway_url="http://127.0.0.1:8765",
+        agent_name="wishy",
+        workdir="/repo",
+        action="local connect",
+    )
+    assert "Gateway local connect failed for @wishy: not found" in msg
+    # The whole point of this PR — the message must point at the Live Listener
+    # case so users running `ax auth whoami` in a claude_code_channel workspace
+    # don't get a bare "not found".
+    assert "Live Listener" in msg
+    assert "claude_code_channel" in msg
+    assert "ax gateway agents list --json" in msg
+    assert "ax gateway local connect wishy --workdir /repo" in msg
+    assert "http://127.0.0.1:8765" in msg
+
+
+def test_local_route_failure_guidance_non_404_stays_terse():
+    msg = gateway_cmd._local_route_failure_guidance(
+        detail="connection refused",
+        status_code=None,
+        gateway_url="http://127.0.0.1:8765/",
+        agent_name=None,
+        workdir=None,
+        action="proxy whoami",
+    )
+    assert "Gateway proxy whoami failed for this workspace: connection refused" in msg
+    assert "Live Listener" not in msg  # only suggested for 404s
+    assert "Or open http://127.0.0.1:8765 to inspect Gateway agents." in msg
+
+
+def test_gateway_local_connect_404_uses_actionable_guidance(monkeypatch):
+    """Regression for #150: a 404 from /local/connect must point at the Live Listener path."""
+    from ax_cli.commands import messages as messages_cmd
+
+    class _FakeResponse:
+        status_code = 404
+
+        @staticmethod
+        def json():
+            return {"error": "not found"}
+
+        text = '{"error": "not found"}'
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("404", request=None, response=self)
+
+    def _fake_post(*args, **kwargs):
+        return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    import typer
+
+    with pytest.raises(typer.BadParameter) as excinfo:
+        messages_cmd._gateway_local_connect(
+            gateway_url="http://127.0.0.1:8765",
+            agent_name="wishy",
+            registry_ref=None,
+            workdir="/repo",
+            space_id=None,
+        )
+    msg = str(excinfo.value)
+    assert "@wishy" in msg
+    assert "Live Listener" in msg
+    assert "ax gateway local connect wishy --workdir /repo" in msg
