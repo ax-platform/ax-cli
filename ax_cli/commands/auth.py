@@ -8,6 +8,7 @@ import typer
 
 from ..config import (
     _global_config_dir,
+    _load_config,
     _load_local_config,
     _load_user_config,
     _local_config_dir,
@@ -330,6 +331,36 @@ def doctor(
         raise typer.Exit(EXIT_NOT_OK)
 
 
+_UNRESOLVED_SPACE_LABEL = "unresolved (set AX_SPACE_ID or use --space-id)"
+
+
+def _best_effort_single_space_id(client) -> str:
+    """Return the user's only space id when unambiguous, else a label string.
+
+    Mirrors the auto-detect tail of ``resolve_space_id`` but never raises and
+    never writes to stderr — whoami must report identity even when space
+    resolution is ambiguous.
+    """
+    try:
+        spaces = client.list_spaces()
+    except Exception:  # noqa: BLE001 — network/auth issues should not crash whoami
+        return _UNRESOLVED_SPACE_LABEL
+    space_list = (
+        spaces
+        if isinstance(spaces, list)
+        else (spaces.get("spaces") or spaces.get("items") or [])
+        if isinstance(spaces, dict)
+        else []
+    )
+    if not isinstance(space_list, list) or len(space_list) != 1:
+        return _UNRESOLVED_SPACE_LABEL
+    only = space_list[0]
+    if not isinstance(only, dict):
+        return _UNRESOLVED_SPACE_LABEL
+    sid = only.get("id") or only.get("space_id")
+    return str(sid) if sid else _UNRESOLVED_SPACE_LABEL
+
+
 @app.command()
 def whoami(as_json: bool = JSON_OPTION):
     """Show current identity — principal, bound agent, resolved spaces."""
@@ -378,16 +409,19 @@ def whoami(as_json: bool = JSON_OPTION):
         handle_error(e)
 
     bound = data.get("bound_agent")
-    if bound:
-        data["resolved_space_id"] = bound.get("default_space_id", "none")
+    if bound and bound.get("default_space_id"):
+        data["resolved_space_id"] = bound["default_space_id"]
     else:
-        from ..config import resolve_space_id
-
-        try:
-            space_id = resolve_space_id(client, explicit=None)
-            data["resolved_space_id"] = space_id
-        except SystemExit:
-            data["resolved_space_id"] = "unresolved (set AX_SPACE_ID or use --space-id)"
+        # Identity is token-bound and space-independent — never crash whoami
+        # over space resolution. ``resolve_space_id`` raises ``typer.Exit``
+        # (a ``RuntimeError`` subclass, not ``SystemExit``) on multi-space
+        # ambiguity, which used to abort whoami completely for any user with
+        # >1 space. Do an exception-free cascade instead.
+        explicit_space = os.environ.get("AX_SPACE") or os.environ.get("AX_SPACE_ID") or _load_config().get("space_id")
+        if explicit_space:
+            data["resolved_space_id"] = str(explicit_space)
+        else:
+            data["resolved_space_id"] = _best_effort_single_space_id(client)
 
     # Show resolved agent name
     resolved = resolve_agent_name(client=client)
