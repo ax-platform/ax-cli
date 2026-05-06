@@ -5585,3 +5585,85 @@ def test_status_payload_partitions_archived_separately(monkeypatch, tmp_path):
     all_names = [a["name"] for a in payload_all["agents"]]
     assert "hermes-archived" in all_names
     assert payload_all["summary"]["archived_agents"] == 1
+
+
+def test_runtime_start_skips_when_in_setup_error_backoff(monkeypatch, tmp_path):
+    """Setup-error backoff: runtime.start() must early-return when a
+    runtime_error fired within the last SETUP_ERROR_BACKOFF_SECONDS,
+    so the daemon's per-tick reconcile (every ~1s) doesn't fire a
+    runtime_error storm and pressure upstream rate limits.
+
+    Reproduces the demo-hermes spam: missing token file + desired_state
+    running → 140 runtime_error events in 5 minutes.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    token_file = tmp_path / "token-does-not-exist"  # intentionally missing
+
+    runtime = gateway_core.ManagedAgentRuntime(
+        {
+            "name": "stuck-hermes",
+            "agent_id": "agent-stuck",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes_sentinel",
+            "token_file": str(token_file),
+            # Simulates the entry state after a setup error: error 1s ago,
+            # well within the 30s backoff window.
+            "last_runtime_error_at": gateway_core._now_iso(),
+        },
+        client_factory=lambda **kwargs: object(),
+    )
+
+    before = gateway_core.load_recent_gateway_activity()
+    runtime.start()
+    after = gateway_core.load_recent_gateway_activity()
+
+    # Gate must early-return without firing a fresh runtime_error event.
+    assert len(after) == len(before), (
+        "runtime.start() emitted a runtime_error event while in backoff "
+        "window — gate regressed"
+    )
+    # State must be untouched — no transition through "starting".
+    assert runtime._state.get("effective_state") != "starting"
+
+
+def test_runtime_start_proceeds_after_setup_error_backoff_expires(monkeypatch, tmp_path):
+    """Once the backoff window expires, the runtime is allowed to retry.
+    The retry will fire its own runtime_error if the precondition is
+    still broken — that fresh error stamps a new last_runtime_error_at,
+    re-arming the gate.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    token_file = tmp_path / "token-does-not-exist"  # still missing
+
+    # last_runtime_error_at older than the backoff window.
+    long_ago = (
+        datetime.now(timezone.utc) - timedelta(seconds=gateway_core.SETUP_ERROR_BACKOFF_SECONDS + 60)
+    ).isoformat()
+
+    runtime = gateway_core.ManagedAgentRuntime(
+        {
+            "name": "expired-hermes",
+            "agent_id": "agent-expired",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes_sentinel",
+            "token_file": str(token_file),
+            "last_runtime_error_at": long_ago,
+        },
+        client_factory=lambda **kwargs: object(),
+    )
+
+    before = gateway_core.load_recent_gateway_activity()
+    runtime.start()
+    after = gateway_core.load_recent_gateway_activity()
+
+    new_events = [e for e in after if e not in before]
+    runtime_errors = [e for e in new_events if e.get("event") == "runtime_error"]
+    assert len(runtime_errors) == 1, (
+        f"expected exactly one runtime_error after backoff expired, got {len(runtime_errors)}"
+    )
+    # Fresh error stamps a new last_runtime_error_at, re-arming the gate
+    # against repeat retries from the next reconcile tick.
+    assert runtime.entry.get("last_runtime_error_at") is not None
+    assert runtime.entry["last_runtime_error_at"] != long_ago
