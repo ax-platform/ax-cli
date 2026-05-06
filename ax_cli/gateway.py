@@ -2964,7 +2964,22 @@ def save_gateway_session(data: dict[str, Any]) -> Path:
     return session_path()
 
 
-_LOAD_SNAPSHOT_KEY = "_load_snapshot_agent_names"
+_LOAD_SNAPSHOT_KEY = "_load_snapshot"
+
+# Fields the operator (CLI / UI server) writes authoritatively. The daemon's
+# reconcile loop should NEVER clobber these mid-flight: if a field's value
+# on disk differs from what was present at this caller's load, another
+# writer changed it and we must take disk's value, not memory's stale view.
+_OPERATOR_AUTHORITATIVE_FIELDS = (
+    "desired_state",
+    "lifecycle_phase",
+    "archived_at",
+    "archived_reason",
+    "desired_state_before_archive",
+    "hidden_at",
+    "hidden_reason",
+    "desired_state_before_hide",
+)
 
 
 def load_gateway_registry() -> dict[str, Any]:
@@ -2983,38 +2998,62 @@ def load_gateway_registry() -> dict[str, Any]:
     gateway.setdefault("pid", None)
     gateway.setdefault("last_started_at", None)
     gateway.setdefault("last_reconcile_at", None)
-    # Stamp the names present at load time so save_gateway_registry can
-    # tell "caller removed this row" apart from "another writer added this
-    # row after we loaded" when reconciling against disk at save time.
-    registry[_LOAD_SNAPSHOT_KEY] = sorted(
-        str(a.get("name") or "") for a in registry["agents"] if isinstance(a, dict) and a.get("name")
-    )
+    # Stamp a load-time snapshot so save_gateway_registry can distinguish:
+    #   - "caller removed this row" vs "another writer added this row"
+    #     (row existence diff)
+    #   - "caller updated this field" vs "another writer updated this
+    #     field" (field-level diff for operator-authoritative fields like
+    #     desired_state — if our load-time value matches memory but disk
+    #     differs, another writer changed it; respect disk's view)
+    snapshot: dict[str, dict[str, Any]] = {}
+    for entry in registry["agents"]:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "")
+        if not name:
+            continue
+        snapshot[name] = {field: entry.get(field) for field in _OPERATOR_AUTHORITATIVE_FIELDS}
+    registry[_LOAD_SNAPSHOT_KEY] = snapshot
     return registry
 
 
 def save_gateway_registry(registry: dict[str, Any], *, merge_archive: bool = True) -> Path:
     """Persist the registry to disk.
 
-    Performs two race-safety merges before writing:
+    Performs three race-safety merges before writing:
 
     1. **Row preservation** (always on): re-reads disk and appends any
        agent rows that exist on disk but not in memory *and* were not in
-       the caller's load-time snapshot. This recovers writes from a
-       second writer (e.g. the UI server's POST /api/agents add) that
-       landed between this caller's load and save. The load-time
-       snapshot — stamped by load_gateway_registry — distinguishes
-       "caller removed this row" (in snapshot, not in memory; do not
-       resurrect) from "another writer added this row" (not in snapshot,
-       on disk; preserve).
+       the caller's load-time snapshot. Recovers writes from a second
+       writer (e.g. the UI server's POST /api/agents add) that landed
+       between this caller's load and save.
 
-    2. **Archive-field merge** (gated on merge_archive=True, the default):
-       pulls archive lifecycle fields forward from disk so a CLI archive
-       that landed mid-tick is not clobbered. Atomic CLI ops that are
-       *the* authoritative writer for archive fields opt out via
-       merge_archive=False so they don't see-saw with their own writes.
+    2. **Operator-authoritative field preservation** (always on): for
+       each field in _OPERATOR_AUTHORITATIVE_FIELDS (desired_state,
+       lifecycle_phase, archive/hide flags), if the value on disk
+       differs from this caller's load-time snapshot, another writer
+       changed it; take disk's value. This is what makes
+       `ax gateway agents stop` actually stick: the daemon's stale
+       `desired_state=running` view does not clobber the CLI's freshly
+       written `desired_state=stopped`.
+
+    3. **Archive-field merge** (gated on merge_archive=True, the
+       default): legacy bidirectional archive merge from PR #147.
+       Subsumed by (2) for normal flows; preserved for the explicit
+       archived↔active transition path so atomic CLI ops can opt out
+       via merge_archive=False to avoid seesawing with their own writes.
     """
     # Pop the load snapshot so it never leaks to disk.
-    loaded_names = set(registry.pop(_LOAD_SNAPSHOT_KEY, []))
+    snapshot_raw = registry.pop(_LOAD_SNAPSHOT_KEY, None)
+    snapshot: dict[str, dict[str, Any]]
+    if isinstance(snapshot_raw, dict):
+        snapshot = snapshot_raw
+    elif isinstance(snapshot_raw, list):
+        # Backwards-compat with names-only snapshot from earlier load.
+        snapshot = {name: {} for name in snapshot_raw}
+    else:
+        snapshot = {}
+    loaded_names = set(snapshot.keys())
 
     try:
         on_disk = _read_json(registry_path(), default=None)
@@ -3040,7 +3079,31 @@ def save_gateway_registry(registry: dict[str, Any], *, merge_archive: bool = Tru
                 continue  # caller removed it (was in our snapshot, not in memory)
             registry.setdefault("agents", []).append(disk_entry)
 
-        # (2) Existing archive-field merge.
+        # (2) Operator-authoritative field preservation.
+        # If a field's disk value differs from our load-time snapshot,
+        # another writer changed it; take disk's value over ours.
+        disk_by_name = {str(a.get("name") or ""): a for a in disk_agents if isinstance(a, dict) and a.get("name")}
+        for entry in registry.get("agents") or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "")
+            disk_entry = disk_by_name.get(name)
+            if not isinstance(disk_entry, dict):
+                continue
+            loaded_fields = snapshot.get(name, {})
+            for field in _OPERATOR_AUTHORITATIVE_FIELDS:
+                disk_value = disk_entry.get(field)
+                loaded_value = loaded_fields.get(field)
+                if disk_value != loaded_value:
+                    # Another writer changed this field after our load.
+                    # Preserve their write — overwrite our memory's view.
+                    if field in disk_entry:
+                        entry[field] = disk_value
+                    else:
+                        entry.pop(field, None)
+
+        # (3) Existing archive-field merge (kept for the merge_archive=False
+        # opt-out semantics; (2) covers the common case).
         if merge_archive:
             disk_by_name = {str(a.get("name") or ""): a for a in disk_agents if isinstance(a, dict) and a.get("name")}
             for entry in registry.get("agents") or []:

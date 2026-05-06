@@ -5489,6 +5489,58 @@ def test_save_registry_preserves_other_writer_added_row(monkeypatch, tmp_path):
     assert incumbent["effective_state"] == "running"
 
 
+def test_save_registry_preserves_other_writer_field_update(monkeypatch, tmp_path):
+    """Race regression (field-level): the daemon's stale `desired_state=running`
+    in-memory view must not clobber the CLI's freshly written
+    `desired_state=stopped` on disk.
+
+    Reproduces the agents-stop bug from 2026-05-06: `ax gateway agents stop`
+    set desired_state=stopped, activity log recorded
+    managed_agent_desired_stopped, but the daemon's next reconcile save
+    flipped it back to running within seconds — making demo-hermes
+    impossible to actually stop.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    initial = {
+        "agents": [
+            {
+                "name": "race-stop",
+                "agent_id": "agent-race-stop",
+                "template_id": "hermes",
+                "runtime_type": "hermes_sentinel",
+                "lifecycle_phase": "active",
+                "desired_state": "running",
+                "effective_state": "running",
+            }
+        ]
+    }
+    gateway_core.save_gateway_registry(initial)
+
+    # Daemon's stale in-memory copy from the start of its tick.
+    daemon_view = gateway_core.load_gateway_registry()
+    daemon_view["agents"][0]["effective_state"] = "running"  # daemon-side telemetry update
+
+    # CLI runs `agents stop` between the daemon's load and the daemon's
+    # save: writes desired_state=stopped to disk.
+    cli_view = gateway_core.load_gateway_registry()
+    cli_view["agents"][0]["desired_state"] = "stopped"
+    gateway_core.save_gateway_registry(cli_view)
+
+    # Daemon now saves its (stale) copy. Field-level preservation should
+    # take disk's freshly-written desired_state=stopped, not memory's
+    # stale desired_state=running.
+    gateway_core.save_gateway_registry(daemon_view)
+
+    final = gateway_core.load_gateway_registry()
+    stored = next(a for a in final["agents"] if a["name"] == "race-stop")
+    assert stored["desired_state"] == "stopped", (
+        "daemon clobbered CLI's desired_state=stopped — field-level race "
+        "preservation regressed"
+    )
+    # Daemon's effective_state telemetry update should still apply.
+    assert stored["effective_state"] == "running"
+
+
 def test_save_registry_honors_caller_remove(monkeypatch, tmp_path):
     """Row preservation must distinguish "caller removed this" from
     "another writer added this." A row that was present at load time and
