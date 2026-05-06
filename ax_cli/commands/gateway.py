@@ -78,6 +78,7 @@ from ..gateway import (
     load_gateway_registry,
     load_gateway_session,
     load_recent_gateway_activity,
+    looks_like_space_uuid,
     ollama_setup_status,
     record_gateway_activity,
     remove_agent_entry,
@@ -829,7 +830,11 @@ def _resolve_gateway_agent_home_space(
 ) -> str:
     explicit = str(explicit_space_id or "").strip()
     if explicit:
-        return explicit
+        if looks_like_space_uuid(explicit):
+            return explicit
+        # Caller passed a name/slug — resolve through the backend so we never
+        # store a non-UUID in the registry's space_id field.
+        return resolve_space_id(client, explicit=explicit)
     session_space = str(session.get("space_id") or "").strip()
     if session_space:
         return session_space
@@ -3042,10 +3047,28 @@ def _render_gateway_dashboard(payload: dict) -> Group:
     )
 
 
-def _spaces_payload() -> dict:
-    client = _load_gateway_user_client()
-    raw = client.list_spaces()
-    items = raw.get("spaces", raw) if isinstance(raw, dict) else raw
+def _spaces_cache_path() -> Path:
+    return gateway_dir() / "spaces.cache.json"
+
+
+def _load_spaces_cache() -> list[dict]:
+    try:
+        raw = json.loads(_spaces_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = raw.get("spaces") if isinstance(raw, dict) else raw
+    return [item for item in (items or []) if isinstance(item, dict)]
+
+
+def _save_spaces_cache(spaces: list[dict]) -> None:
+    payload = {"spaces": spaces, "saved_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        _spaces_cache_path().write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _normalize_spaces_response(items: list) -> list[dict]:
     spaces: list[dict] = []
     for item in items or []:
         if not isinstance(item, dict):
@@ -3060,12 +3083,50 @@ def _spaces_payload() -> dict:
                 "slug": str(item.get("slug") or "").strip() or None,
             }
         )
+    return spaces
+
+
+def _spaces_payload() -> dict:
+    """Return the spaces visible to the Gateway bootstrap session.
+
+    Always surfaces ``active_space_id`` / ``active_space_name`` from session
+    state, even when the upstream ``list_spaces`` call fails (e.g. paxai.app
+    rate-limits). Successful upstream responses are cached on disk so the UI
+    keeps a usable picker through transient outages.
+    """
     session = load_gateway_session() or {}
-    return {
+    active_space_id = str(session.get("space_id") or "").strip() or None
+    active_space_name = str(session.get("space_name") or "").strip() or None
+
+    error: str | None = None
+    cached = False
+    try:
+        client = _load_gateway_user_client()
+        raw = client.list_spaces()
+        items = raw.get("spaces", raw) if isinstance(raw, dict) else raw
+        spaces = _normalize_spaces_response(items or [])
+        if spaces:
+            _save_spaces_cache(spaces)
+    except Exception as exc:  # noqa: BLE001 — upstream errors are routine here
+        error = str(exc)
+        spaces = _load_spaces_cache()
+        cached = bool(spaces)
+
+    if active_space_id and not any(s["id"] == active_space_id for s in spaces):
+        spaces = [
+            {"id": active_space_id, "name": active_space_name or active_space_id, "slug": None},
+            *spaces,
+        ]
+
+    payload: dict = {
         "spaces": spaces,
-        "active_space_id": str(session.get("space_id") or "").strip() or None,
-        "active_space_name": str(session.get("space_name") or "").strip() or None,
+        "active_space_id": active_space_id,
+        "active_space_name": active_space_name,
     }
+    if error:
+        payload["error"] = error
+        payload["cached"] = cached
+    return payload
 
 
 def _move_managed_agent_space(name: str, new_space_id: str) -> dict:
@@ -4828,20 +4889,14 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                     _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
                 return
             if parsed.path == "/api/spaces":
-                try:
-                    _write_json_response(self, _spaces_payload())
-                except typer.Exit:
-                    _write_json_response(
-                        self,
-                        {"error": "Gateway is not logged in.", "spaces": [], "active_space_id": None},
-                        status=HTTPStatus.SERVICE_UNAVAILABLE,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    _write_json_response(
-                        self,
-                        {"error": str(exc), "spaces": [], "active_space_id": None},
-                        status=HTTPStatus.BAD_GATEWAY,
-                    )
+                payload = _spaces_payload()
+                # _spaces_payload never raises: upstream failures fall back to
+                # cached spaces + session-known active space. Return 200 as
+                # long as we have something usable; 503 only when there is
+                # neither cache nor session.
+                has_data = bool(payload.get("spaces") or payload.get("active_space_id"))
+                status = HTTPStatus.OK if has_data else HTTPStatus.SERVICE_UNAVAILABLE
+                _write_json_response(self, payload, status=status)
                 return
             if parsed.path.startswith("/api/agents/"):
                 name = unquote(parsed.path.removeprefix("/api/agents/")).strip()
@@ -5465,6 +5520,48 @@ def current_gateway_space(as_json: bool = JSON_OPTION):
         return
     err_console.print(f"Gateway current space: {result.get('space_name') or result.get('space_id') or '-'}")
     err_console.print(f"  space_id = {result.get('space_id') or '-'}")
+
+
+@spaces_app.command("list")
+def list_gateway_spaces(as_json: bool = JSON_OPTION):
+    """List the spaces visible to the Gateway bootstrap session.
+
+    Falls back to the locally cached list when the upstream API is
+    unavailable (e.g. rate-limited), so the operator always sees something
+    actionable.
+    """
+    payload = _spaces_payload()
+    if as_json:
+        print_json(payload)
+        return
+
+    spaces = payload.get("spaces") or []
+    active_id = payload.get("active_space_id")
+    if not spaces:
+        err_console.print("[yellow]No spaces available.[/yellow]")
+        if payload.get("error"):
+            err_console.print(f"  error = {payload['error']}")
+        return
+
+    rows = []
+    for space in spaces:
+        sid = str(space.get("id") or "")
+        rows.append(
+            {
+                "current": "*" if sid and sid == active_id else "",
+                "name": str(space.get("name") or sid),
+                "space_id": sid,
+                "slug": str(space.get("slug") or "") or "-",
+            }
+        )
+    print_table(
+        ["", "Name", "Space ID", "Slug"],
+        rows,
+        keys=["current", "name", "space_id", "slug"],
+    )
+    if payload.get("error"):
+        marker = "cached" if payload.get("cached") else "session-only"
+        err_console.print(f"[dim]Upstream unavailable ({marker}): {payload['error']}[/dim]")
 
 
 @app.command("activity")

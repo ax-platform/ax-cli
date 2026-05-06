@@ -511,6 +511,7 @@
       spaces: [],
       activeSpaceId: null,
       sessionSpaceId: null,
+      sessionSpaceName: null,
       templates: [],
       selectedTemplateId: "hermes",
       submitting: false,
@@ -666,16 +667,71 @@
       return { icon: "custom", label: templateLabel(agent), className: "type-custom" };
     }
 
+    function looksLikeSpaceId(value) {
+      return /^[0-9a-f]{8}-[0-9a-f-]{13,}$/i.test(String(value || ""));
+    }
+
+    function addSpaceCandidate(map, id, name, { authoritative = false } = {}) {
+      const sid = String(id || "").trim();
+      if (!sid) return;
+      if (!looksLikeSpaceId(sid) && /[\s'"]/.test(sid)) return;
+      const label = String(name || "").trim();
+      const cleanName = label && !looksLikeSpaceId(label) ? label : sid;
+      const existing = map.get(sid);
+      const isSpecificNonSessionName =
+        cleanName !== sid && (!state.sessionSpaceName || cleanName !== state.sessionSpaceName || sid === state.sessionSpaceId);
+      const existingIsWeak =
+        !existing ||
+        existing.name === existing.id ||
+        (state.sessionSpaceName && existing.id !== state.sessionSpaceId && existing.name === state.sessionSpaceName);
+      if (!existing || (authoritative && !existing.authoritative) || (!existing.authoritative && existingIsWeak && isSpecificNonSessionName)) {
+        map.set(sid, { id: sid, name: cleanName, authoritative });
+      }
+    }
+
+    function knownSpaces() {
+      const map = new Map();
+      if (state.sessionSpaceId) {
+        addSpaceCandidate(map, state.sessionSpaceId, state.sessionSpaceName, { authoritative: true });
+      }
+      for (const space of state.spaces || []) {
+        addSpaceCandidate(map, space.id, space.name, { authoritative: true });
+      }
+      for (const agent of state.agents || []) {
+        const agentSpaceId = String(agent.space_id || agent.default_space_id || agent.active_space_id || "").trim();
+        if (agentSpaceId === state.sessionSpaceId) {
+          addSpaceCandidate(map, agentSpaceId, state.sessionSpaceName, { authoritative: true });
+        } else {
+          addSpaceCandidate(map, agentSpaceId, agent.space_name || agent.default_space_name || agent.active_space_name);
+        }
+        for (const space of agent.allowed_spaces || []) {
+          if (typeof space === "string") {
+            addSpaceCandidate(map, space, space);
+          } else if (space) {
+            addSpaceCandidate(map, space.space_id || space.id, space.name || space.space_name);
+          }
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    function spaceNameForId(id) {
+      const sid = String(id || "").trim();
+      if (!sid) return "";
+      if (sid === state.sessionSpaceId && state.sessionSpaceName) return state.sessionSpaceName;
+      const match = knownSpaces().find((space) => space.id === sid);
+      return match ? match.name : "";
+    }
+
     function spaceLabel(agent) {
       // Prefer the agent's home space (space_id) over the gateway's runtime
       // operating space (active_space_id). active_space_id reflects what the
       // gateway is *sending as*, not where the agent lives.
       const id = String(agent.space_id || agent.default_space_id || agent.active_space_id || "").trim();
-      const looksLikeId = (s) => /^[0-9a-f]{8}-[0-9a-f-]{13,}$/i.test(String(s || ""));
       const explicit = String(agent.space_name || agent.default_space_name || agent.active_space_name || "").trim();
-      const match = state.spaces.find((space) => space.id === id);
-      if (match) return match.name;
-      if (explicit && !looksLikeId(explicit)) return explicit;
+      const knownName = spaceNameForId(id);
+      if (knownName) return knownName;
+      if (explicit && !looksLikeSpaceId(explicit)) return explicit;
       return id || "—";
     }
 
@@ -853,6 +909,7 @@
       state.agents = Array.isArray(status.agents) ? status.agents : [];
       state.summary = status.summary || {};
       state.sessionSpaceId = status.space_id || null;
+      state.sessionSpaceName = status.space_name || null;
       // activeSpaceId stays "" (= All spaces) unless user explicitly picks one.
       renderConnectionPill();
       refreshHiddenToggleUI();
@@ -1024,13 +1081,15 @@
 
     /* --- Space + template + wizard renders --------------------------- */
 
+    function sessionSpaceLabel() {
+      if (state.sessionSpaceName) return state.sessionSpaceName;
+      if (state.sessionSpaceId) return `Space ${state.sessionSpaceId.slice(0, 8)}`;
+      return "Current space";
+    }
+
     function renderSpaceSelect() {
       const select = $("space-select");
-      const allSpaces = state.spaces.length
-        ? state.spaces
-        : state.sessionSpaceId
-        ? [{ id: state.sessionSpaceId, name: "Current space" }]
-        : [];
+      const allSpaces = knownSpaces();
       clearChildren(select);
       // Always include the "All spaces" option as the default filter.
       const allOpt = makeEl("option", { value: "" }, ["All spaces"]);
@@ -1045,11 +1104,7 @@
 
     function renderAgentSpaceOptions() {
       const select = $("agent-space-input");
-      const spaces = state.spaces.length
-        ? state.spaces
-        : state.sessionSpaceId
-        ? [{ id: state.sessionSpaceId, name: "Current space" }]
-        : [];
+      const spaces = knownSpaces();
       clearChildren(select);
       if (!spaces.length) {
         select.appendChild(makeEl("option", { value: "" }, ["No spaces available"]));
