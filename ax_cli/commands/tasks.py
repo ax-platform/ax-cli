@@ -447,19 +447,31 @@ def update(
     task_id: str = typer.Argument(..., help="Task ID"),
     priority: Optional[str] = typer.Option(None, "--priority", help="New priority"),
     status: Optional[str] = typer.Option(None, "--status", help="New status"),
+    assign_to: Optional[str] = typer.Option(
+        None, "--assign-to", "--assign", help="Reassign task to an agent (handle, @handle, or UUID)"
+    ),
     as_json: bool = JSON_OPTION,
 ):
     """Update a task."""
-    fields = {}
+    fields: dict[str, Any] = {}
     if priority is not None:
         fields["priority"] = priority
     if status is not None:
         fields["status"] = status
-    if not fields:
-        typer.echo("Error: Provide at least one field to update (--priority, --status).", err=True)
+    if not fields and assign_to is None:
+        typer.echo(
+            "Error: Provide at least one field to update (--priority, --status, --assign-to).",
+            err=True,
+        )
         raise typer.Exit(1)
     gateway_cfg = resolve_gateway_config()
     if gateway_cfg:
+        if assign_to is not None:
+            typer.echo(
+                "Error: --assign-to is not supported with Gateway-native task updates yet.",
+                err=True,
+            )
+            raise typer.Exit(1)
         data = _gateway_local_call(
             gateway_cfg=gateway_cfg,
             method="update_task",
@@ -467,6 +479,8 @@ def update(
         )
     else:
         client = get_client()
+        if assign_to is not None:
+            fields["assignee_id"] = _resolve_update_assignee_id(client, task_id, assign_to)
         try:
             data = client.update_task(task_id, **fields)
         except httpx.HTTPStatusError as e:
@@ -475,3 +489,32 @@ def update(
         print_json(data)
     else:
         print_kv(data)
+
+
+def _resolve_update_assignee_id(client, task_id: str, assignee: str) -> str:
+    """Resolve --assign-to for ``ax tasks update``.
+
+    UUIDs short-circuit. Handles need the task's own space to scope the agent
+    lookup, so we fetch the task first and reuse the same resolver
+    ``ax tasks create --assign-to`` uses.
+    """
+    candidate = assignee.strip()
+    try:
+        return str(UUID(candidate))
+    except ValueError:
+        pass
+    try:
+        current = client.get_task(task_id)
+    except httpx.HTTPStatusError as e:
+        handle_error(e)
+    if isinstance(current, dict) and isinstance(current.get("task"), dict):
+        current = current["task"]
+    task_space_id = str(current.get("space_id") or "") if isinstance(current, dict) else ""
+    if not task_space_id:
+        typer.echo(
+            f"Error: Could not determine space for task {task_id} to resolve assignee handle "
+            f"'{assignee}'. Pass an agent UUID instead.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    return _resolve_assignee_id(client, candidate, space_id=task_space_id)

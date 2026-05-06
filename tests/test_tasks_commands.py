@@ -268,3 +268,100 @@ def test_tasks_create_assign_handle_mentions_assignee_by_default(monkeypatch):
         "id": "agent-123",
         "name": "demo-agent",
     }
+
+
+def test_tasks_update_assign_to_accepts_uuid_without_lookup(monkeypatch):
+    calls = {}
+    agent_id = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
+
+    class FakeClient:
+        def get_task(self, task_id):
+            calls["get_task"] = task_id
+            return {"id": task_id, "space_id": "space-1"}
+
+        def list_agents(self, *, space_id=None, limit=None):
+            calls["list_agents"] = True
+            return {"agents": []}
+
+        def update_task(self, task_id, **fields):
+            calls["update_task"] = {"task_id": task_id, "fields": fields}
+            return {"id": task_id, **fields}
+
+    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.resolve_gateway_config", lambda: {})
+
+    result = runner.invoke(
+        app,
+        ["tasks", "update", "task-42", "--assign-to", agent_id, "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    # UUID short-circuits — no get_task / list_agents needed.
+    assert "get_task" not in calls
+    assert "list_agents" not in calls
+    assert calls["update_task"] == {"task_id": "task-42", "fields": {"assignee_id": agent_id}}
+
+
+def test_tasks_update_assign_to_resolves_handle_via_task_space(monkeypatch):
+    calls = {}
+
+    class FakeClient:
+        def get_task(self, task_id):
+            calls["get_task"] = task_id
+            return {"task": {"id": task_id, "space_id": "space-9"}}
+
+        def list_agents(self, *, space_id=None, limit=None):
+            calls["list_agents"] = {"space_id": space_id, "limit": limit}
+            return {"agents": [{"id": "agent-789", "name": "demo-agent"}]}
+
+        def update_task(self, task_id, **fields):
+            calls["update_task"] = {"task_id": task_id, "fields": fields}
+            return {"id": task_id, **fields}
+
+    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.resolve_gateway_config", lambda: {})
+
+    result = runner.invoke(
+        app,
+        ["tasks", "update", "task-42", "--assign", "@demo-agent", "--status", "in_progress", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["get_task"] == "task-42"
+    assert calls["list_agents"] == {"space_id": "space-9", "limit": 500}
+    assert calls["update_task"] == {
+        "task_id": "task-42",
+        "fields": {"status": "in_progress", "assignee_id": "agent-789"},
+    }
+
+
+def test_tasks_update_assign_to_rejected_on_gateway_path(monkeypatch):
+    monkeypatch.setattr(
+        "ax_cli.commands.tasks.resolve_gateway_config",
+        lambda: {"url": "http://127.0.0.1:8765", "agent_name": "wishy", "workdir": "/repo"},
+    )
+
+    def _should_not_call(**kwargs):
+        raise AssertionError(f"Gateway path should not run when --assign-to is rejected: {kwargs}")
+
+    monkeypatch.setattr("ax_cli.commands.tasks._gateway_local_call", _should_not_call)
+
+    result = runner.invoke(
+        app,
+        ["tasks", "update", "task-42", "--assign-to", "demo-agent"],
+    )
+
+    assert result.exit_code == 1
+    assert "--assign-to is not supported with Gateway-native task updates" in result.output
+
+
+def test_tasks_update_requires_at_least_one_field(monkeypatch):
+    monkeypatch.setattr("ax_cli.commands.tasks.resolve_gateway_config", lambda: {})
+    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: object())
+
+    result = runner.invoke(app, ["tasks", "update", "task-42"])
+
+    assert result.exit_code == 1
+    assert "--priority" in result.output
+    assert "--status" in result.output
+    assert "--assign-to" in result.output
