@@ -13,7 +13,7 @@ import typer
 from ..config import get_client, resolve_agent_name, resolve_gateway_config, resolve_space_id
 from ..context_keys import build_upload_context_key
 from ..output import JSON_OPTION, console, handle_error, print_json, print_kv, print_table
-from .gateway import _approval_required_guidance, _local_process_fingerprint
+from .gateway import _approval_required_guidance, _local_process_fingerprint, _local_route_failure_guidance
 from .watch import _iter_sse
 
 app = typer.Typer(name="messages", help="Message operations", no_args_is_help=True)
@@ -48,9 +48,27 @@ def _gateway_local_connect(
             detail = exc.response.json().get("error", detail)
         except Exception:
             pass
-        raise typer.BadParameter(f"Gateway local connect failed: {detail}") from exc
+        raise typer.BadParameter(
+            _local_route_failure_guidance(
+                detail=detail,
+                status_code=exc.response.status_code,
+                gateway_url=gateway_url,
+                agent_name=display_name,
+                workdir=workdir,
+                action="local connect",
+            )
+        ) from exc
     except Exception as exc:
-        raise typer.BadParameter(f"Gateway local connect failed: {exc}") from exc
+        raise typer.BadParameter(
+            _local_route_failure_guidance(
+                detail=str(exc),
+                status_code=None,
+                gateway_url=gateway_url,
+                agent_name=display_name,
+                workdir=workdir,
+                action="local connect",
+            )
+        ) from exc
 
 
 def _gateway_local_send(
@@ -163,9 +181,27 @@ def _gateway_local_call(
             detail = exc.response.json().get("error", detail)
         except Exception:
             pass
-        raise typer.BadParameter(f"Gateway proxy {method} failed: {detail}") from exc
+        raise typer.BadParameter(
+            _local_route_failure_guidance(
+                detail=detail,
+                status_code=exc.response.status_code,
+                gateway_url=gateway_url,
+                agent_name=gateway_cfg.get("agent_name"),
+                workdir=gateway_cfg.get("workdir"),
+                action=f"proxy {method}",
+            )
+        ) from exc
     except Exception as exc:
-        raise typer.BadParameter(f"Gateway proxy {method} failed: {exc}") from exc
+        raise typer.BadParameter(
+            _local_route_failure_guidance(
+                detail=str(exc),
+                status_code=None,
+                gateway_url=gateway_url,
+                agent_name=gateway_cfg.get("agent_name"),
+                workdir=gateway_cfg.get("workdir"),
+                action=f"proxy {method}",
+            )
+        ) from exc
     return payload.get("result", payload)
 
 
