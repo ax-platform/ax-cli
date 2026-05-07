@@ -25,7 +25,7 @@ from typing import Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_agent_name, resolve_space_id
+from ..config import get_authoring_client, resolve_agent_name, resolve_space_id
 from ..output import console
 
 app = typer.Typer(name="listen", help="Listen for @mentions via SSE", no_args_is_help=False)
@@ -380,7 +380,7 @@ def listen(
       ax listen --dry-run                    # Watch only
       ax listen --agent mybot --exec ./bot   # Named agent
     """
-    client = get_client()
+    client = get_authoring_client()
     agent_name = agent or resolve_agent_name(client=client)
     if not agent_name:
         console.print(

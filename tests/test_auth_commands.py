@@ -286,7 +286,7 @@ def test_auth_whoami_reports_runtime_config(monkeypatch, tmp_path):
                 },
             }
 
-    monkeypatch.setattr(auth, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(auth, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(auth, "resolve_agent_name", lambda *, client: "codex")
     monkeypatch.setattr(auth, "_local_config_dir", lambda: None)
 
@@ -324,7 +324,7 @@ def test_auth_whoami_does_not_crash_on_multi_space_user(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr(auth, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(auth, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(auth, "resolve_agent_name", lambda *, client: None)
     monkeypatch.setattr(auth, "resolve_gateway_config", lambda: {})
     monkeypatch.setattr(auth, "_local_config_dir", lambda: None)
@@ -354,7 +354,7 @@ def test_auth_whoami_resolves_single_space_for_unbound_user(monkeypatch):
         def list_spaces(self):
             return {"spaces": [{"id": "the-only-space", "name": "Solo"}]}
 
-    monkeypatch.setattr(auth, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(auth, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(auth, "resolve_agent_name", lambda *, client: None)
     monkeypatch.setattr(auth, "resolve_gateway_config", lambda: {})
     monkeypatch.setattr(auth, "_local_config_dir", lambda: None)
@@ -379,7 +379,7 @@ def test_auth_whoami_uses_explicit_space_from_env(monkeypatch):
         def list_spaces(self):
             raise AssertionError("list_spaces should not be called when AX_SPACE_ID is set")
 
-    monkeypatch.setattr(auth, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(auth, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(auth, "resolve_agent_name", lambda *, client: None)
     monkeypatch.setattr(auth, "resolve_gateway_config", lambda: {})
     monkeypatch.setattr(auth, "_local_config_dir", lambda: None)

@@ -28,19 +28,21 @@ class _FakeClient:
 
 
 def _install(monkeypatch, client: _FakeClient) -> None:
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: client)
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: client)
 
 
 def test_check_renders_basic_presence_shape(monkeypatch):
     """Today's backend returns the basic presence shape — CLI renders it cleanly."""
-    fake = _FakeClient({
-        "agent_id": "abc-123",
-        "name": "frontend_sentinel",
-        "presence": "online",
-        "responsive": True,
-        "last_active": "2026-04-25T15:00:00Z",
-        "agent_type": "assistant",
-    })
+    fake = _FakeClient(
+        {
+            "agent_id": "abc-123",
+            "name": "frontend_sentinel",
+            "presence": "online",
+            "responsive": True,
+            "last_active": "2026-04-25T15:00:00Z",
+            "agent_type": "assistant",
+        }
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "check", "frontend_sentinel", "--json"])
@@ -53,28 +55,30 @@ def test_check_renders_basic_presence_shape(monkeypatch):
 
 def test_check_renders_avail_contract_v4_dto_forward_compat(monkeypatch):
     """When backend ships the AVAIL-CONTRACT v4 fields, CLI renders them transparently."""
-    fake = _FakeClient({
-        "agent_id": "abc-123",
-        "name": "backend_sentinel",
-        "presence": "offline",
-        "responsive": False,
-        "last_active": "2026-04-25T14:00:00Z",
-        "agent_type": "assistant",
-        # Forward-compat AVAIL-CONTRACT v4 fields
-        "expected_response": "warming",
-        "badge_state": "routable_delayed",
-        "badge_label": "Warming",
-        "badge_color": "info",
-        "connection_path": "gateway_managed",
-        "confidence": "medium",
-        "unavailable_reason": None,
-        "status_explanation": "On-demand. Last warmed 12 min ago. A new mention will spawn the runtime.",
-        "pre_send_warning": {
-            "severity": "info",
-            "title": "Delivery may be delayed",
-            "body": "This agent is on-demand; a new mention will warm the runtime.",
-        },
-    })
+    fake = _FakeClient(
+        {
+            "agent_id": "abc-123",
+            "name": "backend_sentinel",
+            "presence": "offline",
+            "responsive": False,
+            "last_active": "2026-04-25T14:00:00Z",
+            "agent_type": "assistant",
+            # Forward-compat AVAIL-CONTRACT v4 fields
+            "expected_response": "warming",
+            "badge_state": "routable_delayed",
+            "badge_label": "Warming",
+            "badge_color": "info",
+            "connection_path": "gateway_managed",
+            "confidence": "medium",
+            "unavailable_reason": None,
+            "status_explanation": "On-demand. Last warmed 12 min ago. A new mention will spawn the runtime.",
+            "pre_send_warning": {
+                "severity": "info",
+                "title": "Delivery may be delayed",
+                "body": "This agent is on-demand; a new mention will warm the runtime.",
+            },
+        }
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "check", "backend_sentinel", "--json"])
@@ -92,18 +96,20 @@ def test_check_renders_avail_contract_v4_dto_forward_compat(monkeypatch):
 
 def test_check_human_output_renders_badge_label_when_present(monkeypatch):
     """Human-readable output uses the rich badge when backend provides it."""
-    fake = _FakeClient({
-        "agent_id": "abc-123",
-        "name": "night_owl",
-        "presence": "online",
-        "responsive": True,
-        "last_active": "2026-04-25T15:00:00Z",
-        "badge_state": "live",
-        "badge_label": "Live",
-        "expected_response": "immediate",
-        "connection_path": "gateway_managed",
-        "confidence": "high",
-    })
+    fake = _FakeClient(
+        {
+            "agent_id": "abc-123",
+            "name": "night_owl",
+            "presence": "online",
+            "responsive": True,
+            "last_active": "2026-04-25T15:00:00Z",
+            "badge_state": "live",
+            "badge_label": "Live",
+            "expected_response": "immediate",
+            "connection_path": "gateway_managed",
+            "confidence": "high",
+        }
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "check", "night_owl"])
@@ -116,13 +122,15 @@ def test_check_human_output_renders_badge_label_when_present(monkeypatch):
 
 def test_check_human_output_falls_back_to_basic_presence(monkeypatch):
     """When backend has no v4 fields, render basic ONLINE/OFFLINE."""
-    fake = _FakeClient({
-        "agent_id": "abc-123",
-        "name": "old_agent",
-        "presence": "offline",
-        "responsive": False,
-        "last_active": None,
-    })
+    fake = _FakeClient(
+        {
+            "agent_id": "abc-123",
+            "name": "old_agent",
+            "presence": "offline",
+            "responsive": False,
+            "last_active": None,
+        }
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "check", "old_agent"])
@@ -133,20 +141,22 @@ def test_check_human_output_falls_back_to_basic_presence(monkeypatch):
 
 def test_check_renders_pre_send_warning_when_present(monkeypatch):
     """pre_send_warning renders as a colored callout below the fields table."""
-    fake = _FakeClient({
-        "agent_id": "abc-123",
-        "name": "stuck_agent",
-        "presence": "online",
-        "badge_state": "blocked",
-        "badge_label": "Stuck",
-        "expected_response": "unlikely",
-        "unavailable_reason": "runtime_stuck",
-        "pre_send_warning": {
-            "severity": "warning",
-            "title": "Agent appears stuck",
-            "body": "Heartbeat hasn't fired in 10 minutes. Send anyway?",
-        },
-    })
+    fake = _FakeClient(
+        {
+            "agent_id": "abc-123",
+            "name": "stuck_agent",
+            "presence": "online",
+            "badge_state": "blocked",
+            "badge_label": "Stuck",
+            "expected_response": "unlikely",
+            "unavailable_reason": "runtime_stuck",
+            "pre_send_warning": {
+                "severity": "warning",
+                "title": "Agent appears stuck",
+                "body": "Heartbeat hasn't fired in 10 minutes. Send anyway?",
+            },
+        }
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "check", "stuck_agent"])
@@ -165,7 +175,7 @@ def test_check_unknown_agent_returns_nonzero(monkeypatch):
         def get_agent_presence(self, _id):
             raise RuntimeError("agent not found: ghost")
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: _NotFoundClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: _NotFoundClient())
     result = runner.invoke(app, ["agents", "check", "ghost", "--json"])
     assert result.exit_code != 0
     assert "ghost" in result.output
@@ -279,19 +289,21 @@ def test_get_agent_presence_prefers_state_endpoint_and_unwraps_envelope():
                     return self._data
 
             if path.endswith("/state"):
-                return _R({
-                    "agent_state": {
-                        "agent_id": "uuid-zzz",
-                        "name": "richy",
-                        "expected_response": "immediate",
-                        "badge_state": "live",
-                        "badge_label": "Live",
-                        "connection_path": "gateway_managed",
-                        "confidence": "high",
-                    },
-                    "raw_presence": {"sources": ["gateway"]},
-                    "control": {"enabled": True, "quarantined": False},
-                })
+                return _R(
+                    {
+                        "agent_state": {
+                            "agent_id": "uuid-zzz",
+                            "name": "richy",
+                            "expected_response": "immediate",
+                            "badge_state": "live",
+                            "badge_label": "Live",
+                            "connection_path": "gateway_managed",
+                            "confidence": "high",
+                        },
+                        "raw_presence": {"sources": ["gateway"]},
+                        "control": {"enabled": True, "quarantined": False},
+                    }
+                )
             raise AssertionError(f"unexpected path {path}")
 
     client = AxClient.__new__(AxClient)

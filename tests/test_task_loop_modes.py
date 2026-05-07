@@ -42,7 +42,7 @@ class _FakeClient:
 
 
 def _install_fake_runtime(monkeypatch, client: _FakeClient) -> None:
-    monkeypatch.setattr("ax_cli.commands.reminders.get_client", lambda: client)
+    monkeypatch.setattr("ax_cli.commands.reminders.get_authoring_client", lambda: client)
     monkeypatch.setattr(
         "ax_cli.commands.reminders.resolve_space_id",
         lambda _client, *, explicit=None: explicit or "space-abc",

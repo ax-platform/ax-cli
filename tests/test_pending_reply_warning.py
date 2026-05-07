@@ -144,9 +144,7 @@ def test_print_pending_reply_warning_singular_with_one_sender(capsys):
 
 
 def test_print_pending_reply_warning_plural_with_multiple_senders(capsys):
-    print_pending_reply_warning(
-        {"count": 4, "message_ids": ["x"], "newest_senders": ["alice", "bob", "carol"]}
-    )
+    print_pending_reply_warning({"count": 4, "message_ids": ["x"], "newest_senders": ["alice", "bob", "carol"]})
     flat = " ".join(_strip_ansi(capsys.readouterr().out).split())
     assert "4 pending replies" in flat
     assert "newest from @alice" in flat
@@ -212,7 +210,7 @@ class _FakeSendClient:
 
 
 def _patch_send_client(monkeypatch, fake_client):
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: fake_client)
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: fake_client)
     monkeypatch.setattr("ax_cli.commands.messages.resolve_gateway_config", lambda: None)
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda *a, **kw: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda **kw: "cli_god")

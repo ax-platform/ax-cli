@@ -100,7 +100,7 @@ def test_build_avatar_data_uri_from_file_png(tmp_path):
 
 def test_update_avatar_url_flag_passes_through(monkeypatch, tmp_path):
     fake = _FakeClient(_RecordingHttp())
-    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+    monkeypatch.setattr(agents_cmd, "get_authoring_client", lambda: fake)
 
     small_uri = "data:image/svg+xml;base64," + base64.b64encode(b"<svg/>").decode()
     assert len(small_uri) <= AVATAR_URL_MAX_LENGTH
@@ -112,7 +112,7 @@ def test_update_avatar_url_flag_passes_through(monkeypatch, tmp_path):
 
 def test_update_avatar_file_flag_reads_and_encodes(monkeypatch, tmp_path):
     fake = _FakeClient(_RecordingHttp())
-    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+    monkeypatch.setattr(agents_cmd, "get_authoring_client", lambda: fake)
 
     svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
     f = tmp_path / "a.svg"
@@ -143,7 +143,7 @@ def test_update_avatar_mutually_exclusive(monkeypatch):
 
 def test_update_avatar_file_rejected_over_cap(monkeypatch, tmp_path):
     fake = _FakeClient(_RecordingHttp())
-    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+    monkeypatch.setattr(agents_cmd, "get_authoring_client", lambda: fake)
 
     big = tmp_path / "big.svg"
     big.write_bytes(b"x" * 4096)  # > cap when encoded
@@ -160,7 +160,7 @@ def test_update_avatar_file_rejected_over_cap(monkeypatch, tmp_path):
 def test_avatar_set_uses_put_not_patch(monkeypatch):
     http = _RecordingHttp(status_code=200, response_json={"id": "agent-1", "name": "axolotl"})
     fake = _FakeClient(http)
-    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+    monkeypatch.setattr(agents_cmd, "get_authoring_client", lambda: fake)
 
     # Provide a tiny in-process avatar generator to avoid drawing a real SVG
     tiny_svg = b"<svg/>"
@@ -189,7 +189,7 @@ def test_avatar_set_uses_put_not_patch(monkeypatch):
 def test_avatar_set_rejects_oversized_uri(monkeypatch):
     http = _RecordingHttp()
     fake = _FakeClient(http)
-    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+    monkeypatch.setattr(agents_cmd, "get_authoring_client", lambda: fake)
 
     monkeypatch.setattr("ax_cli.avatar.generate_avatar", lambda *a, **k: "<svg/>")
     # Intentionally produce an over-cap data URI
@@ -217,7 +217,7 @@ def test_update_prints_effective_config_to_stderr(monkeypatch):
     """The config preamble MUST land on stderr so --json consumers and
     pipes don't see it. See friction §2 + PR #65 review."""
     fake = _FakeClient(_RecordingHttp())
-    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+    monkeypatch.setattr(agents_cmd, "get_authoring_client", lambda: fake)
 
     result = split_runner.invoke(app, ["agents", "update", "axolotl", "--bio", "hi"])
     assert result.exit_code == 0, result.stderr
@@ -232,7 +232,7 @@ def test_avatar_set_prints_effective_config_to_stderr(monkeypatch):
     """Same stderr invariant for `ax agents avatar --set`."""
     http = _RecordingHttp(status_code=200, response_json={"id": "agent-1", "name": "axolotl"})
     fake = _FakeClient(http)
-    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+    monkeypatch.setattr(agents_cmd, "get_authoring_client", lambda: fake)
     monkeypatch.setattr("ax_cli.avatar.generate_avatar", lambda *a, **k: "<svg/>")
     small = "data:image/svg+xml;base64," + base64.b64encode(b"<svg/>").decode()
     monkeypatch.setattr("ax_cli.avatar.avatar_data_uri", lambda *a, **k: small)
@@ -249,7 +249,7 @@ def test_update_json_stdout_is_clean_of_config_preamble(monkeypatch):
     import json as _json
 
     fake = _FakeClient(_RecordingHttp())
-    monkeypatch.setattr(agents_cmd, "get_client", lambda: fake)
+    monkeypatch.setattr(agents_cmd, "get_authoring_client", lambda: fake)
 
     result = split_runner.invoke(app, ["agents", "update", "axolotl", "--bio", "hi", "--json"])
     assert result.exit_code == 0, result.stderr

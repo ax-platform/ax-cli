@@ -12,7 +12,7 @@ import typer
 from ..config import (
     _resolve_user_env,
     _user_config_path,
-    get_client,
+    get_authoring_client,
     resolve_agent_name,
     resolve_base_url,
     resolve_gateway_config,
@@ -314,7 +314,7 @@ def list_agents(
             )
             agents = data if isinstance(data, list) else data.get("agents", [])
     else:
-        client = get_client()
+        client = get_authoring_client()
         sid = resolve_space_id(client, explicit=space_id)
         if availability:
             try:
@@ -438,7 +438,7 @@ def ping_agent(
     as_json: bool = JSON_OPTION,
 ):
     """Probe whether an agent is currently listening for mention events."""
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
 
     try:
@@ -516,7 +516,7 @@ def discover_agents(
     as_json: bool = JSON_OPTION,
 ):
     """Discover agent mesh roles, listener state, and safe contact method."""
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
     try:
         agents_data = client.list_agents(space_id=sid, limit=limit)
@@ -600,7 +600,7 @@ def create_agent(
     Uses the management API (user_admin JWT) when available,
     falls back to legacy /api/v1/agents for Cognito auth.
     """
-    client = get_client()
+    client = get_authoring_client()
     try:
         # Try management API first (exchange-based auth),
         # fall back to legacy /api/v1/agents if it returns HTML.
@@ -654,7 +654,7 @@ def get_agent(
     as_json: bool = JSON_OPTION,
 ):
     """Get agent details by name or UUID."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.get_agent(identifier)
     except httpx.HTTPStatusError as e:
@@ -707,7 +707,7 @@ def update_agent(
 
     _print_effective_config_line()
 
-    client = get_client()
+    client = get_authoring_client()
     fields = {}
     if description is not None:
         fields["description"] = description
@@ -754,7 +754,7 @@ def delete_agent(
         if not confirm:
             raise typer.Abort()
 
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.delete_agent(identifier)
     except httpx.HTTPStatusError as e:
@@ -765,7 +765,7 @@ def delete_agent(
 @app.command("status")
 def status(as_json: bool = JSON_OPTION):
     """Show agent presence (online/offline) in the current space."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.get_agents_presence()
     except httpx.HTTPStatusError as e:
@@ -795,7 +795,7 @@ def check(
     ``pre_send_warning``, the same CLI command renders the new fields
     transparently — no flag flip needed.
     """
-    client = get_client()
+    client = get_authoring_client()
     try:
         record = client.get_agent_presence(name_or_id)
     except httpx.HTTPStatusError as exc:
@@ -901,7 +901,7 @@ def placement_get(
     ``placement_state`` / ``policy_revision``), those fields surface
     transparently — same forward-compat pattern as ``ax agents check``.
     """
-    client = get_client()
+    client = get_authoring_client()
     try:
         record = client.get_agent_placement(name_or_id)
     except httpx.HTTPStatusError as exc:
@@ -959,7 +959,7 @@ def placement_set(
     For direct-mode agents, the change applies to the agent record but
     the running listener may need a restart to pick up the new space.
     """
-    client = get_client()
+    client = get_authoring_client()
     try:
         result = client.set_agent_placement(name_or_id, space_id=space_id, pinned=pinned)
     except httpx.HTTPStatusError as exc:
@@ -983,7 +983,7 @@ def tools(
     as_json: bool = JSON_OPTION,
 ):
     """Show enabled tools for an agent."""
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
     try:
         data = client.get_agent_tools(sid, agent_id)
@@ -1024,7 +1024,7 @@ def avatar(
             f.write(svg)
         console.print(f"[green]Saved:[/green] {output}")
     elif set_avatar:
-        client = get_client()
+        client = get_authoring_client()
         data_uri = avatar_data_uri(agent, agent_type, size)
         _check_avatar_url_length(data_uri)
         _print_effective_config_line()

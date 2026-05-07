@@ -57,7 +57,7 @@ def test_context_download_uses_base_url_and_auth_headers(monkeypatch, tmp_path):
             calls["params"] = params
             return FakeResponse()
 
-    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr(context.httpx, "Client", FakeHttpClient)
 
@@ -115,7 +115,7 @@ def test_context_download_rejects_html_shell_for_binary_payload(monkeypatch, tmp
         def get(self, url, params=None):
             return FakeResponse()
 
-    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr(context.httpx, "Client", FakeHttpClient)
 
@@ -173,7 +173,7 @@ def test_context_load_fetches_to_preview_cache(monkeypatch, tmp_path):
             calls["params"] = params
             return FakeResponse()
 
-    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr(context.httpx, "Client", FakeHttpClient)
 
@@ -235,7 +235,7 @@ def test_context_load_can_include_text_content(monkeypatch, tmp_path):
         def get(self, url, params=None):
             return FakeResponse()
 
-    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr(context.httpx, "Client", FakeHttpClient)
 
@@ -297,7 +297,7 @@ def test_context_upload_file_vault_stores_context_before_promote(monkeypatch, tm
             }
             return {"status": "created", "key": key}
 
-    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -342,7 +342,7 @@ def test_context_upload_file_mention_sends_context_signal(monkeypatch, tmp_path)
             calls["message"] = {"space_id": space_id, "content": content}
             return {"id": "msg-1"}
 
-    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -369,7 +369,7 @@ def test_context_set_mention_sends_context_signal(monkeypatch):
             calls["message"] = {"space_id": space_id, "content": content}
             return {"id": "msg-1"}
 
-    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -410,7 +410,7 @@ def test_context_fetch_url_upload_stores_renderable_file_upload(monkeypatch):
             calls["context"] = {"space_id": space_id, "key": key, "value": value, "ttl": ttl}
             return {"status": "stored"}
 
-    monkeypatch.setattr(context, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(context, "get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr(context, "resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr(context.httpx, "get", lambda *args, **kwargs: FakeResponse())
 

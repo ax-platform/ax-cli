@@ -22,7 +22,7 @@ import httpx
 import typer
 
 from .. import gateway as gateway_core
-from ..config import get_client, resolve_agent_name, resolve_space_id
+from ..config import get_authoring_client, resolve_agent_name, resolve_space_id
 from ..mentions import merge_explicit_mentions_metadata
 from ..output import JSON_OPTION, console, print_json
 from .listen import _is_self_authored, _iter_sse, _remember_reply_anchor, _should_respond, _strip_mention
@@ -1213,7 +1213,7 @@ def channel(
     if ctx.invoked_subcommand:
         return
     _load_channel_env()
-    client = get_client()
+    client = get_authoring_client()
     agent_name = agent or resolve_agent_name(client=client)
     if not agent_name:
         console.print(

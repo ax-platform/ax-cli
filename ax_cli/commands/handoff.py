@@ -11,7 +11,7 @@ from typing import Any, Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_agent_name, resolve_space_id
+from ..config import get_authoring_client, resolve_agent_name, resolve_space_id
 from ..output import JSON_OPTION, console, handle_error, print_json
 from .watch import _iter_sse
 
@@ -561,7 +561,7 @@ def run(
         typer.echo(f"Error: unknown intent '{intent}'. Use one of: {allowed}", err=True)
         raise typer.Exit(1)
 
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
     agent_name = agent.lstrip("@")
     current_agent_name = resolve_agent_name(client=client) or ""

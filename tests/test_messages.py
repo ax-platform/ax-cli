@@ -62,7 +62,7 @@ def test_send_file_stores_context_and_includes_context_key(monkeypatch, tmp_path
             }
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: None)
 
@@ -137,7 +137,9 @@ def test_send_uses_gateway_native_identity_without_space_override(monkeypatch):
     )
     monkeypatch.setattr("ax_cli.commands.messages._local_process_fingerprint", lambda **kwargs: {"fingerprint": "fp"})
     monkeypatch.setattr("ax_cli.commands.messages.httpx.post", fake_post)
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: (_ for _ in ()).throw(AssertionError("direct client")))
+    monkeypatch.setattr(
+        "ax_cli.commands.messages.get_authoring_client", lambda: (_ for _ in ()).throw(AssertionError("direct client"))
+    )
 
     result = runner.invoke(app, ["send", "hello from backend", "--no-wait", "--json"])
 
@@ -247,7 +249,7 @@ def test_messages_list_shows_short_ids_but_json_keeps_full_ids(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
 
     table_result = runner.invoke(app, ["messages", "list"])
@@ -286,7 +288,7 @@ def test_messages_list_can_request_unread_and_mark_read(monkeypatch):
                 "marked_read_count": 1,
             }
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["messages", "list", "--unread", "--mark-read"])
@@ -311,8 +313,10 @@ def test_messages_list_accepts_space_slug_alias(monkeypatch):
             calls["space_id"] = space_id
             return {"messages": []}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
-    monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: f"resolved:{explicit}")
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        "ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: f"resolved:{explicit}"
+    )
 
     result = runner.invoke(app, ["messages", "list", "--space", "ax-cli-dev", "--json"])
 
@@ -330,8 +334,10 @@ def test_send_accepts_space_slug_alias(monkeypatch):
             calls["message"] = {"space_id": space_id, "content": content}
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
-    monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: f"resolved:{explicit}")
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        "ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: f"resolved:{explicit}"
+    )
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: None)
 
     result = runner.invoke(app, ["send", "checkpoint", "--space", "ax-cli-dev", "--no-wait", "--json"])
@@ -351,7 +357,7 @@ def test_messages_read_marks_single_message(monkeypatch):
             calls["message_id"] = message_id
             return {"status": "success", "message_id": message_id}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["messages", "read", "12345678", "--json"])
@@ -368,7 +374,7 @@ def test_messages_read_all_marks_space_read(monkeypatch):
             calls["all"] = True
             return {"status": "success", "marked_read": 2}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
 
     result = runner.invoke(app, ["messages", "read", "--all", "--json"])
 
@@ -415,7 +421,7 @@ def test_messages_get_resolves_short_id_prefix(monkeypatch):
             calls["get_id"] = requested_id
             return {"id": requested_id, "content": "hello"}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["messages", "get", "12345678", "--json"])
@@ -448,7 +454,7 @@ def test_messages_send_resolves_short_parent_id(monkeypatch):
             }
             return {"id": "reply-message-id"}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: None)
 
@@ -489,7 +495,7 @@ def test_send_to_prepends_missing_mention(monkeypatch):
             }
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: None)
 
@@ -515,7 +521,7 @@ def test_send_ask_ax_prepends_ax_mention(monkeypatch):
             }
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: None)
 
@@ -535,7 +541,7 @@ def test_send_ask_ax_does_not_duplicate_existing_ax_mention(monkeypatch):
             calls["message"] = {"content": content}
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: None)
 
@@ -577,7 +583,7 @@ def test_send_to_does_not_duplicate_existing_mention_and_waits_for_target(monkey
         }
         return {"id": "reply-1", "content": "ack"}
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: None)
     monkeypatch.setattr("ax_cli.commands.messages._wait_for_reply", fake_wait)
@@ -603,7 +609,7 @@ def test_send_prints_sender_identity_in_human_output(monkeypatch):
                 }
             }
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: "codex")
 
@@ -642,7 +648,7 @@ def test_send_prints_gateway_reply_note_in_human_output(monkeypatch):
             },
         }
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.messages.resolve_agent_name", lambda client=None: "codex")
     monkeypatch.setattr("ax_cli.commands.messages._wait_for_reply", fake_wait)
@@ -737,7 +743,7 @@ def test_messages_edit_and_delete_resolve_short_id_prefix(monkeypatch):
         def delete_message(self, requested_id):
             calls["delete_id"] = requested_id
 
-    monkeypatch.setattr("ax_cli.commands.messages.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.messages.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.messages.resolve_space_id", lambda client, explicit=None: "space-1")
 
     edit_result = runner.invoke(app, ["messages", "edit", "12345678", "updated", "--json"])

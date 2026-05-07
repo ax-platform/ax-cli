@@ -34,7 +34,7 @@ from typing import Any, Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_agent_name, resolve_space_id
+from ..config import get_authoring_client, resolve_agent_name, resolve_space_id
 from ..output import JSON_OPTION, console, print_json, print_kv
 
 
@@ -444,7 +444,7 @@ def send(
     if kind_n == "reminder" and not response_required:
         response_required = True
 
-    client = get_client()
+    client = get_authoring_client()
     try:
         resolved_space = resolve_space_id(client, explicit=space_id)
     except Exception as exc:
@@ -562,7 +562,7 @@ def _post_state_change(message_id: str, new_state: str, *, as_json: bool = False
     producing an auditable, streamable state-change event.
     """
     new_state = _normalize_state(new_state)
-    client = get_client()
+    client = get_authoring_client()
 
     try:
         r = client._http.get(

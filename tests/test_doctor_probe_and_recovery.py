@@ -251,7 +251,7 @@ def test_tasks_list_json_does_not_leak_axp_in_stdout(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["tasks", "list", "--json"])

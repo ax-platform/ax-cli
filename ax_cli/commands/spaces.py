@@ -5,7 +5,7 @@ from typing import Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_gateway_config, resolve_space_id, save_space_id
+from ..config import get_authoring_client, resolve_gateway_config, resolve_space_id, save_space_id
 from ..output import JSON_OPTION, console, handle_error, print_json, print_kv, print_table
 
 app = typer.Typer(name="spaces", help="Space management", no_args_is_help=True)
@@ -69,7 +69,7 @@ def list_spaces(
 
         spaces = _gateway_local_call(gateway_cfg=gateway_cfg, method="list_spaces")
     else:
-        client = get_client()
+        client = get_authoring_client()
         try:
             spaces = client.list_spaces()
         except httpx.HTTPStatusError as e:
@@ -94,7 +94,7 @@ def create(
     as_json: bool = JSON_OPTION,
 ):
     """Create a new space."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         result = client.create_space(name, description=description, visibility=visibility)
     except httpx.HTTPStatusError as e:
@@ -117,7 +117,7 @@ def use_space(
     as_json: bool = JSON_OPTION,
 ):
     """Set the current CLI space by id, slug, or name."""
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space)
     space_row = _find_space(client, sid) or {}
     label = _space_label(space_row, sid)
@@ -147,7 +147,7 @@ def get_space(
     as_json: bool = JSON_OPTION,
 ):
     """Get space details."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.get_space(space_id)
     except httpx.HTTPStatusError as e:
@@ -164,7 +164,7 @@ def members(
     as_json: bool = JSON_OPTION,
 ):
     """List members of a space."""
-    client = get_client()
+    client = get_authoring_client()
     sid = space_id or resolve_space_id(client)
     try:
         data = client.list_space_members(sid)

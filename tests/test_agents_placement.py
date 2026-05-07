@@ -44,14 +44,20 @@ class _FakeClient:
 
 
 def _install(monkeypatch, client):
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: client)
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: client)
 
 
 def test_get_renders_basic_placement(monkeypatch):
-    fake = _FakeClient(agent_record={"agent": {
-        "id": "a-1", "name": "frontend_sentinel",
-        "space_id": "space-prod", "pinned": True,
-    }})
+    fake = _FakeClient(
+        agent_record={
+            "agent": {
+                "id": "a-1",
+                "name": "frontend_sentinel",
+                "space_id": "space-prod",
+                "pinned": True,
+            }
+        }
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "placement", "get", "frontend_sentinel", "--json"])
@@ -63,10 +69,16 @@ def test_get_renders_basic_placement(monkeypatch):
 
 
 def test_get_human_output_renders_table(monkeypatch):
-    fake = _FakeClient(agent_record={"agent": {
-        "id": "a-1", "name": "demo-bot",
-        "space_id": "space-abc", "pinned": False,
-    }})
+    fake = _FakeClient(
+        agent_record={
+            "agent": {
+                "id": "a-1",
+                "name": "demo-bot",
+                "space_id": "space-abc",
+                "pinned": False,
+            }
+        }
+    )
     _install(monkeypatch, fake)
     result = runner.invoke(app, ["agents", "placement", "get", "demo-bot"])
     assert result.exit_code == 0, result.output
@@ -75,12 +87,17 @@ def test_get_human_output_renders_table(monkeypatch):
 
 
 def test_get_renders_allowed_spaces_when_present(monkeypatch):
-    fake = _FakeClient(agent_record={"agent": {
-        "id": "a-1", "name": "multi-space",
-        "space_id": "space-default",
-        "pinned": False,
-        "allowed_spaces": ["space-a", "space-b", "space-c"],
-    }})
+    fake = _FakeClient(
+        agent_record={
+            "agent": {
+                "id": "a-1",
+                "name": "multi-space",
+                "space_id": "space-default",
+                "pinned": False,
+                "allowed_spaces": ["space-a", "space-b", "space-c"],
+            }
+        }
+    )
     _install(monkeypatch, fake)
     result = runner.invoke(app, ["agents", "placement", "get", "multi-space"])
     assert result.exit_code == 0, result.output
@@ -90,18 +107,23 @@ def test_get_renders_allowed_spaces_when_present(monkeypatch):
 
 def test_get_forward_compat_v4_placement_fields(monkeypatch):
     """When backend ships GATEWAY-PLACEMENT-POLICY-001 fields, CLI renders them transparently."""
-    fake = _FakeClient(agent_record={"agent": {
-        "id": "a-1", "name": "future-bot",
-        "space_id": "space-curr",
-        "pinned": False,
-        "placement": {
-            "policy_kind": "allowed",
-            "current_space": "space-curr",
-            "current_space_set_by": "ax_ui",
-            "policy_revision": 3,
-        },
-        "placement_state": "acked",
-    }})
+    fake = _FakeClient(
+        agent_record={
+            "agent": {
+                "id": "a-1",
+                "name": "future-bot",
+                "space_id": "space-curr",
+                "pinned": False,
+                "placement": {
+                    "policy_kind": "allowed",
+                    "current_space": "space-curr",
+                    "current_space_set_by": "ax_ui",
+                    "policy_revision": 3,
+                },
+                "placement_state": "acked",
+            }
+        }
+    )
     _install(monkeypatch, fake)
     result = runner.invoke(app, ["agents", "placement", "get", "future-bot"])
     assert result.exit_code == 0, result.output
@@ -138,9 +160,16 @@ def test_set_default_unpinned(monkeypatch):
 
 
 def test_set_human_output_confirms(monkeypatch):
-    fake = _FakeClient(set_response={"agent": {
-        "id": "a-1", "name": "demo-bot", "space_id": "s-2", "pinned": True,
-    }})
+    fake = _FakeClient(
+        set_response={
+            "agent": {
+                "id": "a-1",
+                "name": "demo-bot",
+                "space_id": "s-2",
+                "pinned": True,
+            }
+        }
+    )
     _install(monkeypatch, fake)
     result = runner.invoke(
         app,
@@ -155,6 +184,7 @@ def test_set_human_output_confirms(monkeypatch):
 
 def test_set_surfaces_403_clearly(monkeypatch):
     """Backend returns 403 when user isn't a member of target space — CLI surfaces it."""
+
     class _Resp:
         status_code = 403
         text = '{"detail":"User is not a member of target space"}'
@@ -170,9 +200,14 @@ def test_set_surfaces_403_clearly(monkeypatch):
 
 
 def test_get_missing_space_id_renders_dash(monkeypatch):
-    fake = _FakeClient(agent_record={"agent": {
-        "id": "a-1", "name": "no-space-bot",
-    }})
+    fake = _FakeClient(
+        agent_record={
+            "agent": {
+                "id": "a-1",
+                "name": "no-space-bot",
+            }
+        }
+    )
     _install(monkeypatch, fake)
     result = runner.invoke(app, ["agents", "placement", "get", "no-space-bot"])
     assert result.exit_code == 0, result.output

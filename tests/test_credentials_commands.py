@@ -61,7 +61,7 @@ def test_credentials_audit_json_reports_rotation_and_cleanup(monkeypatch):
                 _credential("agent-cleanup", "cleanup-3"),
             ]
 
-    monkeypatch.setattr("ax_cli.commands.credentials.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.credentials.get_authoring_client", lambda: FakeClient())
 
     result = runner.invoke(app, ["credentials", "audit", "--json"])
 
@@ -77,7 +77,7 @@ def test_credentials_audit_strict_fails_only_for_cleanup_required(monkeypatch):
         def mgmt_list_credentials(self):
             return [_credential("agent-rotate", "rotate-1"), _credential("agent-rotate", "rotate-2")]
 
-    monkeypatch.setattr("ax_cli.commands.credentials.get_client", lambda: RotationWindowClient())
+    monkeypatch.setattr("ax_cli.commands.credentials.get_authoring_client", lambda: RotationWindowClient())
 
     rotation_result = runner.invoke(app, ["credentials", "audit", "--strict", "--json"])
     assert rotation_result.exit_code == 0, rotation_result.output
@@ -90,7 +90,7 @@ def test_credentials_audit_strict_fails_only_for_cleanup_required(monkeypatch):
                 _credential("agent-cleanup", "cleanup-3"),
             ]
 
-    monkeypatch.setattr("ax_cli.commands.credentials.get_client", lambda: CleanupClient())
+    monkeypatch.setattr("ax_cli.commands.credentials.get_authoring_client", lambda: CleanupClient())
 
     cleanup_result = runner.invoke(app, ["credentials", "audit", "--strict", "--json"])
     assert cleanup_result.exit_code == 2, cleanup_result.output

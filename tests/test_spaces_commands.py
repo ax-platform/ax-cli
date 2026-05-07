@@ -31,7 +31,7 @@ def test_spaces_use_accepts_slug_and_warns_when_bound_agent_not_attached(monkeyp
         saved["space_id"] = space_id
         saved["local"] = local
 
-    monkeypatch.setattr("ax_cli.commands.spaces.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.spaces.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.spaces.save_space_id", fake_save_space_id)
 
     result = runner.invoke(app, ["spaces", "use", "ax-cli-dev", "--json"])
@@ -60,7 +60,7 @@ def test_spaces_use_global_saves_global_config(monkeypatch):
         saved["space_id"] = space_id
         saved["local"] = local
 
-    monkeypatch.setattr("ax_cli.commands.spaces.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.spaces.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.spaces.save_space_id", fake_save_space_id)
 
     result = runner.invoke(app, ["spaces", "use", "ax-cli-dev", "--global", "--json"])

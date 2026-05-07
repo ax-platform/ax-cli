@@ -10,7 +10,7 @@ from typing import Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_agent_name, resolve_gateway_config, resolve_space_id
+from ..config import get_authoring_client, resolve_agent_name, resolve_gateway_config, resolve_space_id
 from ..context_keys import build_upload_context_key
 from ..mentions import merge_explicit_mentions_metadata
 from ..output import JSON_OPTION, console, handle_error, print_json, print_kv, print_table
@@ -872,7 +872,7 @@ def send(
                 console.print("[dim]Gateway-native send accepted; reply waiting for this path is not wired yet.[/dim]")
         return
 
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
 
     # --act-as: override sender identity (requires scoped token)
@@ -1097,7 +1097,7 @@ def list_messages(
             args["mark_read"] = True
         data = _gateway_local_call(gateway_cfg=gateway_cfg, method="list_messages", args=args, space_id=space_id)
     else:
-        client = get_client()
+        client = get_authoring_client()
         sid = resolve_space_id(client, explicit=space_id)
         try:
             kwargs = {"limit": limit, "channel": channel, "space_id": sid}
@@ -1146,7 +1146,7 @@ def mark_read(
         typer.echo("Error: use either a message ID or --all, not both.", err=True)
         raise typer.Exit(1)
 
-    client = get_client()
+    client = get_authoring_client()
     try:
         if all_messages:
             data = client.mark_all_messages_read()
@@ -1174,7 +1174,7 @@ def get(
             args={"message_id": message_id},
         )
     else:
-        client = get_client()
+        client = get_authoring_client()
         try:
             data = client.get_message(_resolve_message_id(client, message_id))
         except httpx.HTTPStatusError as e:
@@ -1192,7 +1192,7 @@ def edit(
     as_json: bool = JSON_OPTION,
 ):
     """Edit a message."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.edit_message(_resolve_message_id(client, message_id), content)
     except httpx.HTTPStatusError as e:
@@ -1209,7 +1209,7 @@ def delete(
     as_json: bool = JSON_OPTION,
 ):
     """Delete a message."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         resolved_message_id = _resolve_message_id(client, message_id)
         client.delete_message(resolved_message_id)
@@ -1236,7 +1236,7 @@ def search(
             args={"query": query, "limit": limit},
         )
     else:
-        client = get_client()
+        client = get_authoring_client()
         try:
             data = client.search_messages(query, limit=limit)
         except httpx.HTTPStatusError as e:

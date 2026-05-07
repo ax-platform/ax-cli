@@ -7,7 +7,7 @@ from typing import Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_space_id
+from ..config import get_authoring_client, resolve_space_id
 from ..context_keys import build_upload_context_key
 from ..output import JSON_OPTION, console, handle_error, mention_prefix, print_json
 
@@ -67,7 +67,7 @@ def upload_file(
         ax upload file data.csv --key "sales-q1" --vault
         ax upload file arch.png --no-message --quiet   # context only, print ID
     """
-    client = get_client()
+    client = get_authoring_client()
     space_id = resolve_space_id(client)
     path = Path(file_path).expanduser().resolve()
 

@@ -1362,6 +1362,48 @@ def get_client() -> AxClient:
     )
 
 
+def get_authoring_client() -> AxClient:
+    """Return a credential-bearing AxClient for the invoking principal.
+
+    Single entry point command modules should use to obtain a client.
+    Resolution order:
+
+    1. Gateway-brokered workspace: when ``resolve_gateway_config()`` returns a
+       config with an ``agent_name`` and the local Gateway registry has a
+       matching entry, return that managed-agent's AxClient. This is the path
+       that lets ``ax tasks create``, ``ax agents list``, etc. work from a
+       Gateway-managed shell with no local PAT.
+    2. Otherwise, fall back to the legacy ``get_client()`` path, which reads a
+       local PAT from config / env. ``get_client()`` exits with its existing
+       actionable error if no credential is present.
+
+    The function preserves ``get_client()`` for backwards compatibility — any
+    caller still using it keeps working. New call sites should prefer
+    ``get_authoring_client()`` so the larger Gateway-as-MCP transport swap can
+    happen behind a single entry point in a follow-up.
+
+    Don't silently fall back when both paths fail: ``get_client()`` already
+    raises ``typer.Exit`` with operator-actionable guidance, so propagate it.
+    """
+    gateway_cfg = resolve_gateway_config()
+    agent_name = (gateway_cfg or {}).get("agent_name")
+    if gateway_cfg and agent_name:
+        # Lazy imports avoid the circular dependency: ax_cli.commands.gateway
+        # and ax_cli.gateway both depend on ax_cli.config at module load.
+        from ax_cli.commands.gateway import _load_managed_agent_client
+        from ax_cli.gateway import find_agent_entry, load_gateway_registry
+
+        registry = load_gateway_registry()
+        entry = find_agent_entry(registry, agent_name)
+        if entry:
+            return _load_managed_agent_client(entry)
+        # Brokered workspace but the registry doesn't have the agent — fall
+        # through to get_client(), whose error message points the operator at
+        # `ax gateway local ... --workdir <path>` to register.
+
+    return get_client()
+
+
 def get_user_client() -> AxClient:
     """Return a user-authored client for setup/management operations."""
     token = resolve_user_token()

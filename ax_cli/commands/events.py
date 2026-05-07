@@ -7,7 +7,7 @@ from typing import Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_space_id
+from ..config import get_authoring_client, resolve_space_id
 from ..output import JSON_OPTION, console
 
 app = typer.Typer(name="events", help="Event streaming", no_args_is_help=True)
@@ -22,7 +22,7 @@ def stream(
     as_json: bool = JSON_OPTION,
 ):
     """Stream SSE events in real-time. Use --filter routing to see only routing events."""
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client)
 
     filter_types: set[str] | None = None

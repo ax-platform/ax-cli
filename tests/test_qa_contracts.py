@@ -96,7 +96,7 @@ def _json_output(result):
 
 def test_contract_smoke_read_only_passes_explicit_space_to_api_reads(monkeypatch):
     fake = FakeClient()
-    monkeypatch.setattr(qa, "get_client", lambda: fake)
+    monkeypatch.setattr(qa, "get_authoring_client", lambda: fake)
     monkeypatch.setattr(qa, "resolve_space_id", lambda client, explicit=None: explicit or "space-1")
 
     result = runner.invoke(app, ["qa", "contracts", "--json"])
@@ -165,7 +165,7 @@ def test_contract_smoke_env_requires_space_when_named_login_is_ambiguous(monkeyp
 
 def test_contract_smoke_write_roundtrip_sets_gets_and_deletes_context(monkeypatch):
     fake = FakeClient()
-    monkeypatch.setattr(qa, "get_client", lambda: fake)
+    monkeypatch.setattr(qa, "get_authoring_client", lambda: fake)
     monkeypatch.setattr(qa, "resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["qa", "contracts", "--write", "--json"])
@@ -183,7 +183,7 @@ def test_contract_smoke_upload_can_emit_context_backed_message(monkeypatch, tmp_
     sample = tmp_path / "probe.md"
     sample.write_text("# Probe\n")
     fake = FakeClient()
-    monkeypatch.setattr(qa, "get_client", lambda: fake)
+    monkeypatch.setattr(qa, "get_authoring_client", lambda: fake)
     monkeypatch.setattr(qa, "resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -257,7 +257,7 @@ def test_preflight_writes_ci_artifact(monkeypatch, tmp_path):
 
 def test_widgets_generates_current_signal_fixture_contract(monkeypatch):
     fake = FakeClient()
-    monkeypatch.setattr(qa, "get_client", lambda: fake)
+    monkeypatch.setattr(qa, "get_authoring_client", lambda: fake)
     monkeypatch.setattr(qa, "resolve_space_id", lambda client, explicit=None: explicit or "space-1")
 
     result = runner.invoke(
@@ -327,7 +327,7 @@ def test_widgets_generates_current_signal_fixture_contract(monkeypatch):
 
 def test_widgets_can_send_media_sidecar_probe(monkeypatch):
     fake = FakeClient()
-    monkeypatch.setattr(qa, "get_client", lambda: fake)
+    monkeypatch.setattr(qa, "get_authoring_client", lambda: fake)
     monkeypatch.setattr(qa, "resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -355,7 +355,7 @@ def test_widgets_can_attach_uploaded_evidence_to_alert_fixture(monkeypatch, tmp_
     evidence = tmp_path / "evidence.md"
     evidence.write_text("# Evidence\n")
     fake = FakeClient()
-    monkeypatch.setattr(qa, "get_client", lambda: fake)
+    monkeypatch.setattr(qa, "get_authoring_client", lambda: fake)
     monkeypatch.setattr(qa, "resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(

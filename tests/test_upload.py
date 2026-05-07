@@ -53,7 +53,7 @@ def test_upload_file_passes_resolved_space_to_upload_api(monkeypatch, tmp_path):
             }
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.upload.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.upload.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.upload.resolve_space_id", lambda client: "space-1")
 
     result = runner.invoke(
@@ -102,7 +102,7 @@ def test_upload_file_no_message_still_stores_context(monkeypatch, tmp_path):
             calls["message"] = {"space_id": space_id, "content": content, "attachments": attachments}
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.upload.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.upload.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.upload.resolve_space_id", lambda client: "space-1")
 
     result = runner.invoke(
@@ -146,7 +146,7 @@ def test_upload_file_quiet_still_stores_context_without_message(monkeypatch, tmp
             calls["message"] = {"space_id": space_id, "content": content, "attachments": attachments}
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.upload.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.upload.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.upload.resolve_space_id", lambda client: "space-1")
 
     result = runner.invoke(app, ["upload", "file", str(sample), "--quiet"])
@@ -193,7 +193,7 @@ def test_upload_file_vault_stores_context_before_promote(monkeypatch, tmp_path):
             }
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.upload.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.upload.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.upload.resolve_space_id", lambda client: "space-1")
 
     result = runner.invoke(

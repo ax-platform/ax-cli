@@ -36,7 +36,7 @@ class _FakeClient:
 
 
 def _install_runtime(monkeypatch, client: _FakeClient) -> None:
-    monkeypatch.setattr("ax_cli.commands.heartbeat.get_client", lambda: client)
+    monkeypatch.setattr("ax_cli.commands.heartbeat.get_authoring_client", lambda: client)
     monkeypatch.setattr("ax_cli.commands.heartbeat.resolve_agent_name", lambda client=None: "orion")
 
 
@@ -105,7 +105,7 @@ def test_send_skip_push_records_local_only(monkeypatch, tmp_path):
         def send_heartbeat(self, *_a, **_kw):
             raise AssertionError("should not be called when --skip-push")
 
-    monkeypatch.setattr("ax_cli.commands.heartbeat.get_client", lambda: _ExplodingClient())
+    monkeypatch.setattr("ax_cli.commands.heartbeat.get_authoring_client", lambda: _ExplodingClient())
     monkeypatch.setattr("ax_cli.commands.heartbeat.resolve_agent_name", lambda client=None: "orion")
 
     store_file = tmp_path / "heartbeats.json"
