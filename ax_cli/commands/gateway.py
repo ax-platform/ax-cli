@@ -78,6 +78,7 @@ from ..gateway import (
     load_gateway_registry,
     load_gateway_session,
     load_recent_gateway_activity,
+    looks_like_space_uuid,
     ollama_setup_status,
     record_gateway_activity,
     remove_agent_entry,
@@ -829,7 +830,11 @@ def _resolve_gateway_agent_home_space(
 ) -> str:
     explicit = str(explicit_space_id or "").strip()
     if explicit:
-        return explicit
+        if looks_like_space_uuid(explicit):
+            return explicit
+        # Caller passed a name/slug — resolve through the backend so we never
+        # store a non-UUID in the registry's space_id field.
+        return resolve_space_id(client, explicit=explicit)
     session_space = str(session.get("space_id") or "").strip()
     if session_space:
         return session_space
@@ -1354,6 +1359,229 @@ def _set_managed_agent_desired_state(name: str, desired_state: str) -> dict:
     event = "managed_agent_desired_running" if desired_state == "running" else "managed_agent_desired_stopped"
     record_gateway_activity(event, entry=entry)
     return annotate_runtime_health(entry, registry=registry)
+
+
+def _hide_managed_agents(names: list[str], *, reason: str = "operator_cleanup") -> dict:
+    normalized_names = []
+    seen = set()
+    for raw_name in names:
+        name = str(raw_name or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        normalized_names.append(name)
+        seen.add(key)
+    if not normalized_names:
+        raise ValueError("Choose at least one managed agent to hide.")
+
+    registry = load_gateway_registry()
+    hidden: list[dict] = []
+    missing: list[str] = []
+    hidden_reason = str(reason or "").strip() or "operator_cleanup"
+    hidden_at = gateway_core._now_iso()
+    for name in normalized_names:
+        entry = find_agent_entry(registry, name)
+        if not entry:
+            missing.append(name)
+            continue
+        if str(entry.get("desired_state") or "").strip().lower() != "stopped":
+            entry["desired_state_before_hide"] = entry.get("desired_state") or "running"
+        entry["desired_state"] = "stopped"
+        entry["lifecycle_phase"] = "hidden"
+        entry["hidden_at"] = hidden_at
+        entry["hidden_reason"] = hidden_reason
+        hidden.append(entry)
+
+    save_gateway_registry(registry)
+    for entry in hidden:
+        record_gateway_activity(
+            "managed_agent_hidden",
+            entry=entry,
+            hidden_reason=hidden_reason,
+            operator_action=True,
+        )
+    return {
+        "count": len(hidden),
+        "missing": missing,
+        "hidden": [annotate_runtime_health(entry, registry=registry) for entry in hidden],
+    }
+
+
+def _restore_hidden_managed_agents(names: list[str]) -> dict:
+    """Symmetric inverse of _hide_managed_agents.
+
+    Clears lifecycle_phase=hidden + hide bookkeeping, restores desired_state
+    to whatever the operator-driven hide had captured (desired_state_before_hide).
+    Refuses to restore agents that are not in the hidden phase — the
+    archived phase has its own restore path (PR #147), and "active" agents
+    don't need restoration.
+    """
+    normalized_names: list[str] = []
+    seen: set[str] = set()
+    for raw_name in names:
+        name = str(raw_name or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        normalized_names.append(name)
+        seen.add(key)
+    if not normalized_names:
+        raise ValueError("Choose at least one managed agent to restore.")
+
+    registry = load_gateway_registry()
+    restored: list[dict] = []
+    missing: list[str] = []
+    not_hidden: list[str] = []
+    for name in normalized_names:
+        entry = find_agent_entry(registry, name)
+        if not entry:
+            missing.append(name)
+            continue
+        if str(entry.get("lifecycle_phase") or "") != "hidden":
+            not_hidden.append(name)
+            continue
+        prior = str(entry.get("desired_state_before_hide") or "").strip() or "running"
+        entry["lifecycle_phase"] = "active"
+        entry["desired_state"] = prior
+        entry.pop("desired_state_before_hide", None)
+        entry.pop("hidden_at", None)
+        entry.pop("hidden_reason", None)
+        restored.append(entry)
+
+    save_gateway_registry(registry)
+    for entry in restored:
+        record_gateway_activity(
+            "managed_agent_unhidden",
+            entry=entry,
+            operator_action=True,
+        )
+    return {
+        "count": len(restored),
+        "missing": missing,
+        "not_hidden": not_hidden,
+        "restored": [annotate_runtime_health(entry, registry=registry) for entry in restored],
+    }
+
+
+def _read_recovery_evidence(name: str) -> dict | None:
+    """Reconstruct a minimal registry row for an agent from local evidence.
+
+    Used when a managed_agent_added activity event was recorded but the
+    registry row was lost (pre-race-fix damage). Reads from three sources,
+    all verifiable:
+
+    - Activity log: most recent managed_agent_added for ``name`` →
+      agent_id, asset_id, install_id, gateway_id, runtime_type,
+      transport, space_id, token_file, credential_source, ts.
+    - Token directory: ``~/.ax/gateway/agents/<name>/token`` must exist
+      (we don't fabricate credentials).
+    - Workdir ``.ax/AGENT_CONTEXT.md`` if present, for the workdir hint.
+
+    Returns None if no managed_agent_added event is recorded or the
+    token file is missing — both required for a safe recovery.
+    """
+    target_event: dict | None = None
+    activity_path = activity_log_path()
+    try:
+        with activity_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if ev.get("agent_name") != name or ev.get("event") != "managed_agent_added":
+                    continue
+                target_event = ev  # later writes win — pick the most recent
+    except OSError:
+        return None
+    if not isinstance(target_event, dict):
+        return None
+    token_file = str(target_event.get("token_file") or "").strip()
+    if not token_file or not Path(token_file).is_file():
+        return None
+    return target_event
+
+
+def _recover_managed_agents_from_evidence(names: list[str]) -> dict:
+    """Recover registry rows for agents present locally (token + activity)
+    but absent from registry.json (pre-race-fix row loss).
+
+    Refuses to recover agents that are already in the registry — use
+    archive/restore or hide/unhide for state changes on existing rows.
+    The reconstructed row is minimal: enough fields for the daemon to
+    pick it up on next reconcile and hydrate the rest from upstream.
+    """
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        n = str(raw or "").strip()
+        if not n or n.lower() in seen:
+            continue
+        normalized.append(n)
+        seen.add(n.lower())
+    if not normalized:
+        raise ValueError("Choose at least one agent to recover.")
+
+    registry = load_gateway_registry()
+    recovered: list[dict] = []
+    already_present: list[str] = []
+    no_evidence: list[str] = []
+
+    for name in normalized:
+        if find_agent_entry(registry, name) is not None:
+            already_present.append(name)
+            continue
+        evidence = _read_recovery_evidence(name)
+        if evidence is None:
+            no_evidence.append(name)
+            continue
+        # Build minimal row — sourced fields only.
+        entry: dict = {
+            "name": name,
+            "agent_id": str(evidence.get("agent_id") or "").strip(),
+            "asset_id": str(evidence.get("asset_id") or evidence.get("agent_id") or "").strip(),
+            "install_id": str(evidence.get("install_id") or "").strip(),
+            "gateway_id": str(evidence.get("gateway_id") or "").strip(),
+            "runtime_type": str(evidence.get("runtime_type") or "").strip(),
+            "transport": str(evidence.get("transport") or "gateway").strip(),
+            "credential_source": str(evidence.get("credential_source") or "gateway").strip(),
+            "token_file": str(evidence.get("token_file") or "").strip(),
+            "space_id": str(evidence.get("space_id") or "").strip(),
+            "added_at": str(evidence.get("ts") or "").strip(),
+            "lifecycle_phase": "active",
+            "desired_state": "stopped",  # safe default — operator restarts deliberately
+            "drift_reason": "registry_row_recovered_from_evidence",
+        }
+        # Pick a sensible template_id from runtime_type; daemon hydrates from
+        # upstream on reconcile.
+        rt = entry["runtime_type"]
+        if rt == "claude_code_channel":
+            entry["template_id"] = "claude_code_channel"
+            entry["template_label"] = "Claude Code Channel"
+        elif rt == "hermes_sentinel":
+            entry["template_id"] = "hermes"
+            entry["template_label"] = "Hermes"
+        elif rt == "inbox":
+            entry["template_id"] = "pass_through"
+            entry["template_label"] = "Pass-through"
+        registry.setdefault("agents", []).append(entry)
+        recovered.append(entry)
+
+    save_gateway_registry(registry)
+    for entry in recovered:
+        record_gateway_activity(
+            "managed_agent_recovered",
+            entry=entry,
+            operator_action=True,
+            recovery_source="local_evidence",
+        )
+
+    return {
+        "count": len(recovered),
+        "already_present": already_present,
+        "no_evidence": no_evidence,
+        "recovered": [annotate_runtime_health(entry, registry=registry) for entry in recovered],
+    }
 
 
 def _build_session_client_silent() -> AxClient | None:
@@ -2940,10 +3168,28 @@ def _render_gateway_dashboard(payload: dict) -> Group:
     )
 
 
-def _spaces_payload() -> dict:
-    client = _load_gateway_user_client()
-    raw = client.list_spaces()
-    items = raw.get("spaces", raw) if isinstance(raw, dict) else raw
+def _spaces_cache_path() -> Path:
+    return gateway_dir() / "spaces.cache.json"
+
+
+def _load_spaces_cache() -> list[dict]:
+    try:
+        raw = json.loads(_spaces_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = raw.get("spaces") if isinstance(raw, dict) else raw
+    return [item for item in (items or []) if isinstance(item, dict)]
+
+
+def _save_spaces_cache(spaces: list[dict]) -> None:
+    payload = {"spaces": spaces, "saved_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        _spaces_cache_path().write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _normalize_spaces_response(items: list) -> list[dict]:
     spaces: list[dict] = []
     for item in items or []:
         if not isinstance(item, dict):
@@ -2958,12 +3204,50 @@ def _spaces_payload() -> dict:
                 "slug": str(item.get("slug") or "").strip() or None,
             }
         )
+    return spaces
+
+
+def _spaces_payload() -> dict:
+    """Return the spaces visible to the Gateway bootstrap session.
+
+    Always surfaces ``active_space_id`` / ``active_space_name`` from session
+    state, even when the upstream ``list_spaces`` call fails (e.g. paxai.app
+    rate-limits). Successful upstream responses are cached on disk so the UI
+    keeps a usable picker through transient outages.
+    """
     session = load_gateway_session() or {}
-    return {
+    active_space_id = str(session.get("space_id") or "").strip() or None
+    active_space_name = str(session.get("space_name") or "").strip() or None
+
+    error: str | None = None
+    cached = False
+    try:
+        client = _load_gateway_user_client()
+        raw = client.list_spaces()
+        items = raw.get("spaces", raw) if isinstance(raw, dict) else raw
+        spaces = _normalize_spaces_response(items or [])
+        if spaces:
+            _save_spaces_cache(spaces)
+    except Exception as exc:  # noqa: BLE001 — upstream errors are routine here
+        error = str(exc)
+        spaces = _load_spaces_cache()
+        cached = bool(spaces)
+
+    if active_space_id and not any(s["id"] == active_space_id for s in spaces):
+        spaces = [
+            {"id": active_space_id, "name": active_space_name or active_space_id, "slug": None},
+            *spaces,
+        ]
+
+    payload: dict = {
         "spaces": spaces,
-        "active_space_id": str(session.get("space_id") or "").strip() or None,
-        "active_space_name": str(session.get("space_name") or "").strip() or None,
+        "active_space_id": active_space_id,
+        "active_space_name": active_space_name,
     }
+    if error:
+        payload["error"] = error
+        payload["cached"] = cached
+    return payload
 
 
 def _move_managed_agent_space(name: str, new_space_id: str) -> dict:
@@ -4726,20 +5010,14 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                     _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
                 return
             if parsed.path == "/api/spaces":
-                try:
-                    _write_json_response(self, _spaces_payload())
-                except typer.Exit:
-                    _write_json_response(
-                        self,
-                        {"error": "Gateway is not logged in.", "spaces": [], "active_space_id": None},
-                        status=HTTPStatus.SERVICE_UNAVAILABLE,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    _write_json_response(
-                        self,
-                        {"error": str(exc), "spaces": [], "active_space_id": None},
-                        status=HTTPStatus.BAD_GATEWAY,
-                    )
+                payload = _spaces_payload()
+                # _spaces_payload never raises: upstream failures fall back to
+                # cached spaces + session-known active space. Return 200 as
+                # long as we have something usable; 503 only when there is
+                # neither cache nor session.
+                has_data = bool(payload.get("spaces") or payload.get("active_space_id"))
+                status = HTTPStatus.OK if has_data else HTTPStatus.SERVICE_UNAVAILABLE
+                _write_json_response(self, payload, status=status)
                 return
             if parsed.path.startswith("/api/agents/"):
                 name = unquote(parsed.path.removeprefix("/api/agents/")).strip()
@@ -4849,6 +5127,49 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                         if stored:
                             payload = _with_registry_refs(registry, annotate_runtime_health(stored, registry=registry))
                     _write_json_response(self, payload, status=HTTPStatus.CREATED)
+                    return
+                if parsed.path == "/api/agents/cleanup-hide":
+                    raw_names = body.get("names")
+                    if not isinstance(raw_names, list):
+                        _write_json_response(
+                            self,
+                            {"error": "names must be a list of managed agent names"},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    payload = _hide_managed_agents(
+                        [str(name or "").strip() for name in raw_names],
+                        reason=str(body.get("reason") or "operator_cleanup"),
+                    )
+                    _write_json_response(self, payload)
+                    return
+                if parsed.path == "/api/agents/cleanup-restore":
+                    raw_names = body.get("names")
+                    if not isinstance(raw_names, list):
+                        _write_json_response(
+                            self,
+                            {"error": "names must be a list of managed agent names"},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    payload = _restore_hidden_managed_agents([str(name or "").strip() for name in raw_names])
+                    _write_json_response(self, payload)
+                    return
+                if parsed.path == "/api/agents/recover":
+                    raw_names = body.get("names")
+                    if not isinstance(raw_names, list):
+                        _write_json_response(
+                            self,
+                            {"error": "names must be a list of managed agent names"},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    try:
+                        payload = _recover_managed_agents_from_evidence([str(name or "").strip() for name in raw_names])
+                    except ValueError as exc:
+                        _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    _write_json_response(self, payload)
                     return
                 if parsed.path == "/local/connect":
                     agent_name = str(body.get("agent_name") or body.get("name") or "").strip()
@@ -5336,6 +5657,48 @@ def current_gateway_space(as_json: bool = JSON_OPTION):
         return
     err_console.print(f"Gateway current space: {result.get('space_name') or result.get('space_id') or '-'}")
     err_console.print(f"  space_id = {result.get('space_id') or '-'}")
+
+
+@spaces_app.command("list")
+def list_gateway_spaces(as_json: bool = JSON_OPTION):
+    """List the spaces visible to the Gateway bootstrap session.
+
+    Falls back to the locally cached list when the upstream API is
+    unavailable (e.g. rate-limited), so the operator always sees something
+    actionable.
+    """
+    payload = _spaces_payload()
+    if as_json:
+        print_json(payload)
+        return
+
+    spaces = payload.get("spaces") or []
+    active_id = payload.get("active_space_id")
+    if not spaces:
+        err_console.print("[yellow]No spaces available.[/yellow]")
+        if payload.get("error"):
+            err_console.print(f"  error = {payload['error']}")
+        return
+
+    rows = []
+    for space in spaces:
+        sid = str(space.get("id") or "")
+        rows.append(
+            {
+                "current": "*" if sid and sid == active_id else "",
+                "name": str(space.get("name") or sid),
+                "space_id": sid,
+                "slug": str(space.get("slug") or "") or "-",
+            }
+        )
+    print_table(
+        ["", "Name", "Space ID", "Slug"],
+        rows,
+        keys=["current", "name", "space_id", "slug"],
+    )
+    if payload.get("error"):
+        marker = "cached" if payload.get("cached") else "session-only"
+        err_console.print(f"[dim]Upstream unavailable ({marker}): {payload['error']}[/dim]")
 
 
 @app.command("activity")
@@ -7203,6 +7566,46 @@ def restore_agent(
     for name in not_found:
         err_console.print(f"[red]Managed agent not found:[/red] {name}")
     if not restored and not_found:
+        raise typer.Exit(1)
+
+
+@agents_app.command("recover")
+def recover_agents(
+    names: list[str] = typer.Argument(..., help="One or more agent names whose registry rows were lost"),
+    as_json: bool = JSON_OPTION,
+):
+    """Recover registry rows from local evidence (token + activity log).
+
+    Use when a managed_agent_added event was recorded but the registry
+    row is missing — typically pre-race-fix damage. Reads the most
+    recent managed_agent_added event for each name from the activity
+    log, confirms the token file exists, and inserts a minimal row
+    with the verified fields. The daemon hydrates the rest from
+    upstream on the next reconcile pass.
+
+    Refuses to recover agents already present in the registry. Refuses
+    to recover agents lacking either the activity event or the token
+    file (we don't fabricate credentials).
+    """
+    try:
+        result = _recover_managed_agents_from_evidence(list(names))
+    except ValueError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    if as_json:
+        print_json(result)
+        if result["count"] == 0:
+            raise typer.Exit(1)
+        return
+    for entry in result.get("recovered", []):
+        err_console.print(f"[green]Recovered:[/green] @{entry.get('name')} (agent_id={entry.get('agent_id')})")
+    for name in result.get("already_present", []):
+        err_console.print(f"[yellow]Already present:[/yellow] @{name} (no recovery needed)")
+    for name in result.get("no_evidence", []):
+        err_console.print(
+            f"[red]No recovery evidence:[/red] @{name} (need both managed_agent_added activity + token file)"
+        )
+    if result["count"] == 0 and (result.get("no_evidence") or not result.get("already_present")):
         raise typer.Exit(1)
 
 

@@ -5160,6 +5160,215 @@ def test_status_payload_include_hidden_returns_all(monkeypatch, tmp_path):
     assert payload["summary"]["hidden_agents"] == 1
 
 
+def test_operator_cleanup_hides_selected_agents(monkeypatch, tmp_path):
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    registry = {
+        "agents": [
+            {
+                "name": "stale-one",
+                "agent_id": "agent-stale-one",
+                "template_id": "claude_code_channel",
+                "runtime_type": "claude_code_channel",
+                "desired_state": "running",
+                "effective_state": "error",
+            },
+            {
+                "name": "stale-two",
+                "agent_id": "agent-stale-two",
+                "template_id": "pass_through",
+                "runtime_type": "inbox",
+                "desired_state": "running",
+                "effective_state": "stale",
+            },
+            {
+                "name": "keeper",
+                "agent_id": "agent-keeper",
+                "template_id": "echo",
+                "runtime_type": "echo",
+                "desired_state": "running",
+                "effective_state": "running",
+            },
+        ]
+    }
+    gateway_core.save_gateway_registry(registry)
+
+    payload = gateway_cmd._hide_managed_agents(
+        ["stale-one", "stale-two"],
+        reason="operator_cleanup",
+    )
+
+    assert payload["count"] == 2
+    assert payload["missing"] == []
+    stored = {agent["name"]: agent for agent in gateway_core.load_gateway_registry()["agents"]}
+    assert stored["stale-one"]["lifecycle_phase"] == "hidden"
+    assert stored["stale-one"]["desired_state"] == "stopped"
+    assert stored["stale-one"]["hidden_reason"] == "operator_cleanup"
+    assert stored["stale-two"]["lifecycle_phase"] == "hidden"
+    assert stored["keeper"].get("lifecycle_phase", "active") == "active"
+
+    visible_payload = gateway_cmd._status_payload(activity_limit=0)
+    visible_names = [agent["name"] for agent in visible_payload["agents"]]
+    assert visible_names == ["keeper"]
+    assert visible_payload["summary"]["hidden_agents"] == 2
+    recent = gateway_core.load_recent_gateway_activity()
+    assert [event["event"] for event in recent].count("managed_agent_hidden") == 2
+
+
+def test_recover_managed_agents_from_evidence_restores_lost_row(monkeypatch, tmp_path):
+    """Pre-race-fix damage recovery: when a managed_agent_added activity
+    event exists locally but the registry row is missing (silent race
+    clobber), _recover_managed_agents_from_evidence reconstructs a
+    minimal row using only verified evidence — never fabricating
+    credentials.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    # Pre-condition: registry empty, but token file + managed_agent_added
+    # event exist locally — exactly the cc-backend / widget_smith state.
+    gateway_core.save_gateway_registry({"agents": []})
+
+    token_dir = gateway_core.agent_dir("ghost-agent")
+    token_dir.mkdir(parents=True, exist_ok=True)
+    (token_dir / "token").write_text("axp_a_ghost.evidence", encoding="utf-8")
+
+    gateway_core.record_gateway_activity(
+        "managed_agent_added",
+        agent_name="ghost-agent",
+        agent_id="agent-ghost-id",
+        asset_id="agent-ghost-id",
+        install_id="install-ghost",
+        gateway_id="gateway-host",
+        runtime_type="claude_code_channel",
+        transport="gateway",
+        space_id="49afd277-78d2-4a32-9858-3594cda684af",
+        token_file=str(token_dir / "token"),
+        credential_source="gateway",
+    )
+
+    payload = gateway_cmd._recover_managed_agents_from_evidence(["ghost-agent", "missing-no-evidence"])
+
+    assert payload["count"] == 1
+    assert payload["already_present"] == []
+    assert payload["no_evidence"] == ["missing-no-evidence"]
+
+    stored = gateway_core.load_gateway_registry()
+    row = next((a for a in stored["agents"] if a.get("name") == "ghost-agent"), None)
+    assert row is not None, "recovered row missing from registry"
+    assert row["agent_id"] == "agent-ghost-id"
+    assert row["install_id"] == "install-ghost"
+    assert row["runtime_type"] == "claude_code_channel"
+    assert row["template_id"] == "claude_code_channel"
+    assert row["space_id"] == "49afd277-78d2-4a32-9858-3594cda684af"
+    assert row["token_file"] == str(token_dir / "token")
+    assert row["lifecycle_phase"] == "active"
+    assert row["desired_state"] == "stopped"  # safe default — operator restarts deliberately
+    assert row["drift_reason"] == "registry_row_recovered_from_evidence"
+
+    # managed_agent_recovered activity event was recorded.
+    recent = gateway_core.load_recent_gateway_activity()
+    events = [e for e in recent if e.get("event") == "managed_agent_recovered"]
+    assert len(events) == 1
+    assert events[0].get("agent_name") == "ghost-agent"
+
+
+def test_recover_managed_agents_refuses_when_token_missing(monkeypatch, tmp_path):
+    """Recovery requires BOTH the activity event AND the token file.
+    Missing token → no recovery (we don't fabricate credentials).
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    gateway_core.save_gateway_registry({"agents": []})
+
+    # Activity event exists but no token file.
+    gateway_core.record_gateway_activity(
+        "managed_agent_added",
+        agent_name="no-token-agent",
+        agent_id="agent-id",
+        asset_id="agent-id",
+        install_id="install-id",
+        gateway_id="gateway-host",
+        runtime_type="echo",
+        transport="gateway",
+        space_id="space-1",
+        token_file="/tmp/nonexistent-recovery-token-path",
+        credential_source="gateway",
+    )
+
+    payload = gateway_cmd._recover_managed_agents_from_evidence(["no-token-agent"])
+    assert payload["count"] == 0
+    assert payload["no_evidence"] == ["no-token-agent"]
+
+
+def test_recover_managed_agents_skips_already_present_rows(monkeypatch, tmp_path):
+    """Idempotent: if a row already exists, recovery is a no-op for it."""
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    gateway_core.save_gateway_registry(
+        {"agents": [{"name": "already-there", "agent_id": "existing", "template_id": "echo"}]}
+    )
+
+    payload = gateway_cmd._recover_managed_agents_from_evidence(["already-there"])
+    assert payload["count"] == 0
+    assert payload["already_present"] == ["already-there"]
+    assert payload["no_evidence"] == []
+
+
+def test_operator_cleanup_restore_unhides_selected_agents(monkeypatch, tmp_path):
+    """Symmetric to hide: _restore_hidden_managed_agents clears the hidden
+    bookkeeping, restores desired_state from the captured before-hide value,
+    re-emits the row in default /api/status, and records a
+    managed_agent_unhidden activity event per restored row.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    registry = {
+        "agents": [
+            {
+                "name": "previously-hidden",
+                "agent_id": "agent-prev-hidden",
+                "template_id": "claude_code_channel",
+                "runtime_type": "claude_code_channel",
+                "lifecycle_phase": "hidden",
+                "desired_state": "stopped",
+                "desired_state_before_hide": "running",
+                "hidden_at": gateway_core._now_iso(),
+                "hidden_reason": "operator_cleanup",
+            },
+            {
+                "name": "active-keeper",
+                "agent_id": "agent-keeper",
+                "template_id": "echo",
+                "runtime_type": "echo",
+                "desired_state": "running",
+            },
+        ]
+    }
+    gateway_core.save_gateway_registry(registry)
+
+    # Restore one row plus name a non-existent and a non-hidden row to verify
+    # missing/not_hidden partitions.
+    payload = gateway_cmd._restore_hidden_managed_agents(
+        ["previously-hidden", "ghost", "active-keeper"]
+    )
+
+    assert payload["count"] == 1
+    assert payload["missing"] == ["ghost"]
+    assert payload["not_hidden"] == ["active-keeper"]
+
+    stored = {agent["name"]: agent for agent in gateway_core.load_gateway_registry()["agents"]}
+    restored = stored["previously-hidden"]
+    assert restored["lifecycle_phase"] == "active"
+    assert restored["desired_state"] == "running"  # restored from desired_state_before_hide
+    assert "desired_state_before_hide" not in restored
+    assert "hidden_at" not in restored
+    assert "hidden_reason" not in restored
+
+    # Restored row reappears in default /api/status agents list.
+    visible_payload = gateway_cmd._status_payload(activity_limit=0)
+    visible_names = sorted(agent["name"] for agent in visible_payload["agents"])
+    assert "previously-hidden" in visible_names
+    assert visible_payload["summary"]["hidden_agents"] == 0
+
+    recent = gateway_core.load_recent_gateway_activity()
+    assert [event["event"] for event in recent].count("managed_agent_unhidden") == 1
+
+
 def test_lifecycle_signal_sent_on_connected_to_stale(monkeypatch, tmp_path):
     _isolate_gateway_paths(monkeypatch, tmp_path)
     client = _RecordingHeartbeatClient()
@@ -5831,3 +6040,223 @@ def test_backend_agent_record_seeds_cache_on_successful_upstream(monkeypatch, tm
 
     cached = gateway_cmd._load_agents_cache()
     assert any(a.get("name") == "fresh_agent" for a in cached), "upstream success should seed cache"
+
+
+# ---------------------------------------------------------------------------
+# Spaces hygiene: registry repair, /api/spaces fallback, CLI list
+# ---------------------------------------------------------------------------
+
+
+_GOOD_SPACE_UUID = "49afd277-78d2-4a32-9858-3594cda684af"
+
+
+def test_reconcile_corrupt_space_ids_recovers_uuid_from_active_space():
+    registry = {
+        "agents": [
+            {
+                "name": "taskforge_backend",
+                "space_id": "madtank's Workspace",
+                "active_space_id": _GOOD_SPACE_UUID,
+                "active_space_name": "madtank's Workspace",
+                "default_space_id": _GOOD_SPACE_UUID,
+            }
+        ]
+    }
+    repaired = gateway_core.reconcile_corrupt_space_ids(registry)
+    assert repaired == 1
+    assert registry["agents"][0]["space_id"] == _GOOD_SPACE_UUID
+
+
+def test_reconcile_corrupt_space_ids_falls_back_to_allowed_spaces():
+    registry = {
+        "agents": [
+            {
+                "name": "x",
+                "space_id": "Workspace-Name",
+                "allowed_spaces": [{"space_id": _GOOD_SPACE_UUID, "name": "ws"}],
+            }
+        ]
+    }
+    assert gateway_core.reconcile_corrupt_space_ids(registry) == 1
+    assert registry["agents"][0]["space_id"] == _GOOD_SPACE_UUID
+
+
+def test_reconcile_corrupt_space_ids_idempotent_on_clean_registry():
+    registry = {
+        "agents": [
+            {"name": "a", "space_id": _GOOD_SPACE_UUID},
+            {"name": "b", "space_id": ""},  # empty is left alone
+            {"name": "c"},  # no space_id at all is left alone
+        ]
+    }
+    assert gateway_core.reconcile_corrupt_space_ids(registry) == 0
+    assert registry["agents"][0]["space_id"] == _GOOD_SPACE_UUID
+    assert registry["agents"][1]["space_id"] == ""
+    assert "space_id" not in registry["agents"][2]
+
+
+def test_reconcile_corrupt_space_ids_skips_when_no_uuid_anywhere():
+    registry = {
+        "agents": [
+            {"name": "lost", "space_id": "Some Name", "active_space_id": "Also Not A UUID"},
+        ]
+    }
+    # Nothing recoverable — leave the bad value in place rather than fabricate.
+    assert gateway_core.reconcile_corrupt_space_ids(registry) == 0
+    assert registry["agents"][0]["space_id"] == "Some Name"
+
+
+def test_load_gateway_registry_heals_corrupt_space_id_in_place(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_dir = gateway_core.gateway_dir()
+    gateway_dir.mkdir(parents=True, exist_ok=True)
+    raw = {
+        "version": 1,
+        "agents": [
+            {
+                "name": "taskforge_backend",
+                "space_id": "madtank's Workspace",
+                "active_space_id": _GOOD_SPACE_UUID,
+                "default_space_id": _GOOD_SPACE_UUID,
+            }
+        ],
+    }
+    gateway_core.registry_path().write_text(json.dumps(raw), encoding="utf-8")
+    loaded = gateway_core.load_gateway_registry()
+    assert loaded["agents"][0]["space_id"] == _GOOD_SPACE_UUID
+
+
+def test_resolve_gateway_agent_home_space_resolves_name_to_uuid(monkeypatch):
+    captured = {}
+
+    def fake_resolve(client, *, explicit):
+        captured["explicit"] = explicit
+        return _GOOD_SPACE_UUID
+
+    monkeypatch.setattr(gateway_cmd, "resolve_space_id", fake_resolve)
+
+    resolved = gateway_cmd._resolve_gateway_agent_home_space(
+        client=object(),
+        session={},
+        registry={"agents": []},
+        explicit_space_id="madtank's Workspace",
+    )
+    assert resolved == _GOOD_SPACE_UUID
+    assert captured["explicit"] == "madtank's Workspace"
+
+
+def test_resolve_gateway_agent_home_space_passthrough_for_uuid(monkeypatch):
+    def fake_resolve(*args, **kwargs):
+        raise AssertionError("UUID input should not require a backend round-trip")
+
+    monkeypatch.setattr(gateway_cmd, "resolve_space_id", fake_resolve)
+
+    resolved = gateway_cmd._resolve_gateway_agent_home_space(
+        client=object(),
+        session={},
+        registry={"agents": []},
+        explicit_space_id=_GOOD_SPACE_UUID,
+    )
+    assert resolved == _GOOD_SPACE_UUID
+
+
+def test_spaces_payload_returns_session_active_space_when_upstream_fails(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": _GOOD_SPACE_UUID,
+            "space_name": "madtank's Workspace",
+            "username": "madtank",
+        }
+    )
+
+    def fake_client_loader():
+        class Boom:
+            def list_spaces(self):
+                raise httpx.HTTPStatusError(
+                    "429 Too Many Requests",
+                    request=httpx.Request("GET", "https://paxai.app/api/v1/spaces"),
+                    response=httpx.Response(429),
+                )
+
+        return Boom()
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", fake_client_loader)
+
+    payload = gateway_cmd._spaces_payload()
+    assert payload["active_space_id"] == _GOOD_SPACE_UUID
+    assert payload["active_space_name"] == "madtank's Workspace"
+    # Active space surfaces in the spaces list even with no cache so the UI
+    # always has something to render.
+    assert any(s["id"] == _GOOD_SPACE_UUID for s in payload["spaces"])
+    assert "error" in payload
+
+
+def test_spaces_payload_uses_cached_spaces_after_upstream_failure(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": _GOOD_SPACE_UUID,
+            "space_name": "madtank's Workspace",
+        }
+    )
+
+    other_space = "78950af5-4d27-441b-9296-ec46de8ba35d"
+
+    class FirstClient:
+        def list_spaces(self):
+            return {
+                "spaces": [
+                    {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace"},
+                    {"id": other_space, "name": "Other Workspace"},
+                ]
+            }
+
+    class FailingClient:
+        def list_spaces(self):
+            raise RuntimeError("upstream rate limited")
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: FirstClient())
+    first = gateway_cmd._spaces_payload()
+    assert {s["id"] for s in first["spaces"]} == {_GOOD_SPACE_UUID, other_space}
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: FailingClient())
+    second = gateway_cmd._spaces_payload()
+    assert second.get("cached") is True
+    assert {s["id"] for s in second["spaces"]} == {_GOOD_SPACE_UUID, other_space}
+
+
+def test_gateway_spaces_list_command_renders_table(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": _GOOD_SPACE_UUID,
+            "space_name": "madtank's Workspace",
+        }
+    )
+
+    class StubClient:
+        def list_spaces(self):
+            return {
+                "spaces": [
+                    {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank"},
+                ]
+            }
+
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: StubClient())
+
+    result = runner.invoke(app, ["gateway", "spaces", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["active_space_id"] == _GOOD_SPACE_UUID
+    assert payload["spaces"][0]["id"] == _GOOD_SPACE_UUID
