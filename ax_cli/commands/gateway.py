@@ -1402,6 +1402,62 @@ def _hide_managed_agents(names: list[str], *, reason: str = "operator_cleanup") 
     }
 
 
+def _restore_hidden_managed_agents(names: list[str]) -> dict:
+    """Symmetric inverse of _hide_managed_agents.
+
+    Clears lifecycle_phase=hidden + hide bookkeeping, restores desired_state
+    to whatever the operator-driven hide had captured (desired_state_before_hide).
+    Refuses to restore agents that are not in the hidden phase — the
+    archived phase has its own restore path (PR #147), and "active" agents
+    don't need restoration.
+    """
+    normalized_names: list[str] = []
+    seen: set[str] = set()
+    for raw_name in names:
+        name = str(raw_name or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        normalized_names.append(name)
+        seen.add(key)
+    if not normalized_names:
+        raise ValueError("Choose at least one managed agent to restore.")
+
+    registry = load_gateway_registry()
+    restored: list[dict] = []
+    missing: list[str] = []
+    not_hidden: list[str] = []
+    for name in normalized_names:
+        entry = find_agent_entry(registry, name)
+        if not entry:
+            missing.append(name)
+            continue
+        if str(entry.get("lifecycle_phase") or "") != "hidden":
+            not_hidden.append(name)
+            continue
+        prior = str(entry.get("desired_state_before_hide") or "").strip() or "running"
+        entry["lifecycle_phase"] = "active"
+        entry["desired_state"] = prior
+        entry.pop("desired_state_before_hide", None)
+        entry.pop("hidden_at", None)
+        entry.pop("hidden_reason", None)
+        restored.append(entry)
+
+    save_gateway_registry(registry)
+    for entry in restored:
+        record_gateway_activity(
+            "managed_agent_unhidden",
+            entry=entry,
+            operator_action=True,
+        )
+    return {
+        "count": len(restored),
+        "missing": missing,
+        "not_hidden": not_hidden,
+        "restored": [annotate_runtime_health(entry, registry=registry) for entry in restored],
+    }
+
+
 def _build_session_client_silent() -> AxClient | None:
     """Build a user-PAT session client without raising. Returns None when
     the gateway is not logged in or the session token is missing/invalid.
@@ -4909,6 +4965,18 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                         [str(name or "").strip() for name in raw_names],
                         reason=str(body.get("reason") or "operator_cleanup"),
                     )
+                    _write_json_response(self, payload)
+                    return
+                if parsed.path == "/api/agents/cleanup-restore":
+                    raw_names = body.get("names")
+                    if not isinstance(raw_names, list):
+                        _write_json_response(
+                            self,
+                            {"error": "names must be a list of managed agent names"},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    payload = _restore_hidden_managed_agents([str(name or "").strip() for name in raw_names])
                     _write_json_response(self, payload)
                     return
                 if parsed.path == "/local/connect":

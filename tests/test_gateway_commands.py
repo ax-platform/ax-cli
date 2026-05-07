@@ -5214,6 +5214,65 @@ def test_operator_cleanup_hides_selected_agents(monkeypatch, tmp_path):
     assert [event["event"] for event in recent].count("managed_agent_hidden") == 2
 
 
+def test_operator_cleanup_restore_unhides_selected_agents(monkeypatch, tmp_path):
+    """Symmetric to hide: _restore_hidden_managed_agents clears the hidden
+    bookkeeping, restores desired_state from the captured before-hide value,
+    re-emits the row in default /api/status, and records a
+    managed_agent_unhidden activity event per restored row.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    registry = {
+        "agents": [
+            {
+                "name": "previously-hidden",
+                "agent_id": "agent-prev-hidden",
+                "template_id": "claude_code_channel",
+                "runtime_type": "claude_code_channel",
+                "lifecycle_phase": "hidden",
+                "desired_state": "stopped",
+                "desired_state_before_hide": "running",
+                "hidden_at": gateway_core._now_iso(),
+                "hidden_reason": "operator_cleanup",
+            },
+            {
+                "name": "active-keeper",
+                "agent_id": "agent-keeper",
+                "template_id": "echo",
+                "runtime_type": "echo",
+                "desired_state": "running",
+            },
+        ]
+    }
+    gateway_core.save_gateway_registry(registry)
+
+    # Restore one row plus name a non-existent and a non-hidden row to verify
+    # missing/not_hidden partitions.
+    payload = gateway_cmd._restore_hidden_managed_agents(
+        ["previously-hidden", "ghost", "active-keeper"]
+    )
+
+    assert payload["count"] == 1
+    assert payload["missing"] == ["ghost"]
+    assert payload["not_hidden"] == ["active-keeper"]
+
+    stored = {agent["name"]: agent for agent in gateway_core.load_gateway_registry()["agents"]}
+    restored = stored["previously-hidden"]
+    assert restored["lifecycle_phase"] == "active"
+    assert restored["desired_state"] == "running"  # restored from desired_state_before_hide
+    assert "desired_state_before_hide" not in restored
+    assert "hidden_at" not in restored
+    assert "hidden_reason" not in restored
+
+    # Restored row reappears in default /api/status agents list.
+    visible_payload = gateway_cmd._status_payload(activity_limit=0)
+    visible_names = sorted(agent["name"] for agent in visible_payload["agents"])
+    assert "previously-hidden" in visible_names
+    assert visible_payload["summary"]["hidden_agents"] == 0
+
+    recent = gateway_core.load_recent_gateway_activity()
+    assert [event["event"] for event in recent].count("managed_agent_unhidden") == 1
+
+
 def test_lifecycle_signal_sent_on_connected_to_stale(monkeypatch, tmp_path):
     _isolate_gateway_paths(monkeypatch, tmp_path)
     client = _RecordingHeartbeatClient()
