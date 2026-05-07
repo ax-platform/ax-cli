@@ -1450,6 +1450,62 @@ def _send_from_managed_agent(
     return {"agent": entry.get("name"), "message": payload, "content": message_content}
 
 
+def _inbox_for_managed_agent(
+    *,
+    name: str,
+    limit: int = 20,
+    channel: str = "main",
+    space_id: str | None = None,
+    unread_only: bool = False,
+    mark_read: bool = False,
+) -> dict:
+    """Read a Gateway-managed agent's inbox using its Gateway-loaded credentials.
+
+    Mirrors the read side of ``_send_from_managed_agent``. Works uniformly
+    across Live Listener (claude_code_channel, hermes) and pass-through
+    templates so the operator surface is the same regardless of how the
+    agent is wired — that's the P1 the original task (``70f08787``) calls
+    out: a Live Listener seat without a channel MCP attached has no way to
+    peek its own inbox today.
+
+    Defaults are deliberately peek-friendly (``unread_only=False``,
+    ``mark_read=False``) because the typical caller is an operator
+    inspecting on the agent's behalf, not the agent consuming work.
+    """
+    registry = load_gateway_registry()
+    entry = find_agent_entry(registry, name)
+    if not entry:
+        raise LookupError(f"Managed agent not found: {name}")
+    selected_space = str(space_id or entry.get("space_id") or "").strip() or None
+    if not selected_space:
+        raise ValueError(f"Managed agent is missing a space id: @{name}")
+    client = _load_managed_agent_client(entry)
+    data = client.list_messages(
+        limit=limit,
+        channel=channel,
+        space_id=selected_space,
+        agent_id=str(entry.get("agent_id") or "") or None,
+        unread_only=unread_only,
+        mark_read=mark_read,
+    )
+    messages = data if isinstance(data, list) else data.get("messages", [])
+    record_gateway_activity(
+        "managed_inbox_polled",
+        entry=entry,
+        message_count=len(messages),
+        mark_read=mark_read,
+        space_id=selected_space,
+    )
+    return {
+        "agent": entry.get("name"),
+        "agent_id": entry.get("agent_id"),
+        "space_id": selected_space,
+        "messages": messages,
+        "unread_count": data.get("unread_count") if isinstance(data, dict) else None,
+        "marked_read_count": data.get("marked_read_count") if isinstance(data, dict) else None,
+    }
+
+
 def _gateway_test_sender_name(space_id: str) -> str:
     normalized = "".join(ch for ch in str(space_id or "") if ch.isalnum()).lower()
     suffix = normalized[:8] or "default"
@@ -4539,6 +4595,32 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                         status=HTTPStatus.BAD_GATEWAY,
                     )
                 return
+            if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/inbox"):
+                name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/inbox")).strip()
+                query = parse_qs(parsed.query)
+
+                def _flag(values, default=False):
+                    if not values:
+                        return default
+                    return str(values[0]).lower() in {"1", "true", "yes", "on"}
+
+                try:
+                    inbox_payload = _inbox_for_managed_agent(
+                        name=name,
+                        limit=int((query.get("limit") or ["20"])[0]),
+                        channel=(query.get("channel") or ["main"])[0],
+                        space_id=(query.get("space_id") or [None])[0],
+                        unread_only=_flag(query.get("unread_only")),
+                        mark_read=_flag(query.get("mark_read")),
+                    )
+                except LookupError as exc:
+                    _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                _write_json_response(self, inbox_payload)
+                return
             if parsed.path.startswith("/api/agents/"):
                 name = unquote(parsed.path.removeprefix("/api/agents/")).strip()
                 payload = _agent_detail_payload(name, activity_limit=activity_limit)
@@ -6726,6 +6808,67 @@ def send_as_agent(
     if isinstance(result["message"], dict) and result["message"].get("id"):
         err_console.print(f"  id = {result['message']['id']}")
     err_console.print(f"  content = {result['content']}")
+
+
+@agents_app.command("inbox")
+def inbox_for_agent(
+    name: str = typer.Argument(..., help="Managed agent name"),
+    limit: int = typer.Option(20, "--limit", min=1, max=200, help="Max messages to return"),
+    channel: str = typer.Option("main", "--channel", help="Message channel"),
+    space_id: str = typer.Option(None, "--space-id", help="Override the agent's home space"),
+    unread_only: bool = typer.Option(
+        False,
+        "--unread-only/--all",
+        help="Filter to unread messages only (default: show recent regardless of read state)",
+    ),
+    mark_read: bool = typer.Option(
+        False,
+        "--mark-read/--no-mark-read",
+        help=(
+            "Mark returned messages as read. Defaults to peek (no-mark-read) so an "
+            "operator inspecting on an agent's behalf does not silently consume work."
+        ),
+    ),
+    as_json: bool = JSON_OPTION,
+):
+    """Read a Gateway-managed agent's recent inbox.
+
+    Works for both Live Listeners (claude_code_channel, hermes) and pass-through
+    agents — uses the agent's Gateway-loaded credentials, so no PAT is exposed
+    to the caller. Pairs with `ax gateway agents send` for a uniform read/write
+    surface from any operator seat without needing the channel MCP attached.
+    """
+    try:
+        result = _inbox_for_managed_agent(
+            name=name,
+            limit=limit,
+            channel=channel,
+            space_id=space_id,
+            unread_only=unread_only,
+            mark_read=mark_read,
+        )
+    except LookupError:
+        err_console.print(f"[red]Managed agent not found:[/red] {name}")
+        raise typer.Exit(1)
+    except ValueError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    if as_json:
+        print_json(result)
+        return
+    messages = result.get("messages") or []
+    console.print(f"[bold]inbox[/bold] @{result.get('agent')}: {len(messages)} message(s)")
+    unread = result.get("unread_count")
+    if unread is not None:
+        console.print(f"  [dim]unread_count = {unread}[/dim]")
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        created = str(message.get("created_at") or "")
+        author = str(message.get("display_name") or message.get("agent_name") or message.get("sender") or "-")
+        content = str(message.get("content") or "").replace("\n", " ")
+        console.print(f"  {created} {author}: {content[:160]}")
 
 
 @agents_app.command("start")

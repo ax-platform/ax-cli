@@ -319,6 +319,7 @@ class _FakeManagedSendClient:
         self.token = kwargs["token"]
         self.agent_name = kwargs.get("agent_name")
         self.agent_id = kwargs.get("agent_id")
+        self.list_messages_calls: list[dict] = []
 
     def send_message(self, space_id, content, *, agent_id=None, parent_id=None, metadata=None):
         return {
@@ -330,6 +331,45 @@ class _FakeManagedSendClient:
                 "parent_id": parent_id,
                 "metadata": metadata,
             }
+        }
+
+    def list_messages(
+        self,
+        *,
+        limit=20,
+        channel="main",
+        space_id=None,
+        agent_id=None,
+        unread_only=False,
+        mark_read=False,
+    ):
+        self.list_messages_calls.append(
+            {
+                "limit": limit,
+                "channel": channel,
+                "space_id": space_id,
+                "agent_id": agent_id,
+                "unread_only": unread_only,
+                "mark_read": mark_read,
+            }
+        )
+        return {
+            "messages": [
+                {
+                    "id": "msg-1",
+                    "created_at": "2026-05-06T10:00:00Z",
+                    "display_name": "operator",
+                    "content": "first inbound",
+                },
+                {
+                    "id": "msg-2",
+                    "created_at": "2026-05-06T10:01:00Z",
+                    "display_name": "@nemotron",
+                    "content": "second inbound",
+                },
+            ],
+            "unread_count": 2,
+            "marked_read_count": 2 if mark_read else 0,
         }
 
 
@@ -3954,6 +3994,136 @@ def test_gateway_agents_send_blocks_identity_mismatch(monkeypatch, tmp_path):
 
     assert result.exit_code == 1, result.output
     assert "identity_mismatch" in result.output.lower() or "mismatched acting identity" in result.output.lower()
+
+
+def _seed_managed_inbox_agent(tmp_path, monkeypatch, *, agent_name="cli_god"):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "codex",
+        }
+    )
+    token_file = tmp_path / f"{agent_name}.token"
+    token_file.write_text("axp_a_agent.secret")
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": agent_name,
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "claude_code_channel",
+            "template_id": "claude_code_channel",
+            "desired_state": "running",
+            "effective_state": "running",
+            "token_file": str(token_file),
+            "transport": "gateway",
+            "credential_source": "gateway",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+
+def test_gateway_agents_inbox_returns_messages_for_managed_agent(monkeypatch, tmp_path):
+    """ax-cli-dev 70f08787: a Live Listener seat must be able to peek its own inbox
+    through Gateway with no PAT exposed to the caller."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "inbox", "cli_god", "--limit", "20", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["agent"] == "cli_god"
+    assert payload["agent_id"] == "agent-1"
+    assert payload["space_id"] == "space-1"
+    assert payload["unread_count"] == 2
+    # Default --no-mark-read so peek does not consume the agent's queue.
+    assert payload["marked_read_count"] == 0
+    assert [m["id"] for m in payload["messages"]] == ["msg-1", "msg-2"]
+    recent = gateway_core.load_recent_gateway_activity()
+    assert recent[-1]["event"] == "managed_inbox_polled"
+
+
+def test_gateway_agents_inbox_human_output_prints_message_table(monkeypatch, tmp_path):
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    result = runner.invoke(app, ["gateway", "agents", "inbox", "cli_god"])
+
+    assert result.exit_code == 0, result.output
+    assert "@cli_god" in result.output
+    assert "first inbound" in result.output
+    assert "second inbound" in result.output
+    assert "unread_count = 2" in result.output
+
+
+def test_gateway_agents_inbox_mark_read_flag_propagates(monkeypatch, tmp_path):
+    """--mark-read must reach client.list_messages so the operator can opt in
+    to consuming the agent's queue when that's the explicit intent."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    captured: list[_FakeManagedSendClient] = []
+
+    class _RecordingClient(_FakeManagedSendClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            captured.append(self)
+
+    monkeypatch.setattr(gateway_cmd, "AxClient", _RecordingClient)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "inbox", "cli_god", "--mark-read", "--unread-only", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured, "fake client was never instantiated"
+    call = captured[-1].list_messages_calls[-1]
+    assert call["mark_read"] is True
+    assert call["unread_only"] is True
+    assert call["space_id"] == "space-1"
+    assert call["agent_id"] == "agent-1"
+
+
+def test_gateway_agents_inbox_errors_when_agent_missing(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "codex",
+        }
+    )
+    # Empty registry — no managed agent named "ghost".
+
+    result = runner.invoke(app, ["gateway", "agents", "inbox", "ghost"])
+
+    assert result.exit_code == 1
+    assert "Managed agent not found" in result.output
+    assert "ghost" in result.output
+
+
+def test_gateway_agents_inbox_helper_invocable_from_http_route(monkeypatch, tmp_path):
+    """The helper that powers the CLI must be callable in-process so the
+    /api/agents/<name>/inbox HTTP route can reuse it. Smoke-test the helper
+    directly to lock in that contract for the web UI / future remote callers."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    payload = gateway_cmd._inbox_for_managed_agent(name="cli_god", limit=5)
+
+    assert payload["agent"] == "cli_god"
+    assert payload["space_id"] == "space-1"
+    assert len(payload["messages"]) == 2
 
 
 def test_gateway_agents_test_sends_gateway_authored_probe(monkeypatch, tmp_path):
