@@ -10,6 +10,7 @@ the agent operates — never shared via ~/.ax/ unless explicitly requested.
 
 import os
 import re
+import sys
 import tomllib  # stdlib 3.11+
 from pathlib import Path
 from urllib.parse import urlparse
@@ -1035,7 +1036,15 @@ def _save_config(cfg: dict, *, local: bool = True) -> None:
 
 
 def _check_config_permissions() -> None:
-    """AUTH-SPEC-001 §13: Refuse PAT files with permissions broader than 0600."""
+    """AUTH-SPEC-001 §13: Refuse PAT files with permissions broader than 0600.
+
+    Skipped on Windows: NTFS uses ACLs, not POSIX mode bits, and
+    ``stat().st_mode`` always reports 0o666/0o644 there. The check would
+    fire on every CLI invocation with no way for the user to satisfy it.
+    Windows users should restrict access via ``icacls`` if needed.
+    """
+    if sys.platform == "win32":
+        return
     for config_dir_fn in (_local_config_dir, _global_config_dir):
         try:
             d = config_dir_fn() if callable(config_dir_fn) else config_dir_fn
@@ -1045,8 +1054,6 @@ def _check_config_permissions() -> None:
             if cf.exists():
                 mode = cf.stat().st_mode & 0o777
                 if mode > 0o600:
-                    import sys
-
                     print(
                         f"WARNING: {cf} has permissions {oct(mode)} — should be 0600. Run: chmod 600 {cf}",
                         file=sys.stderr,

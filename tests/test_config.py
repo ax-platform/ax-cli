@@ -1,6 +1,7 @@
 """Tests for config resolution — the cascade that burned us (2026-04-05)."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from click.exceptions import Exit
 
 from ax_cli import config as config_module
 from ax_cli.config import (
+    _check_config_permissions,
     _find_project_root,
     _global_config_dir,
     _load_config,
@@ -691,6 +693,35 @@ class TestResolveToken:
 
         assert resolve_user_token() == "axp_u_dev.secret"
         assert resolve_user_base_url() == "https://dev.paxai.app"
+
+
+class TestCheckConfigPermissions:
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission semantics")
+    def test_warns_on_world_readable_config(self, tmp_path, monkeypatch, capsys):
+        cf = tmp_path / "config.toml"
+        cf.write_text('token = "axp_u_x.y"\n')
+        cf.chmod(0o644)
+        monkeypatch.setattr(config_module, "_local_config_dir", lambda: tmp_path)
+        monkeypatch.setattr(config_module, "_global_config_dir", lambda: tmp_path / "nope")
+
+        _check_config_permissions()
+
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "0o644" in err
+
+    def test_skipped_on_windows(self, tmp_path, monkeypatch, capsys):
+        cf = tmp_path / "config.toml"
+        cf.write_text('token = "axp_u_x.y"\n')
+        if sys.platform != "win32":
+            cf.chmod(0o644)
+        monkeypatch.setattr(config_module, "_local_config_dir", lambda: tmp_path)
+        monkeypatch.setattr(config_module, "_global_config_dir", lambda: tmp_path / "nope")
+        monkeypatch.setattr(config_module.sys, "platform", "win32")
+
+        _check_config_permissions()
+
+        assert capsys.readouterr().err == ""
 
 
 class TestResolveBaseUrl:
