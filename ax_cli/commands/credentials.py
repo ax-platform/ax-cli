@@ -7,7 +7,7 @@ All operations are API-first — same as what the UI does.
 import httpx
 import typer
 
-from ..config import get_client
+from ..config import get_authoring_client
 from ..output import EXIT_NOT_OK, JSON_OPTION, console, handle_error, print_json, print_table
 
 app = typer.Typer(name="credentials", help="Credential management (PATs, enrollment tokens)", no_args_is_help=True)
@@ -99,7 +99,7 @@ def issue_agent_pat(
         ax credentials issue-agent-pat my-bot --audience mcp
         ax credentials issue-agent-pat my-bot --name "prod-key" --expires 30 --audience both
     """
-    client = get_client()
+    client = get_authoring_client()
 
     # Resolve agent name to ID if needed
     import re
@@ -154,7 +154,7 @@ def issue_enrollment(
 
     The agent is created and bound automatically.
     """
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.mgmt_issue_enrollment(
             name=name,
@@ -187,7 +187,7 @@ def revoke(
         if not confirm:
             raise typer.Abort()
 
-    client = get_client()
+    client = get_authoring_client()
     try:
         client.mgmt_revoke_credential(credential_id)
     except httpx.HTTPStatusError as e:
@@ -201,7 +201,7 @@ def audit(
     strict: bool = typer.Option(False, "--strict", help="Exit non-zero when any agent has more than two active PATs"),
 ):
     """Audit active agent PAT counts without minting or revoking credentials."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         creds = client.mgmt_list_credentials()
     except httpx.HTTPStatusError as e:
@@ -241,7 +241,7 @@ def audit(
 @app.command("list")
 def list_credentials(as_json: bool = JSON_OPTION):
     """List all credentials you own."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         creds = client.mgmt_list_credentials()
     except httpx.HTTPStatusError as e:

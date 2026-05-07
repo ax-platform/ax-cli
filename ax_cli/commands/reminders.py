@@ -18,7 +18,7 @@ from typing import Any, Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_agent_name, resolve_space_id
+from ..config import get_authoring_client, resolve_agent_name, resolve_space_id
 from ..output import JSON_OPTION, console, print_json, print_table
 from .alerts import (
     _build_alert_metadata,
@@ -218,7 +218,7 @@ def add(
         resolved_space = space_id
     else:
         try:
-            client = get_client()
+            client = get_authoring_client()
             resolved_space = resolve_space_id(client, explicit=None)
         except Exception as exc:
             typer.echo(
@@ -586,7 +586,7 @@ def run(
 
     path = _policy_file(policy_file)
     all_results: list[dict[str, Any]] = []
-    client = get_client()
+    client = get_authoring_client()
 
     while True:
         store = _load_store(path)
@@ -673,7 +673,7 @@ def run(
 def _probe_online(timeout: float = 2.0) -> tuple[bool, str | None]:
     """Cheap online probe. Returns (is_online, reason_if_offline)."""
     try:
-        client = get_client()
+        client = get_authoring_client()
     except Exception as exc:
         return False, f"client unavailable: {exc}"
     base = getattr(client, "_base_url", None) or getattr(client, "base_url", None)
@@ -999,7 +999,7 @@ def drafts_send(
     path = _policy_file(policy_file)
     store = _load_store(path)
     draft = _find_draft(store, draft_id)
-    client = get_client()
+    client = get_authoring_client()
     try:
         result = client.send_message(
             str(draft.get("space_id")),

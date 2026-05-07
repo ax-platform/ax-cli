@@ -10,7 +10,7 @@ from urllib.parse import urljoin
 import httpx
 import typer
 
-from ..config import get_client, resolve_gateway_config, resolve_space_id
+from ..config import get_authoring_client, resolve_gateway_config, resolve_space_id
 from ..context_keys import build_upload_context_key
 from ..output import JSON_OPTION, handle_error, mention_prefix, print_json, print_kv, print_table
 
@@ -189,7 +189,7 @@ def _load_context_artifact(
 ) -> dict:
     import hashlib
 
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
 
     data = client.get_context(key, space_id=sid)
@@ -249,7 +249,7 @@ def upload_file(
         ax context upload-file ./arch.png --key infra-diagram --vault
         ax context upload-file ./data.csv --ttl 3600 --mention @demo-agent
     """
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
 
     # Upload the file
@@ -351,7 +351,7 @@ def fetch_url(
     import json
     from urllib.parse import urlparse
 
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
 
     # Derive a default key from the URL
@@ -473,7 +473,7 @@ def promote_ctx(
     Forward-compat: when backend extends the artifact_type enum or adds
     additional promote options, --artifact-type passes through unchanged.
     """
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
     try:
         result = client.promote_context(sid, key, artifact_type=artifact_type, agent_id=agent_id)
@@ -497,7 +497,7 @@ def set_ctx(
     as_json: bool = JSON_OPTION,
 ):
     """Set a key-value pair in ephemeral context."""
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
     try:
         data = client.set_context(sid, key, value, ttl=ttl)
@@ -535,7 +535,7 @@ def get_ctx(
             print_kv(data)
         return
 
-    client = get_client()
+    client = get_authoring_client()
     sid = _optional_space_id(client, space_id)
     try:
         data = client.get_context(key, space_id=sid)
@@ -565,7 +565,7 @@ def list_ctx(
             space_id=space_id,
         )
     else:
-        client = get_client()
+        client = get_authoring_client()
         sid = _optional_space_id(client, space_id)
         try:
             data = client.list_context(prefix=prefix, space_id=sid)
@@ -604,7 +604,7 @@ def delete_ctx(
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
 ):
     """Delete a context entry."""
-    client = get_client()
+    client = get_authoring_client()
     sid = _optional_space_id(client, space_id)
     try:
         client.delete_context(key, space_id=sid)
@@ -620,7 +620,7 @@ def download_file(
     space_id: Optional[str] = typer.Option(None, "--space-id", help="Override default space"),
 ):
     """Download a file from context to local disk."""
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
 
     try:

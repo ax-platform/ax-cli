@@ -39,7 +39,7 @@ class _FakeClient:
 
 
 def _install(monkeypatch, client):
-    monkeypatch.setattr("ax_cli.commands.context.get_client", lambda: client)
+    monkeypatch.setattr("ax_cli.commands.context.get_authoring_client", lambda: client)
     monkeypatch.setattr(
         "ax_cli.commands.context.resolve_space_id",
         lambda c, explicit=None: explicit or "space-default",

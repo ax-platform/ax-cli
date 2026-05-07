@@ -9,7 +9,7 @@ from typing import Any, Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_space_id
+from ..config import get_authoring_client, resolve_space_id
 from ..output import JSON_OPTION, console, handle_error, mention_prefix, print_json, print_table
 
 app = typer.Typer(name="apps", help="MCP app signal adapter", no_args_is_help=True)
@@ -411,7 +411,7 @@ def signal(
         typer.echo(f"Error: unknown app '{app_name}'. Known apps: {choices}", err=True)
         raise typer.Exit(1)
 
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
     resolved_title = title or spec["title"]
     resolved_action = "get" if app_key == "context" and context_key and action == "list" else action

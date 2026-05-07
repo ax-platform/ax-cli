@@ -5,7 +5,7 @@ from typing import Optional
 import httpx
 import typer
 
-from ..config import get_client
+from ..config import get_authoring_client
 from ..output import JSON_OPTION, handle_error, print_json, print_table
 
 app = typer.Typer(name="keys", help="API key management", no_args_is_help=True)
@@ -20,7 +20,7 @@ def create(
     as_json: bool = JSON_OPTION,
 ):
     """Create a new API key."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.create_key(name, allowed_agent_ids=agent_id or None)
     except httpx.HTTPStatusError as e:
@@ -38,7 +38,7 @@ def create(
 @app.command("list")
 def list_keys(as_json: bool = JSON_OPTION):
     """List all API keys."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.list_keys()
     except httpx.HTTPStatusError as e:
@@ -57,7 +57,7 @@ def list_keys(as_json: bool = JSON_OPTION):
 @app.command("revoke")
 def revoke(credential_id: str = typer.Argument(..., help="Credential ID to revoke")):
     """Revoke an API key."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         client.revoke_key(credential_id)
     except httpx.HTTPStatusError as e:
@@ -71,7 +71,7 @@ def rotate(
     as_json: bool = JSON_OPTION,
 ):
     """Rotate an API key — issues new token, revokes old."""
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.rotate_key(credential_id)
     except httpx.HTTPStatusError as e:

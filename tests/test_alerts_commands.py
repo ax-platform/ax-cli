@@ -99,7 +99,7 @@ class _FakeClient:
 
 
 def _install_fake_client(monkeypatch, client: _FakeClient) -> None:
-    monkeypatch.setattr("ax_cli.commands.alerts.get_client", lambda: client)
+    monkeypatch.setattr("ax_cli.commands.alerts.get_authoring_client", lambda: client)
     monkeypatch.setattr(
         "ax_cli.commands.alerts.resolve_space_id",
         lambda _client, *, explicit=None: "space-abc",

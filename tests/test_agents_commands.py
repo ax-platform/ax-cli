@@ -24,7 +24,7 @@ def test_agents_list_surfaces_control_state(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["agents", "list"])
@@ -61,7 +61,7 @@ def test_agents_ping_does_not_send_when_control_blocks_delivery(monkeypatch):
             calls["sent"] = True
             return {"message": {"id": "msg-1"}}
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["agents", "ping", "aX", "--json"])
@@ -100,7 +100,7 @@ def test_agents_ping_classifies_reply_as_event_listener(monkeypatch):
         calls["wait"] = kwargs
         return {"id": "reply-1", "content": f"received {kwargs['token']}", "display_name": "demo-agent"}
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.agents.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr("ax_cli.commands.agents._wait_for_handoff_reply", fake_wait)
@@ -135,7 +135,7 @@ def test_agents_ping_classifies_timeout_as_unknown(monkeypatch):
         def send_message(self, space_id, content):
             return {"message": {"id": "msg-1"}}
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.agents.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr("ax_cli.commands.agents._wait_for_handoff_reply", lambda client, **kwargs: None)
@@ -153,7 +153,7 @@ def test_agents_ping_unknown_agent_fails(monkeypatch):
         def list_agents(self, *, space_id=None, limit=None):
             return {"agents": [{"id": "agent-1", "name": "demo-agent"}]}
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["agents", "ping", "missing"])
@@ -194,7 +194,7 @@ def test_agents_discover_infers_roles_without_ping(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.agents.resolve_agent_name", lambda client=None: "ChatGPT")
 
@@ -230,7 +230,7 @@ def test_agents_discover_marks_control_blocked_agents_without_ping(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.agents.resolve_agent_name", lambda client=None: "ChatGPT")
 
@@ -274,7 +274,7 @@ def test_agents_discover_with_ping_classifies_listener(monkeypatch):
         calls["wait"] = kwargs
         return {"id": "reply-1", "content": kwargs["token"], "display_name": "backend_sentinel"}
 
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.agents.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr("ax_cli.commands.agents._wait_for_handoff_reply", fake_wait)

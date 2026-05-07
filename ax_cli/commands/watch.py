@@ -25,7 +25,7 @@ from typing import Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_agent_name, resolve_space_id
+from ..config import get_authoring_client, resolve_agent_name, resolve_space_id
 from ..output import console
 
 app = typer.Typer(name="watch", help="Wait for messages matching a condition", no_args_is_help=False)
@@ -220,7 +220,7 @@ def watch(
 
     Exit codes: 0 = condition met, 1 = timeout, 2 = error
     """
-    client = get_client()
+    client = get_authoring_client()
     agent_name = resolve_agent_name()
     space_id = resolve_space_id(client)
 

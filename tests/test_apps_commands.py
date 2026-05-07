@@ -55,7 +55,7 @@ def test_apps_signal_writes_context_widget_metadata(monkeypatch):
             }
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.apps.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.apps.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.apps.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -149,7 +149,7 @@ def test_apps_signal_flattens_wrapped_context_payload(monkeypatch):
             calls["content"] = content
             return {"id": "msg-2"}
 
-    monkeypatch.setattr("ax_cli.commands.apps.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.apps.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.apps.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -221,7 +221,7 @@ def test_apps_signal_whoami_builds_identity_widget_payload(monkeypatch):
             }
             return {"id": "msg-identity"}
 
-    monkeypatch.setattr("ax_cli.commands.apps.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.apps.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.apps.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -299,7 +299,7 @@ def test_apps_signal_agents_hydrates_dashboard_payload(monkeypatch):
             }
             return {"id": "msg-agents"}
 
-    monkeypatch.setattr("ax_cli.commands.apps.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.apps.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.apps.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["apps", "signal", "agents", "--summary", "Available agents", "--json"])
@@ -360,7 +360,7 @@ def test_apps_signal_spaces_hydrates_navigator_payload(monkeypatch):
             }
             return {"id": "msg-spaces"}
 
-    monkeypatch.setattr("ax_cli.commands.apps.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.apps.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.apps.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["apps", "signal", "spaces", "--summary", "Spaces ready", "--json"])
@@ -414,7 +414,7 @@ def test_apps_signal_tasks_hydrates_board_payload(monkeypatch):
             }
             return {"id": "msg-tasks"}
 
-    monkeypatch.setattr("ax_cli.commands.apps.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.apps.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.apps.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(app, ["apps", "signal", "tasks", "--summary", "Task board ready", "--json"])

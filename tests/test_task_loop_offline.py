@@ -30,7 +30,7 @@ def test_add_works_fully_offline_with_explicit_space_id(monkeypatch, tmp_path):
     def _explode(*_a, **_kw):
         raise RuntimeError("get_client should not be called when --space-id is provided")
 
-    monkeypatch.setattr("ax_cli.commands.reminders.get_client", _explode)
+    monkeypatch.setattr("ax_cli.commands.reminders.get_authoring_client", _explode)
     monkeypatch.setattr("ax_cli.commands.reminders.resolve_space_id", _explode)
 
     result = runner.invoke(
@@ -62,7 +62,7 @@ class _ConnectErrorClient:
 
 
 def _install_offline_runtime(monkeypatch, client):
-    monkeypatch.setattr("ax_cli.commands.reminders.get_client", lambda: client)
+    monkeypatch.setattr("ax_cli.commands.reminders.get_authoring_client", lambda: client)
     monkeypatch.setattr(
         "ax_cli.commands.reminders.resolve_space_id",
         lambda _client, *, explicit=None: explicit or "space-abc",

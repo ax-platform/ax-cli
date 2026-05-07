@@ -195,7 +195,7 @@ def test_handoff_loop_repeats_until_completion_promise(monkeypatch):
         {"id": "reply-2", "content": "<promise>DONE</promise>", "display_name": "demo-agent"},
     ]
 
-    monkeypatch.setattr("ax_cli.commands.handoff.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.handoff.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr("ax_cli.commands.handoff.uuid.uuid4", lambda: type("UUID", (), {"hex": "abc123456789"})())
@@ -250,7 +250,7 @@ def test_handoff_loop_stops_at_max_rounds_without_promise(monkeypatch):
         {"id": "reply-2", "content": "round two", "display_name": "demo-agent"},
     ]
 
-    monkeypatch.setattr("ax_cli.commands.handoff.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.handoff.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr("ax_cli.commands.handoff._wait_for_handoff_reply", lambda *args, **kwargs: replies.pop(0))
@@ -287,7 +287,7 @@ def test_handoff_loop_timeout_after_progress_uses_loop_timeout_status(monkeypatc
 
     replies = [{"id": "reply-1", "content": "round one", "display_name": "demo-agent"}, None]
 
-    monkeypatch.setattr("ax_cli.commands.handoff.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.handoff.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr("ax_cli.commands.handoff._wait_for_handoff_reply", lambda *args, **kwargs: replies.pop(0))
@@ -334,7 +334,7 @@ def test_handoff_default_adaptive_wait_queues_when_probe_times_out(monkeypatch):
         wait_calls.append(kwargs)
         return None
 
-    monkeypatch.setattr("ax_cli.commands.handoff.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.handoff.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr("ax_cli.commands.handoff._wait_for_handoff_reply", fake_wait)
@@ -376,7 +376,7 @@ def test_handoff_default_adaptive_wait_continues_when_probe_replies(monkeypatch)
         {"id": "handoff-reply", "content": "reviewed", "display_name": "demo-agent"},
     ]
 
-    monkeypatch.setattr("ax_cli.commands.handoff.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.handoff.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr("ax_cli.commands.handoff._wait_for_handoff_reply", lambda *args, **kwargs: replies.pop(0))
@@ -407,7 +407,7 @@ def test_handoff_no_adaptive_wait_skips_contact_probe(monkeypatch):
             calls["messages"].append({"space_id": space_id, "content": content, "parent_id": parent_id})
             return {"message": {"id": message_id}}
 
-    monkeypatch.setattr("ax_cli.commands.handoff.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.handoff.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_space_id", lambda client, explicit=None: "space-1")
     monkeypatch.setattr("ax_cli.commands.handoff.resolve_agent_name", lambda client=None: "ChatGPT")
     monkeypatch.setattr(

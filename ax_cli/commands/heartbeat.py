@@ -35,7 +35,7 @@ from typing import Any, Optional
 import httpx
 import typer
 
-from ..config import get_client, resolve_agent_name
+from ..config import get_authoring_client, resolve_agent_name
 from ..output import JSON_OPTION, console, print_json, print_table
 
 app = typer.Typer(name="heartbeat", help="Local-first agent heartbeat primitive", no_args_is_help=True)
@@ -230,7 +230,7 @@ def send(
 
     if not skip_push:
         try:
-            client = get_client()
+            client = get_authoring_client()
             try:
                 store["agent_name"] = resolve_agent_name(client=client)
             except Exception:
@@ -323,7 +323,7 @@ def list_history(
 def _probe_online(timeout: float = 2.0) -> tuple[bool, str | None]:
     """Cheap online probe by attempting a real heartbeat."""
     try:
-        client = get_client()
+        client = get_authoring_client()
     except Exception as exc:
         return False, f"client unavailable: {exc}"
     base = getattr(client, "_base_url", None) or getattr(client, "base_url", None)
@@ -431,7 +431,7 @@ def push(
 
     latest = unpushed[-1]
     try:
-        client = get_client()
+        client = get_authoring_client()
     except Exception as exc:
         if as_json:
             print_json({"file": str(path), "pushed": [], "error": f"client unavailable: {exc}"})
@@ -496,7 +496,7 @@ def watch(
     while True:
         tick += 1
         try:
-            client = get_client()
+            client = get_authoring_client()
             agent_name = None
             try:
                 agent_name = resolve_agent_name(client=client)

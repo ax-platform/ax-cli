@@ -20,6 +20,7 @@ class _FakeClient:
 
     def list_agents_availability(self, **_kw):
         if self._raise_404:
+
             class _Resp:
                 status_code = 404
                 text = "not found"
@@ -32,15 +33,19 @@ class _FakeClient:
 
 
 def _install(monkeypatch, client):
-    monkeypatch.setattr("ax_cli.commands.agents.get_client", lambda: client)
+    monkeypatch.setattr("ax_cli.commands.agents.get_authoring_client", lambda: client)
     monkeypatch.setattr("ax_cli.commands.agents.resolve_space_id", lambda c, explicit=None: explicit or "space-abc")
 
 
 def test_list_default_path_uses_legacy_endpoint(monkeypatch):
     """No --availability: hits /agents and renders the legacy 3-column table."""
-    fake = _FakeClient(list_payload={"agents": [
-        {"id": "a-1", "name": "frontend_sentinel", "status": "active"},
-    ]})
+    fake = _FakeClient(
+        list_payload={
+            "agents": [
+                {"id": "a-1", "name": "frontend_sentinel", "status": "active"},
+            ]
+        }
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "list", "--json"])
@@ -51,34 +56,36 @@ def test_list_default_path_uses_legacy_endpoint(monkeypatch):
 
 def test_list_availability_renders_v4_fields(monkeypatch):
     """--availability: hits /availability, unwraps agent_state envelopes, renders v4 columns."""
-    fake = _FakeClient(availability_payload=[
-        {
-            "agent_state": {
-                "agent_id": "a-1",
-                "name": "frontend_sentinel",
-                "badge_state": "live",
-                "badge_label": "Live",
-                "connection_path": "gateway_managed",
-                "expected_response": "immediate",
-                "confidence": "high",
-                "last_seen_at": "2026-04-25T17:00:00Z",
+    fake = _FakeClient(
+        availability_payload=[
+            {
+                "agent_state": {
+                    "agent_id": "a-1",
+                    "name": "frontend_sentinel",
+                    "badge_state": "live",
+                    "badge_label": "Live",
+                    "connection_path": "gateway_managed",
+                    "expected_response": "immediate",
+                    "confidence": "high",
+                    "last_seen_at": "2026-04-25T17:00:00Z",
+                },
+                "raw_presence": {"sources": ["gateway"]},
+                "control": {"enabled": True},
             },
-            "raw_presence": {"sources": ["gateway"]},
-            "control": {"enabled": True},
-        },
-        {
-            "agent_state": {
-                "agent_id": "a-2",
-                "name": "backend_sentinel",
-                "badge_state": "routable_delayed",
-                "badge_label": "Warming",
-                "connection_path": "gateway_managed",
-                "expected_response": "warming",
-                "confidence": "medium",
-                "last_seen_at": "2026-04-25T16:55:00Z",
+            {
+                "agent_state": {
+                    "agent_id": "a-2",
+                    "name": "backend_sentinel",
+                    "badge_state": "routable_delayed",
+                    "badge_label": "Warming",
+                    "connection_path": "gateway_managed",
+                    "expected_response": "warming",
+                    "confidence": "medium",
+                    "last_seen_at": "2026-04-25T16:55:00Z",
+                },
             },
-        },
-    ])
+        ]
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "list", "--availability", "--json"])
@@ -95,30 +102,32 @@ def test_list_availability_renders_v4_fields(monkeypatch):
 
 def test_list_availability_human_output_renders_columns(monkeypatch):
     """Human-readable --availability output includes badge + path columns."""
-    fake = _FakeClient(availability_payload=[
-        {
-            "agent_state": {
-                "agent_id": "a-1",
-                "name": "night_owl",
-                "badge_state": "live",
-                "badge_label": "Live",
-                "connection_path": "gateway_managed",
-                "expected_response": "immediate",
-                "confidence": "high",
+    fake = _FakeClient(
+        availability_payload=[
+            {
+                "agent_state": {
+                    "agent_id": "a-1",
+                    "name": "night_owl",
+                    "badge_state": "live",
+                    "badge_label": "Live",
+                    "connection_path": "gateway_managed",
+                    "expected_response": "immediate",
+                    "confidence": "high",
+                },
             },
-        },
-        {
-            "agent_state": {
-                "agent_id": "a-2",
-                "name": "ax_concierge",
-                "badge_state": "routable_delayed",
-                "badge_label": "Dispatch",
-                "connection_path": "mcp_only",
-                "expected_response": "dispatch_delayed",
-                "confidence": "medium",
+            {
+                "agent_state": {
+                    "agent_id": "a-2",
+                    "name": "ax_concierge",
+                    "badge_state": "routable_delayed",
+                    "badge_label": "Dispatch",
+                    "connection_path": "mcp_only",
+                    "expected_response": "dispatch_delayed",
+                    "confidence": "medium",
+                },
             },
-        },
-    ])
+        ]
+    )
     _install(monkeypatch, fake)
 
     result = runner.invoke(app, ["agents", "list", "--availability"])

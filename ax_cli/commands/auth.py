@@ -15,7 +15,7 @@ from ..config import (
     _save_config,
     _save_user_config,
     diagnose_auth_config,
-    get_client,
+    get_authoring_client,
     resolve_agent_name,
     resolve_gateway_config,
     resolve_token,
@@ -402,7 +402,7 @@ def whoami(as_json: bool = JSON_OPTION):
                 )
         return
 
-    client = get_client()
+    client = get_authoring_client()
     try:
         data = client.whoami()
     except httpx.HTTPStatusError as e:

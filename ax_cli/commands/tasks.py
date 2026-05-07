@@ -7,7 +7,7 @@ from uuid import UUID
 import httpx
 import typer
 
-from ..config import get_client, resolve_gateway_config, resolve_space_id
+from ..config import get_authoring_client, resolve_gateway_config, resolve_space_id
 from ..output import JSON_OPTION, console, handle_error, mention_prefix, print_json, print_kv, print_table
 from .messages import _gateway_local_call, _gateway_local_connect
 
@@ -312,7 +312,7 @@ def create(
                 console.print("[yellow]Note:[/yellow] Gateway task notifications are not wired yet; task was created.")
         return
 
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space)
     space_info = _space_summary(client, sid)
     assignee_id = _resolve_assignee_id(client, assign_to, space_id=sid)
@@ -394,7 +394,7 @@ def list_tasks(
             )
         return
 
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space)
     space_info = _space_summary(client, sid)
     try:
@@ -431,7 +431,7 @@ def get(
             args={"task_id": task_id},
         )
     else:
-        client = get_client()
+        client = get_authoring_client()
         try:
             data = client.get_task(task_id)
         except httpx.HTTPStatusError as e:
@@ -478,7 +478,7 @@ def update(
             args={"task_id": task_id, **fields},
         )
     else:
-        client = get_client()
+        client = get_authoring_client()
         if assign_to is not None:
             fields["assignee_id"] = _resolve_update_assignee_id(client, task_id, assign_to)
         try:

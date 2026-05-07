@@ -20,7 +20,7 @@ from ..config import (
     _normalize_user_env,
     _user_config_path,
     diagnose_auth_config,
-    get_client,
+    get_authoring_client,
     resolve_space_id,
 )
 from ..context_keys import build_upload_context_key
@@ -371,7 +371,7 @@ def _run_widget_fixtures(
     include_media_message: bool,
     evidence_file: str | None,
 ) -> dict[str, Any]:
-    client = get_client()
+    client = get_authoring_client()
     sid = resolve_space_id(client, explicit=space_id)
     whoami_payload = client.whoami()
     resolved_run_id = run_id or f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
@@ -678,7 +678,7 @@ def _run_contracts(
         selected_env = str(env_cfg.get("environment") or env_name)
         sid = _resolve_env_space_id(client, env_cfg, explicit=space_id)
     else:
-        client = get_client()
+        client = get_authoring_client()
         sid = resolve_space_id(client, explicit=space_id)
     checks: list[dict[str, Any]] = []
 

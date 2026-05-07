@@ -30,7 +30,7 @@ def test_tasks_create_assign_accepts_agent_handle(monkeypatch):
             }
             return {"task": {"id": "task-1", "title": title, "assignee_id": assignee_id, "priority": priority}}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -59,7 +59,7 @@ def test_tasks_create_accepts_space_slug(monkeypatch):
             calls["create_task"] = {"space_id": space_id, "title": title}
             return {"task": {"id": "task-1", "title": title, "priority": priority}}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
 
     result = runner.invoke(
         app,
@@ -144,7 +144,7 @@ def test_tasks_create_human_output_includes_resolved_space(monkeypatch):
         def create_task(self, space_id, title, *, description=None, priority="medium", assignee_id=None):
             return {"task": {"id": "task-1", "title": title, "priority": priority}}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
 
     result = runner.invoke(
         app,
@@ -168,7 +168,7 @@ def test_tasks_create_assign_to_accepts_uuid_without_agent_lookup(monkeypatch):
             calls["create_task"] = {"assignee_id": assignee_id}
             return {"task": {"id": "task-1", "title": title, "assignee_id": assignee_id}}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -186,7 +186,7 @@ def test_tasks_create_assign_unknown_handle_fails(monkeypatch):
         def list_agents(self, *, space_id=None, limit=None):
             return {"agents": [{"id": "agent-456", "name": "cipher"}]}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -214,7 +214,7 @@ def test_tasks_create_mention_prefixes_notification(monkeypatch):
             }
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -253,7 +253,7 @@ def test_tasks_create_assign_handle_mentions_assignee_by_default(monkeypatch):
             }
             return {"id": "msg-1"}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_space_id", lambda client, explicit=None: "space-1")
 
     result = runner.invoke(
@@ -287,7 +287,7 @@ def test_tasks_update_assign_to_accepts_uuid_without_lookup(monkeypatch):
             calls["update_task"] = {"task_id": task_id, "fields": fields}
             return {"id": task_id, **fields}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_gateway_config", lambda: {})
 
     result = runner.invoke(
@@ -318,7 +318,7 @@ def test_tasks_update_assign_to_resolves_handle_via_task_space(monkeypatch):
             calls["update_task"] = {"task_id": task_id, "fields": fields}
             return {"id": task_id, **fields}
 
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: FakeClient())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: FakeClient())
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_gateway_config", lambda: {})
 
     result = runner.invoke(
@@ -357,7 +357,7 @@ def test_tasks_update_assign_to_rejected_on_gateway_path(monkeypatch):
 
 def test_tasks_update_requires_at_least_one_field(monkeypatch):
     monkeypatch.setattr("ax_cli.commands.tasks.resolve_gateway_config", lambda: {})
-    monkeypatch.setattr("ax_cli.commands.tasks.get_client", lambda: object())
+    monkeypatch.setattr("ax_cli.commands.tasks.get_authoring_client", lambda: object())
 
     result = runner.invoke(app, ["tasks", "update", "task-42"])
 
