@@ -208,7 +208,9 @@ def test_user_login_env_stores_named_login_and_marks_active(monkeypatch, write_c
     monkeypatch.setattr("ax_cli.token_cache.TokenExchanger", FakeTokenExchanger)
     monkeypatch.setattr("ax_cli.client.AxClient", FakeAxClient)
 
-    result = runner.invoke(app, ["login", "--token", "axp_u_dev.secret", "--url", "https://dev.paxai.app", "--env", "dev"])
+    result = runner.invoke(
+        app, ["login", "--token", "axp_u_dev.secret", "--url", "https://dev.paxai.app", "--env", "dev"]
+    )
 
     assert result.exit_code == 0
     global_dir = config_dir.parent / "_global_config"
@@ -294,6 +296,101 @@ def test_auth_whoami_reports_runtime_config(monkeypatch, tmp_path):
     payload = json.loads(result.output)
     assert payload["runtime_config"] == str(runtime_config)
     assert payload["resolved_agent"] == "codex"
+
+
+def test_auth_whoami_does_not_crash_on_multi_space_user(monkeypatch):
+    """Regression for ax-cli-dev task f664c903 / Heath onboarding bug.
+
+    A fresh-laptop user with >1 space (e.g. logged into next.paxai.app) used
+    to fail their first `ax auth whoami` because the unbound-agent fallback
+    called `resolve_space_id`, which raises `typer.Exit` (a `RuntimeError`
+    subclass, not `SystemExit`) when more than one space exists. The
+    surrounding `except SystemExit:` block was therefore dead code and the
+    command exited 1 with `Error: Multiple spaces found.`
+
+    Identity is token-bound and space-independent; whoami must report the
+    user's id/email/role even when space resolution is ambiguous.
+    """
+
+    class FakeClient:
+        def whoami(self):
+            return {"id": "user-1", "email": "user@example.com", "bound_agent": None}
+
+        def list_spaces(self):
+            return {
+                "spaces": [
+                    {"id": "space-a", "name": "Space A"},
+                    {"id": "space-b", "name": "Space B"},
+                ]
+            }
+
+    monkeypatch.setattr(auth, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(auth, "resolve_agent_name", lambda *, client: None)
+    monkeypatch.setattr(auth, "resolve_gateway_config", lambda: {})
+    monkeypatch.setattr(auth, "_local_config_dir", lambda: None)
+    # Don't let env or config cascade short-circuit the multi-space fallback.
+    monkeypatch.delenv("AX_SPACE_ID", raising=False)
+    monkeypatch.delenv("AX_SPACE", raising=False)
+    monkeypatch.setattr(auth, "_load_config", lambda: {})
+
+    result = runner.invoke(app, ["auth", "whoami", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["id"] == "user-1"
+    assert payload["email"] == "user@example.com"
+    assert payload["resolved_space_id"] == "unresolved (set AX_SPACE_ID or use --space-id)"
+    # The bug printed `Error: Multiple spaces found.` on stderr before exiting.
+    assert "Multiple spaces found" not in result.output
+
+
+def test_auth_whoami_resolves_single_space_for_unbound_user(monkeypatch):
+    """Best-effort: when the user has exactly one space we still surface its id."""
+
+    class FakeClient:
+        def whoami(self):
+            return {"id": "user-1", "bound_agent": None}
+
+        def list_spaces(self):
+            return {"spaces": [{"id": "the-only-space", "name": "Solo"}]}
+
+    monkeypatch.setattr(auth, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(auth, "resolve_agent_name", lambda *, client: None)
+    monkeypatch.setattr(auth, "resolve_gateway_config", lambda: {})
+    monkeypatch.setattr(auth, "_local_config_dir", lambda: None)
+    monkeypatch.delenv("AX_SPACE_ID", raising=False)
+    monkeypatch.delenv("AX_SPACE", raising=False)
+    monkeypatch.setattr(auth, "_load_config", lambda: {})
+
+    result = runner.invoke(app, ["auth", "whoami", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["resolved_space_id"] == "the-only-space"
+
+
+def test_auth_whoami_uses_explicit_space_from_env(monkeypatch):
+    """Env-configured space must short-circuit the list_spaces probe entirely."""
+
+    class FakeClient:
+        def whoami(self):
+            return {"id": "user-1", "bound_agent": None}
+
+        def list_spaces(self):
+            raise AssertionError("list_spaces should not be called when AX_SPACE_ID is set")
+
+    monkeypatch.setattr(auth, "get_client", lambda: FakeClient())
+    monkeypatch.setattr(auth, "resolve_agent_name", lambda *, client: None)
+    monkeypatch.setattr(auth, "resolve_gateway_config", lambda: {})
+    monkeypatch.setattr(auth, "_local_config_dir", lambda: None)
+    monkeypatch.setenv("AX_SPACE_ID", "env-pinned-space")
+    monkeypatch.setattr(auth, "_load_config", lambda: {})
+
+    result = runner.invoke(app, ["auth", "whoami", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["resolved_space_id"] == "env-pinned-space"
 
 
 def test_auth_exchange_without_token_points_agents_to_gateway(monkeypatch, config_dir):
