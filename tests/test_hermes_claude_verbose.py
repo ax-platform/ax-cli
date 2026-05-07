@@ -13,8 +13,8 @@ from __future__ import annotations
 import inspect
 from types import SimpleNamespace
 
-from ax_cli.runtimes.hermes.sentinel import _build_claude_cmd
 from ax_cli.runtimes.hermes.runtimes.claude_cli import ClaudeCLIRuntime
+from ax_cli.runtimes.hermes.sentinel import _build_claude_cmd
 
 
 def test_hermes_sentinel_build_claude_cmd_includes_verbose() -> None:
