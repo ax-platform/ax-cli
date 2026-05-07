@@ -73,6 +73,7 @@
     .system-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); font-family: var(--mono); font-size: 11px; color: var(--muted); cursor: pointer; transition: border-color 120ms ease, color 120ms ease; }
     .system-toggle:hover { border-color: var(--line-strong); color: var(--text); }
     .system-toggle.on { border-color: rgba(94,234,212,0.4); color: var(--accent); background: rgba(94,234,212,0.08); }
+    .system-toggle[hidden] { display: none; }
     .chip.system { color: var(--muted); border-color: var(--line); background: rgba(255,255,255,0.04); }
 
     .hero { display: grid; grid-template-columns: 1fr; gap: 18px; margin-bottom: 30px; }
@@ -1486,14 +1487,16 @@
 
     function updateRow(row, agent) {
       const status = friendlyStatus(agent);
-      const dot = row.children[0];
-      const agentEl = row.children[1];
+      // Row children: [0] cleanup-cell (always present, hidden in default mode),
+      // [1] dot, [2] row-agent, [3] row-space, [4] row-last-seen, [5] row-action.
+      const dot = row.children[1];
+      const agentEl = row.children[2];
       const typeMarkEl = agentEl.children[0];
       const nameEl = agentEl.querySelector(".row-name");
       const typeLabelEl = agentEl.querySelector(".row-type-label");
-      const spaceEl = row.children[2];
-      const lastSeenEl = row.children[3];
-      const actionEl = row.children[4];
+      const spaceEl = row.children[3];
+      const lastSeenEl = row.children[4];
+      const actionEl = row.children[5];
 
       if (isMailboxRuntime(agent)) {
         renderMailboxIndicator(dot, agent, status);
