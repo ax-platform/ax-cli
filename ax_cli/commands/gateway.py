@@ -1463,6 +1463,127 @@ def _restore_hidden_managed_agents(names: list[str]) -> dict:
     }
 
 
+def _read_recovery_evidence(name: str) -> dict | None:
+    """Reconstruct a minimal registry row for an agent from local evidence.
+
+    Used when a managed_agent_added activity event was recorded but the
+    registry row was lost (pre-race-fix damage). Reads from three sources,
+    all verifiable:
+
+    - Activity log: most recent managed_agent_added for ``name`` →
+      agent_id, asset_id, install_id, gateway_id, runtime_type,
+      transport, space_id, token_file, credential_source, ts.
+    - Token directory: ``~/.ax/gateway/agents/<name>/token`` must exist
+      (we don't fabricate credentials).
+    - Workdir ``.ax/AGENT_CONTEXT.md`` if present, for the workdir hint.
+
+    Returns None if no managed_agent_added event is recorded or the
+    token file is missing — both required for a safe recovery.
+    """
+    target_event: dict | None = None
+    activity_path = activity_log_path()
+    try:
+        with activity_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if ev.get("agent_name") != name or ev.get("event") != "managed_agent_added":
+                    continue
+                target_event = ev  # later writes win — pick the most recent
+    except OSError:
+        return None
+    if not isinstance(target_event, dict):
+        return None
+    token_file = str(target_event.get("token_file") or "").strip()
+    if not token_file or not Path(token_file).is_file():
+        return None
+    return target_event
+
+
+def _recover_managed_agents_from_evidence(names: list[str]) -> dict:
+    """Recover registry rows for agents present locally (token + activity)
+    but absent from registry.json (pre-race-fix row loss).
+
+    Refuses to recover agents that are already in the registry — use
+    archive/restore or hide/unhide for state changes on existing rows.
+    The reconstructed row is minimal: enough fields for the daemon to
+    pick it up on next reconcile and hydrate the rest from upstream.
+    """
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        n = str(raw or "").strip()
+        if not n or n.lower() in seen:
+            continue
+        normalized.append(n)
+        seen.add(n.lower())
+    if not normalized:
+        raise ValueError("Choose at least one agent to recover.")
+
+    registry = load_gateway_registry()
+    recovered: list[dict] = []
+    already_present: list[str] = []
+    no_evidence: list[str] = []
+
+    for name in normalized:
+        if find_agent_entry(registry, name) is not None:
+            already_present.append(name)
+            continue
+        evidence = _read_recovery_evidence(name)
+        if evidence is None:
+            no_evidence.append(name)
+            continue
+        # Build minimal row — sourced fields only.
+        entry: dict = {
+            "name": name,
+            "agent_id": str(evidence.get("agent_id") or "").strip(),
+            "asset_id": str(evidence.get("asset_id") or evidence.get("agent_id") or "").strip(),
+            "install_id": str(evidence.get("install_id") or "").strip(),
+            "gateway_id": str(evidence.get("gateway_id") or "").strip(),
+            "runtime_type": str(evidence.get("runtime_type") or "").strip(),
+            "transport": str(evidence.get("transport") or "gateway").strip(),
+            "credential_source": str(evidence.get("credential_source") or "gateway").strip(),
+            "token_file": str(evidence.get("token_file") or "").strip(),
+            "space_id": str(evidence.get("space_id") or "").strip(),
+            "added_at": str(evidence.get("ts") or "").strip(),
+            "lifecycle_phase": "active",
+            "desired_state": "stopped",  # safe default — operator restarts deliberately
+            "drift_reason": "registry_row_recovered_from_evidence",
+        }
+        # Pick a sensible template_id from runtime_type; daemon hydrates from
+        # upstream on reconcile.
+        rt = entry["runtime_type"]
+        if rt == "claude_code_channel":
+            entry["template_id"] = "claude_code_channel"
+            entry["template_label"] = "Claude Code Channel"
+        elif rt == "hermes_sentinel":
+            entry["template_id"] = "hermes"
+            entry["template_label"] = "Hermes"
+        elif rt == "inbox":
+            entry["template_id"] = "pass_through"
+            entry["template_label"] = "Pass-through"
+        registry.setdefault("agents", []).append(entry)
+        recovered.append(entry)
+
+    save_gateway_registry(registry)
+    for entry in recovered:
+        record_gateway_activity(
+            "managed_agent_recovered",
+            entry=entry,
+            operator_action=True,
+            recovery_source="local_evidence",
+        )
+
+    return {
+        "count": len(recovered),
+        "already_present": already_present,
+        "no_evidence": no_evidence,
+        "recovered": [annotate_runtime_health(entry, registry=registry) for entry in recovered],
+    }
+
+
 def _build_session_client_silent() -> AxClient | None:
     """Build a user-PAT session client without raising. Returns None when
     the gateway is not logged in or the session token is missing/invalid.
@@ -5034,6 +5155,22 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                     payload = _restore_hidden_managed_agents([str(name or "").strip() for name in raw_names])
                     _write_json_response(self, payload)
                     return
+                if parsed.path == "/api/agents/recover":
+                    raw_names = body.get("names")
+                    if not isinstance(raw_names, list):
+                        _write_json_response(
+                            self,
+                            {"error": "names must be a list of managed agent names"},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    try:
+                        payload = _recover_managed_agents_from_evidence([str(name or "").strip() for name in raw_names])
+                    except ValueError as exc:
+                        _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    _write_json_response(self, payload)
+                    return
                 if parsed.path == "/local/connect":
                     agent_name = str(body.get("agent_name") or body.get("name") or "").strip()
                     registry_ref = str(
@@ -7429,6 +7566,46 @@ def restore_agent(
     for name in not_found:
         err_console.print(f"[red]Managed agent not found:[/red] {name}")
     if not restored and not_found:
+        raise typer.Exit(1)
+
+
+@agents_app.command("recover")
+def recover_agents(
+    names: list[str] = typer.Argument(..., help="One or more agent names whose registry rows were lost"),
+    as_json: bool = JSON_OPTION,
+):
+    """Recover registry rows from local evidence (token + activity log).
+
+    Use when a managed_agent_added event was recorded but the registry
+    row is missing — typically pre-race-fix damage. Reads the most
+    recent managed_agent_added event for each name from the activity
+    log, confirms the token file exists, and inserts a minimal row
+    with the verified fields. The daemon hydrates the rest from
+    upstream on the next reconcile pass.
+
+    Refuses to recover agents already present in the registry. Refuses
+    to recover agents lacking either the activity event or the token
+    file (we don't fabricate credentials).
+    """
+    try:
+        result = _recover_managed_agents_from_evidence(list(names))
+    except ValueError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    if as_json:
+        print_json(result)
+        if result["count"] == 0:
+            raise typer.Exit(1)
+        return
+    for entry in result.get("recovered", []):
+        err_console.print(f"[green]Recovered:[/green] @{entry.get('name')} (agent_id={entry.get('agent_id')})")
+    for name in result.get("already_present", []):
+        err_console.print(f"[yellow]Already present:[/yellow] @{name} (no recovery needed)")
+    for name in result.get("no_evidence", []):
+        err_console.print(
+            f"[red]No recovery evidence:[/red] @{name} (need both managed_agent_added activity + token file)"
+        )
+    if result["count"] == 0 and (result.get("no_evidence") or not result.get("already_present")):
         raise typer.Exit(1)
 
 

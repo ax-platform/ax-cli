@@ -5214,6 +5214,102 @@ def test_operator_cleanup_hides_selected_agents(monkeypatch, tmp_path):
     assert [event["event"] for event in recent].count("managed_agent_hidden") == 2
 
 
+def test_recover_managed_agents_from_evidence_restores_lost_row(monkeypatch, tmp_path):
+    """Pre-race-fix damage recovery: when a managed_agent_added activity
+    event exists locally but the registry row is missing (silent race
+    clobber), _recover_managed_agents_from_evidence reconstructs a
+    minimal row using only verified evidence — never fabricating
+    credentials.
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    # Pre-condition: registry empty, but token file + managed_agent_added
+    # event exist locally — exactly the cc-backend / widget_smith state.
+    gateway_core.save_gateway_registry({"agents": []})
+
+    token_dir = gateway_core.agent_dir("ghost-agent")
+    token_dir.mkdir(parents=True, exist_ok=True)
+    (token_dir / "token").write_text("axp_a_ghost.evidence", encoding="utf-8")
+
+    gateway_core.record_gateway_activity(
+        "managed_agent_added",
+        agent_name="ghost-agent",
+        agent_id="agent-ghost-id",
+        asset_id="agent-ghost-id",
+        install_id="install-ghost",
+        gateway_id="gateway-host",
+        runtime_type="claude_code_channel",
+        transport="gateway",
+        space_id="49afd277-78d2-4a32-9858-3594cda684af",
+        token_file=str(token_dir / "token"),
+        credential_source="gateway",
+    )
+
+    payload = gateway_cmd._recover_managed_agents_from_evidence(["ghost-agent", "missing-no-evidence"])
+
+    assert payload["count"] == 1
+    assert payload["already_present"] == []
+    assert payload["no_evidence"] == ["missing-no-evidence"]
+
+    stored = gateway_core.load_gateway_registry()
+    row = next((a for a in stored["agents"] if a.get("name") == "ghost-agent"), None)
+    assert row is not None, "recovered row missing from registry"
+    assert row["agent_id"] == "agent-ghost-id"
+    assert row["install_id"] == "install-ghost"
+    assert row["runtime_type"] == "claude_code_channel"
+    assert row["template_id"] == "claude_code_channel"
+    assert row["space_id"] == "49afd277-78d2-4a32-9858-3594cda684af"
+    assert row["token_file"] == str(token_dir / "token")
+    assert row["lifecycle_phase"] == "active"
+    assert row["desired_state"] == "stopped"  # safe default — operator restarts deliberately
+    assert row["drift_reason"] == "registry_row_recovered_from_evidence"
+
+    # managed_agent_recovered activity event was recorded.
+    recent = gateway_core.load_recent_gateway_activity()
+    events = [e for e in recent if e.get("event") == "managed_agent_recovered"]
+    assert len(events) == 1
+    assert events[0].get("agent_name") == "ghost-agent"
+
+
+def test_recover_managed_agents_refuses_when_token_missing(monkeypatch, tmp_path):
+    """Recovery requires BOTH the activity event AND the token file.
+    Missing token → no recovery (we don't fabricate credentials).
+    """
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    gateway_core.save_gateway_registry({"agents": []})
+
+    # Activity event exists but no token file.
+    gateway_core.record_gateway_activity(
+        "managed_agent_added",
+        agent_name="no-token-agent",
+        agent_id="agent-id",
+        asset_id="agent-id",
+        install_id="install-id",
+        gateway_id="gateway-host",
+        runtime_type="echo",
+        transport="gateway",
+        space_id="space-1",
+        token_file="/tmp/nonexistent-recovery-token-path",
+        credential_source="gateway",
+    )
+
+    payload = gateway_cmd._recover_managed_agents_from_evidence(["no-token-agent"])
+    assert payload["count"] == 0
+    assert payload["no_evidence"] == ["no-token-agent"]
+
+
+def test_recover_managed_agents_skips_already_present_rows(monkeypatch, tmp_path):
+    """Idempotent: if a row already exists, recovery is a no-op for it."""
+    _isolate_gateway_paths(monkeypatch, tmp_path)
+    gateway_core.save_gateway_registry(
+        {"agents": [{"name": "already-there", "agent_id": "existing", "template_id": "echo"}]}
+    )
+
+    payload = gateway_cmd._recover_managed_agents_from_evidence(["already-there"])
+    assert payload["count"] == 0
+    assert payload["already_present"] == ["already-there"]
+    assert payload["no_evidence"] == []
+
+
 def test_operator_cleanup_restore_unhides_selected_agents(monkeypatch, tmp_path):
     """Symmetric to hide: _restore_hidden_managed_agents clears the hidden
     bookkeeping, restores desired_state from the captured before-hide value,
